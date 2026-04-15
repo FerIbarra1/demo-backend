@@ -17,7 +17,7 @@ async function bootstrap() {
   // CORS
   app.enableCors({
     origin: process.env.NODE_ENV === 'production'
-      ? ['https://tu-dominio.com']
+      ? ['https://demo-frontend-git-main-feribarra1s-projects.vercel.app']
       : true,
     credentials: true,
   });
