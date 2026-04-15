@@ -1,0 +1,371 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== ENUMS ====================
+
+enum RolUsuario {
+  CLIENTE
+  BODEGA
+  CAJERO
+  MOSTRADOR
+  ADMIN
+}
+
+enum EstadoPedido {
+  PENDIENTE
+  EN_BODEGA
+  LISTO_PARA_ENTREGA
+  ENTREGADO
+  CANCELADO
+}
+
+enum TipoPago {
+  EFECTIVO
+  TRANSFERENCIA
+  DEPOSITO
+  TARJETA
+}
+
+enum EstadoPago {
+  PENDIENTE
+  VERIFICADO
+  RECHAZADO
+}
+
+// ==================== ENTIDADES CORE ====================
+
+model Tienda {
+  id        Int      @id @default(autoincrement())
+  nombre    String   @db.VarChar(100)
+  direccion String   @db.VarChar(255)
+  ciudad    String   @db.VarChar(50)
+  estado    String   @db.VarChar(50)
+  telefono  String?  @db.VarChar(20)
+  email     String?  @db.VarChar(100)
+  activa    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relaciones
+  usuarios        Usuario[]
+  productosTienda ProductoTienda[]
+  precios         Precio[]
+  preciosCO       PrecioCO[]
+  pedidos         Pedido[]
+  stock           Stock[]
+
+  @@map("tiendas")
+}
+
+model Usuario {
+  id            Int        @id @default(autoincrement())
+  email         String     @unique @db.VarChar(100)
+  password      String     @db.VarChar(255)
+  nombre        String     @db.VarChar(100)
+  apellido      String?    @db.VarChar(100)
+  telefono      String?    @db.VarChar(20)
+  rol           RolUsuario @default(CLIENTE)
+  activo        Boolean    @default(true)
+  tiendaId      Int?       @map("tienda_id")
+  emailVerified Boolean    @default(false) @map("email_verified")
+  lastLogin     DateTime?  @map("last_login")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+
+  // Relaciones
+  tienda      Tienda?        @relation(fields: [tiendaId], references: [id])
+  pedidos     Pedido[]
+  sesiones    Sesion[]
+  actividades LogActividad[]
+
+  @@map("usuarios")
+}
+
+model Sesion {
+  id           String   @id @default(uuid())
+  usuarioId    Int      @map("usuario_id")
+  token        String   @unique @db.VarChar(500)
+  refreshToken String?  @map("refresh_token") @db.VarChar(500)
+  deviceInfo   String?  @map("device_info") @db.VarChar(255)
+  ipAddress    String?  @map("ip_address") @db.VarChar(45)
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relaciones
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@map("sesiones")
+}
+
+// ==================== CATÁLOGO ====================
+
+model Producto {
+  id              Int      @id @default(autoincrement())
+  codigo          String   @unique @db.VarChar(50)
+  nombre          String   @db.VarChar(150)
+  descripcion     String?  @db.Text
+  imagenPrincipal String?  @map("imagen_principal") @db.VarChar(255)
+  imagenes        String[]
+  activo          Boolean  @default(true)
+  categoria       String?  @db.VarChar(50)
+  subcategoria    String?  @db.VarChar(50)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Relaciones
+  productosTienda ProductoTienda[]
+  precios         Precio[]
+  preciosCO       PrecioCO[]
+  itemsPedido     ItemPedido[]
+
+  @@map("productos")
+}
+
+model ProductoTienda {
+  id         Int     @id @default(autoincrement())
+  productoId Int     @map("producto_id")
+  tiendaId   Int     @map("tienda_id")
+  visible    Boolean @default(true)
+  destacado  Boolean @default(false)
+  orden      Int     @default(0)
+
+  // Relaciones
+  producto Producto @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  tienda   Tienda   @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+
+  @@unique([productoId, tiendaId])
+  @@map("productos_tienda")
+}
+
+// ==================== CORRIDAS Y TALLAS ====================
+
+model Corrida {
+  id          Int     @id @default(autoincrement())
+  nombre      String  @db.VarChar(50)
+  descripcion String? @db.VarChar(100)
+  activa      Boolean @default(true)
+
+  // Relaciones
+  tallas    Talla[]
+  preciosCO PrecioCO[]
+
+  @@map("corridas")
+}
+
+model Talla {
+  id        Int    @id @default(autoincrement())
+  corridaId Int    @map("corrida_id")
+  nombre    String @db.VarChar(10)
+  orden     Int    @default(0)
+
+  // Relaciones
+  corrida   Corrida    @relation(fields: [corridaId], references: [id], onDelete: Cascade)
+  preciosCO PrecioCO[]
+  stock     Stock[]
+
+  @@unique([corridaId, nombre])
+  @@map("tallas")
+}
+
+// ==================== COLORES ====================
+
+model Color {
+  id     Int     @id @default(autoincrement())
+  codigo String  @unique @db.VarChar(10)
+  nombre String  @db.VarChar(30)
+  hex    String? @db.VarChar(7)
+  activo Boolean @default(true)
+
+  // Relaciones
+  preciosCO PrecioCO[]
+  stock     Stock[]
+
+  @@map("colores")
+}
+
+// ==================== PRECIOS ====================
+
+model Precio {
+  id            Int       @id @default(autoincrement())
+  productoId    Int       @map("producto_id")
+  tiendaId      Int       @map("tienda_id")
+  precioBase    Decimal   @map("precio_base") @db.Decimal(10, 2)
+  precioOferta  Decimal?  @map("precio_oferta") @db.Decimal(10, 2)
+  activo        Boolean   @default(true)
+  vigenciaDesde DateTime? @map("vigencia_desde") @db.Date
+  vigenciaHasta DateTime? @map("vigencia_hasta") @db.Date
+
+  // Relaciones
+  producto Producto @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  tienda   Tienda   @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+
+  @@unique([productoId, tiendaId])
+  @@map("precios")
+}
+
+// PRECIOSCO - Precios específicos por talla/color con stock
+model PrecioCO {
+  id         Int     @id @default(autoincrement())
+  productoId Int     @map("producto_id")
+  tiendaId   Int     @map("tienda_id")
+  corridaId  Int     @map("corrida_id")
+  tallaId    Int     @map("talla_id")
+  colorId    Int     @map("color_id")
+  precio     Decimal @db.Decimal(10, 2)
+  sku        String? @unique @db.VarChar(50)
+
+  // Relaciones
+  producto    Producto     @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  tienda      Tienda       @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+  corrida     Corrida      @relation(fields: [corridaId], references: [id], onDelete: Cascade)
+  talla       Talla        @relation(fields: [tallaId], references: [id], onDelete: Cascade)
+  color       Color        @relation(fields: [colorId], references: [id], onDelete: Cascade)
+  stock       Stock?
+  itemsPedido ItemPedido[]
+
+  @@unique([productoId, tiendaId, corridaId, tallaId, colorId])
+  @@map("preciosco")
+}
+
+// ==================== STOCK ====================
+
+model Stock {
+  id                Int      @id @default(autoincrement())
+  precioCOId        Int      @unique @map("precioco_id")
+  tiendaId          Int      @map("tienda_id")
+  tallaId           Int      @map("talla_id")
+  colorId           Int      @map("color_id")
+  cantidad          Int      @default(0)
+  cantidadReservada Int      @default(0) @map("cantidad_reservada")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  // Relaciones
+  precioCO PrecioCO @relation(fields: [precioCOId], references: [id], onDelete: Cascade)
+  tienda   Tienda   @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+  talla    Talla    @relation(fields: [tallaId], references: [id], onDelete: Cascade)
+  color    Color    @relation(fields: [colorId], references: [id], onDelete: Cascade)
+
+  @@index([tiendaId])
+  @@map("stock")
+}
+
+// ==================== PEDIDOS ====================
+
+model Pedido {
+  id           Int          @id @default(autoincrement())
+  numeroPedido String       @unique @map("numero_pedido") @db.VarChar(20)
+  usuarioId    Int          @map("usuario_id")
+  tiendaId     Int          @map("tienda_id")
+  estado       EstadoPedido @default(PENDIENTE)
+  notas        String?      @db.Text
+  notasBodega  String?      @map("notas_bodega") @db.Text
+
+  // Información del cliente (snapshot)
+  clienteNombre   String  @map("cliente_nombre") @db.VarChar(100)
+  clienteEmail    String  @map("cliente_email") @db.VarChar(100)
+  clienteTelefono String? @map("cliente_telefono") @db.VarChar(20)
+
+  // Totales
+  subtotal  Decimal @db.Decimal(12, 2)
+  descuento Decimal @default(0) @db.Decimal(12, 2)
+  impuestos Decimal @default(0) @db.Decimal(12, 2)
+  total     Decimal @db.Decimal(12, 2)
+
+  // Pago
+  tipoPago        TipoPago   @map("tipo_pago")
+  estadoPago      EstadoPago @default(PENDIENTE) @map("estado_pago")
+  referenciaPago  String?    @map("referencia_pago") @db.VarChar(100)
+  comprobantePago String?    @map("comprobante_pago") @db.VarChar(255)
+
+  // Timestamps de flujo
+  fechaPedido      DateTime  @default(now()) @map("fecha_pedido")
+  fechaPago        DateTime? @map("fecha_pago")
+  fechaPreparacion DateTime? @map("fecha_preparacion")
+  fechaListo       DateTime? @map("fecha_listo")
+  fechaEntrega     DateTime? @map("fecha_entrega")
+
+  // Quién realizó cada acción
+  preparadoPor Int? @map("preparado_por")
+  entregadoPor Int? @map("entregado_por")
+
+  // Relaciones
+  usuario     Usuario           @relation(fields: [usuarioId], references: [id])
+  tienda      Tienda            @relation(fields: [tiendaId], references: [id])
+  items       ItemPedido[]
+  historial   HistorialPedido[]
+  actividades LogActividad[]
+
+  @@index([tiendaId, estado])
+  @@index([usuarioId])
+  @@index([estadoPago])
+  @@map("pedidos")
+}
+
+model ItemPedido {
+  id             Int     @id @default(autoincrement())
+  pedidoId       Int     @map("pedido_id")
+  productoId     Int     @map("producto_id")
+  precioCOId     Int     @map("precioco_id")
+  cantidad       Int
+  precioUnitario Decimal @map("precio_unitario") @db.Decimal(10, 2)
+  subtotal       Decimal @db.Decimal(12, 2)
+
+  // Snapshot de los datos
+  productoNombre String @map("producto_nombre") @db.VarChar(150)
+  productoCodigo String @map("producto_codigo") @db.VarChar(50)
+  corridaNombre  String @map("corrida_nombre") @db.VarChar(50)
+  tallaNombre    String @map("talla_nombre") @db.VarChar(10)
+  colorNombre    String @map("color_nombre") @db.VarChar(30)
+
+  // Relaciones
+  pedido   Pedido   @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  producto Producto @relation(fields: [productoId], references: [id])
+  precioCO PrecioCO @relation(fields: [precioCOId], references: [id])
+
+  @@map("items_pedido")
+}
+
+// ==================== HISTORIAL Y AUDITORÍA ====================
+
+model HistorialPedido {
+  id             Int           @id @default(autoincrement())
+  pedidoId       Int           @map("pedido_id")
+  estadoAnterior EstadoPedido? @map("estado_anterior")
+  estadoNuevo    EstadoPedido  @map("estado_nuevo")
+  observacion    String?       @db.Text
+  usuarioId      Int?          @map("usuario_id")
+  usuarioNombre  String?       @map("usuario_nombre") @db.VarChar(100)
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  // Relaciones
+  pedido Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+
+  @@map("historial_pedidos")
+}
+
+model LogActividad {
+  id          Int      @id @default(autoincrement())
+  usuarioId   Int?     @map("usuario_id")
+  pedidoId    Int?     @map("pedido_id")
+  accion      String   @db.VarChar(50)
+  descripcion String   @db.Text
+  ipAddress   String?  @map("ip_address") @db.VarChar(45)
+  userAgent   String?  @map("user_agent") @db.Text
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // Relaciones
+  usuario Usuario? @relation(fields: [usuarioId], references: [id])
+  pedido  Pedido?  @relation(fields: [pedidoId], references: [id])
+
+  @@index([usuarioId])
+  @@index([pedidoId])
+  @@index([createdAt])
+  @@map("log_actividades")
+}

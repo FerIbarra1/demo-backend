@@ -1,0 +1,80 @@
+# compiled output
+/dist
+/node_modules
+/mysql
+*.pem
+nul
+/nul
+.nul
+
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Environment (NEVER commit these)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Google Cloud SQL Proxy credentials
+adc.json
+
+# Secrets & Credentials (NEVER commit these)
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa*
+*.keystore
+credentials.json
+service-account.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests
+/coverage
+/.nyc_output
+junit.xml
+test-results/
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Docker volumes
+/docker-volumes/
+
+# Database seeds
+/prisma/seeds/
+/seeds/
+*.seed.sql
+
+# Build artifacts
+*.tsbuildinfo
+.swc/
+
+# Debug
+*.heapsnapshot
+*.cpuprofile
