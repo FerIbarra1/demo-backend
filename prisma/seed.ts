@@ -3,8 +3,105 @@ import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
 
+// ============================================
+// CONFIGURACIÓN DE PRODUCTOS POR IMÁGENES
+// ============================================
+// Las imágenes están en: public/products/
+// Formato: {producto}-{num-img}-{color}.webp
+// Ejemplo: manga-corta-1-naranja.webp
+//
+// IMPORTANTE: Se usan rutas relativas (/products/...) para evitar
+// problemas de CORS cuando el frontend corre en otro puerto.
+
+const PRODUCTOS_CONFIG = [
+  {
+    codigo: 'CAM-MC-001',
+    nombre: 'Camiseta Manga Corta',
+    descripcion: 'Camiseta manga corta 100% algodón premium. Diseño clásico con acabados de calidad. Disponible en colores vibrantes.',
+    categoria: 'Camisetas',
+    subcategoria: 'Manga Corta',
+    precioBase: 299.99,
+    colores: [
+      { nombre: 'Naranja', hex: '#FF8C00', imagen1: 'manga-corta-1-naranja.webp', imagen2: 'manga-corta-2-naranja.webp' },
+      { nombre: 'Verde', hex: '#228B22', imagen1: 'manga-corta-1-verde.webp', imagen2: 'manga-corta-2-verde.webp' },
+      { nombre: 'Salmon', hex: '#FA8072', imagen1: 'manga-corta-1-salmon.webp', imagen2: 'manga-corta-salmon-2.webp' },
+    ],
+  },
+  {
+    codigo: 'CAM-ML-001',
+    nombre: 'Camiseta Manga Larga',
+    descripcion: 'Camiseta manga larga de algodón suave. Perfecta para climas frescos. Corte moderno y confortable.',
+    categoria: 'Camisetas',
+    subcategoria: 'Manga Larga',
+    precioBase: 349.99,
+    colores: [
+      { nombre: 'Azul', hex: '#1E90FF', imagen1: 'manga-larga-1-azul.webp', imagen2: 'manga-larga-2-azul.webp' },
+      { nombre: 'Cafe', hex: '#8B4513', imagen1: 'manga-larga-1-cafe.webp', imagen2: 'manga-larga-2-cafe.webp' },
+      { nombre: 'Naranja', hex: '#FF8C00', imagen1: 'manga-larga-1-naranja.webp', imagen2: 'manga-larga-2-naranja.webp' },
+    ],
+  },
+  {
+    codigo: 'POLO-001',
+    nombre: 'Polo Clásico',
+    descripcion: 'Polo clásico con cuello y botones. 60% algodón 40% poliéster. Ideal para ocasiones semi-formales.',
+    categoria: 'Polos',
+    subcategoria: 'Clásico',
+    precioBase: 399.99,
+    colores: [
+      { nombre: 'Blanco', hex: '#FFFFFF', imagen1: 'polo-1-blanco.webp', imagen2: 'polo-2-blanco.webp' },
+      { nombre: 'Negro', hex: '#000000', imagen1: 'polo-1-negro.webp', imagen2: 'polo-2-negro.webp' },
+    ],
+  },
+];
+
+async function limpiarBaseDeDatos() {
+  console.log('🗑️  Eliminando datos existentes...');
+
+  // Borrar en orden para respetar foreign keys
+  await prisma.itemPedido.deleteMany({});
+  await prisma.historialPedido.deleteMany({});
+  await prisma.logActividad.deleteMany({});
+  await prisma.pedido.deleteMany({});
+  await prisma.stock.deleteMany({});
+  await prisma.precioCO.deleteMany({});
+  await prisma.precio.deleteMany({});
+  await prisma.productoTienda.deleteMany({});
+  await prisma.producto.deleteMany({});
+  await prisma.talla.deleteMany({});
+  await prisma.corrida.deleteMany({});
+  await prisma.color.deleteMany({});
+  await prisma.sesion.deleteMany({});
+  await prisma.usuario.deleteMany({});
+  await prisma.tienda.deleteMany({});
+
+  // Resetear secuencias
+  await prisma.$executeRaw`ALTER SEQUENCE "tiendas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "usuarios_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "corridas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "tallas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "colores_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "productos_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "productos_tienda_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "precios_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "preciosco_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "stock_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "items_pedido_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "historial_pedidos_id_seq" RESTART WITH 1`;
+
+  console.log('  ✓ Base de datos limpiada\n');
+}
+
+// Devuelve ruta relativa para evitar problemas de CORS
+function getImagenUrl(nombreArchivo: string): string {
+  return `/products/${nombreArchivo}`;
+}
+
 async function main() {
   console.log('🌱 Iniciando seed de datos...\n');
+
+  // ========== LIMPIAR TODO PRIMERO ==========
+  await limpiarBaseDeDatos();
 
   // ========== CREAR TIENDAS ==========
   console.log('🏪 Creando tiendas...');
@@ -122,159 +219,121 @@ async function main() {
     include: { tallas: true },
   });
 
-  const corridaDama = await prisma.corrida.create({
-    data: {
-      nombre: 'Dama',
-      descripcion: 'Tallas exclusivas dama',
-      tallas: {
-        create: [
-          { nombre: 'CH', orden: 1 },
-          { nombre: 'M', orden: 2 },
-          { nombre: 'G', orden: 3 },
-          { nombre: 'XG', orden: 4 },
-        ],
-      },
-    },
-    include: { tallas: true },
-  });
+  console.log(`  ✓ Corrida: ${corridaAdulto.nombre}\n`);
 
-  const corridaInfantil = await prisma.corrida.create({
-    data: {
-      nombre: 'Infantil',
-      descripcion: 'Tallas para niños',
-      tallas: {
-        create: [
-          { nombre: '4', orden: 1 },
-          { nombre: '6', orden: 2 },
-          { nombre: '8', orden: 3 },
-          { nombre: '10', orden: 4 },
-          { nombre: '12', orden: 5 },
-          { nombre: '14', orden: 6 },
-        ],
-      },
-    },
-    include: { tallas: true },
-  });
+  // ========== CREAR COLORES BASADOS EN IMÁGENES ==========
+  console.log('🎨 Creando colores basados en imágenes...');
 
-  console.log(`  ✓ Corrida: ${corridaAdulto.nombre}`);
-  console.log(`  ✓ Corrida: ${corridaDama.nombre}`);
-  console.log(`  ✓ Corrida: ${corridaInfantil.nombre}\n`);
+  // Extraer colores únicos de la configuración de productos
+  const coloresUnicos = new Map<string, { nombre: string; hex: string }>();
+  for (const producto of PRODUCTOS_CONFIG) {
+    for (const color of producto.colores) {
+      if (!coloresUnicos.has(color.nombre)) {
+        coloresUnicos.set(color.nombre, { nombre: color.nombre, hex: color.hex });
+      }
+    }
+  }
 
-  // ========== CREAR COLORES ==========
-  console.log('🎨 Creando colores...');
+  // Generar códigos de color únicos
+  const colorCodes: Record<string, string> = {
+    'Naranja': 'NA', 'Verde': 'VD', 'Salmon': 'SL',
+    'Azul': 'AZ', 'Cafe': 'CF', 'Blanco': 'BL', 'Negro': 'NG',
+  };
 
-  const colores = await prisma.color.createMany({
-    data: [
-      { codigo: 'BL', nombre: 'Blanco', hex: '#FFFFFF' },
-      { codigo: 'NG', nombre: 'Negro', hex: '#000000' },
-      { codigo: 'AZ', nombre: 'Azul Marino', hex: '#1B3A5F' },
-      { codigo: 'RJ', nombre: 'Rojo', hex: '#CC0000' },
-      { codigo: 'GR', nombre: 'Gris', hex: '#808080' },
-      { codigo: 'VD', nombre: 'Verde', hex: '#228B22' },
-    ],
+  const coloresData = Array.from(coloresUnicos.values()).map((c) => ({
+    codigo: colorCodes[c.nombre] || c.nombre.substring(0, 2).toUpperCase(),
+    nombre: c.nombre,
+    hex: c.hex,
+  }));
+
+  await prisma.color.createMany({
+    data: coloresData,
   });
 
   const coloresDB = await prisma.color.findMany();
-  coloresDB.forEach(c => console.log(`  ✓ Color: ${c.nombre}`));
+  coloresDB.forEach(c => console.log(`  ✓ Color: ${c.nombre} (${c.hex})`));
   console.log('');
 
-  // ========== CREAR PRODUCTOS ==========
-  console.log('👕 Creando productos...');
+  // ========== CREAR PRODUCTOS CON IMÁGENES REALES ==========
+  console.log('👕 Creando productos con imágenes reales...');
 
-  const producto1 = await prisma.producto.create({
-    data: {
-      codigo: 'CAM-001',
-      nombre: 'Camiseta Básica Algodón',
-      descripcion: 'Camiseta clásica 100% algodón peinado, ideal para uso diario. Suave al tacto y duradera.',
-      imagenPrincipal: 'https://placehold.co/400x400/1B3A5F/FFFFFF?text=Camiseta+Basica',
-      imagenes: [
-        'https://placehold.co/400x400/1B3A5F/FFFFFF?text=Azul',
-        'https://placehold.co/400x400/000000/FFFFFF?text=Negro',
-        'https://placehold.co/400x400/CC0000/FFFFFF?text=Rojo',
-      ],
-      activo: true,
-      categoria: 'Camisetas',
-      subcategoria: 'Básicas',
-    },
-  });
+  const productosCreados: { id: number; codigo: string; nombre: string; precioBase: number; colores: typeof PRODUCTOS_CONFIG[0]['colores'] }[] = [];
 
-  const producto2 = await prisma.producto.create({
-    data: {
-      codigo: 'CAM-002',
-      nombre: 'Camiseta Polo Clásica',
-      descripcion: 'Camiseta tipo polo con cuello, 60% algodón 40% poliéster. Elegante para ocasiones formales.',
-      imagenPrincipal: 'https://placehold.co/400x400/FFFFFF/000000?text=Polo+Blanco',
-      imagenes: [
-        'https://placehold.co/400x400/FFFFFF/000000?text=Blanco',
-        'https://placehold.co/400x400/000000/FFFFFF?text=Negro',
-        'https://placehold.co/400x400/808080/FFFFFF?text=Gris',
-      ],
-      activo: true,
-      categoria: 'Camisetas',
-      subcategoria: 'Polo',
-    },
-  });
+  for (const config of PRODUCTOS_CONFIG) {
+    // Todas las imágenes del producto (para el array de imágenes)
+    const todasImagenes = config.colores.flatMap(c => [
+      getImagenUrl(c.imagen1),
+      getImagenUrl(c.imagen2),
+    ]);
 
-  const producto3 = await prisma.producto.create({
-    data: {
-      codigo: 'CAM-003',
-      nombre: 'Camiseta Deportiva DryFit',
-      descripcion: 'Camiseta deportiva tecnología DryFit, absorbe el sudor y permite transpiración.',
-      imagenPrincipal: 'https://placehold.co/400x400/228B22/FFFFFF?text=Deportiva',
-      imagenes: [
-        'https://placehold.co/400x400/228B22/FFFFFF?text=Verde',
-        'https://placehold.co/400x400/CC0000/FFFFFF?text=Rojo',
-        'https://placehold.co/400x400/1B3A5F/FFFFFF?text=Azul',
-      ],
-      activo: true,
-      categoria: 'Camisetas',
-      subcategoria: 'Deportiva',
-    },
-  });
+    // Imagen principal = primera imagen del primer color
+    const imagenPrincipal = getImagenUrl(config.colores[0].imagen1);
 
-  console.log(`  ✓ Producto: ${producto1.nombre}`);
-  console.log(`  ✓ Producto: ${producto2.nombre}`);
-  console.log(`  ✓ Producto: ${producto3.nombre}\n`);
+    const producto = await prisma.producto.create({
+      data: {
+        codigo: config.codigo,
+        nombre: config.nombre,
+        descripcion: config.descripcion,
+        imagenPrincipal,
+        imagenes: todasImagenes,
+        activo: true,
+        categoria: config.categoria,
+        subcategoria: config.subcategoria,
+      },
+    });
+
+    productosCreados.push({
+      id: producto.id,
+      codigo: producto.codigo,
+      nombre: producto.nombre,
+      precioBase: config.precioBase,
+      colores: config.colores,
+    });
+
+    console.log(`  ✓ Producto: ${producto.nombre} (${producto.codigo})`);
+    console.log(`     Imagen principal: ${imagenPrincipal}`);
+    console.log(`     Colores: ${config.colores.length}`);
+  }
+  console.log('');
 
   // ========== CREAR PRECIOS Y STOCK ==========
   console.log('💰 Creando precios y stock...');
 
   const tiendas = [tiendaCentro, tiendaNorte];
-  const productos = [producto1, producto2, producto3];
   const tallasAdulto = corridaAdulto.tallas;
 
   for (const tienda of tiendas) {
-    for (const producto of productos) {
+    for (const producto of productosCreados) {
       // Crear relación producto-tienda
       await prisma.productoTienda.create({
         data: {
           productoId: producto.id,
           tiendaId: tienda.id,
           visible: true,
-          destacado: producto.codigo === 'CAM-001',
+          destacado: producto.codigo === 'CAM-MC-001',
         },
       });
 
       // Crear precio base
-      const precioBase = producto.codigo === 'CAM-001' ? 299.99 :
-                        producto.codigo === 'CAM-002' ? 399.99 : 349.99;
-
       await prisma.precio.create({
         data: {
           productoId: producto.id,
           tiendaId: tienda.id,
-          precioBase,
+          precioBase: producto.precioBase,
           activo: true,
         },
       });
 
-      // Crear PrecioCO y Stock para cada combinación
+      // Crear PrecioCO y Stock para cada combinación talla/color
       for (const talla of tallasAdulto) {
-        for (const color of coloresDB.slice(0, 4)) { // Solo 4 colores por producto
-          const sku = `${producto.codigo}-${color.codigo}-${talla.nombre}-T${tienda.id}`;
+        for (const colorConfig of producto.colores) {
+          const colorDB = coloresDB.find(c => c.nombre === colorConfig.nombre);
+          if (!colorDB) continue;
+
+          const sku = `${producto.codigo}-${colorDB.codigo}-${talla.nombre}-T${tienda.id}`;
           const precioVariante = talla.nombre === 'XXL' || talla.nombre === 'XG'
-            ? precioBase + 30
-            : precioBase;
+            ? producto.precioBase + 30
+            : producto.precioBase;
 
           const precioCO = await prisma.precioCO.create({
             data: {
@@ -282,20 +341,20 @@ async function main() {
               tiendaId: tienda.id,
               corridaId: corridaAdulto.id,
               tallaId: talla.id,
-              colorId: color.id,
+              colorId: colorDB.id,
               precio: precioVariante,
               sku,
             },
           });
 
-          // Crear stock aleatorio entre 0 y 50
-          const stockCantidad = Math.floor(Math.random() * 51);
+          // Stock aleatorio entre 5 y 50 (mínimo 5 para poder comprar)
+          const stockCantidad = Math.floor(Math.random() * 46) + 5;
           await prisma.stock.create({
             data: {
               precioCOId: precioCO.id,
               tiendaId: tienda.id,
               tallaId: talla.id,
-              colorId: color.id,
+              colorId: colorDB.id,
               cantidad: stockCantidad,
               cantidadReservada: 0,
             },
@@ -305,7 +364,6 @@ async function main() {
     }
     console.log(`  ✓ Precios y stock creados para ${tienda.nombre}`);
   }
-
   console.log('');
 
   // ========== CREAR PEDIDO DE EJEMPLO ==========
@@ -331,7 +389,6 @@ async function main() {
         total: precioCOEjemplo.precio,
         clienteNombre: `${clienteDemo.nombre} ${clienteDemo.apellido}`,
         clienteEmail: clienteDemo.email,
-        clienteTelefono: clienteDemo.telefono,
         items: {
           create: {
             productoId: precioCOEjemplo.productoId,
@@ -362,13 +419,20 @@ async function main() {
 
   console.log('\n✅ Seed completado exitosamente!\n');
   console.log('────────────────────────────────────────');
+  console.log(`Productos creados: ${productosCreados.length}`);
+  console.log(`Colores creados: ${coloresDB.length}`);
+  console.log(`Tallas por color: ${tallasAdulto.length}`);
+  console.log(`Variantes totales: ${productosCreados.length * coloresDB.length * tallasAdulto.length * tiendas.length}`);
+  console.log('');
   console.log('Usuarios de prueba:');
   console.log('  admin@tienda.com / password123');
   console.log('  bodega@tienda.com / password123');
   console.log('  cajero@tienda.com / password123');
   console.log('  mostrador@tienda.com / password123');
   console.log('  cliente@demo.com / password123');
-  console.log('────────────────────────────────────────\n');
+  console.log('────────────────────────────���───────────');
+  console.log('\nLas imágenes usan rutas relativas (/products/...)');
+  console.log('El navegador las resolverá automáticamente según el dominio del frontend');
 }
 
 main()
