@@ -1,5 +1,3 @@
-import { PrismaClient } from '@prisma/client';
-
 /**
  * Núcleo compartido para "surtir juntos": encontrar pedidos con items
  * compartidos (mismo productoId o mismo precioCOId).
@@ -8,10 +6,10 @@ import { PrismaClient } from '@prisma/client';
  * que también pueda usarlo BodegaService.obtenerSurtirJuntos (F10, ago 2026)
  * — el endpoint nuevo que alimenta el banner "Surtir juntos" en /bodega.
  *
- * F10: las funciones puras de scoring viven aquí para que surtido.service.ts
- * y bodega.service.ts las invoquen sin duplicar lógica. Las funciones que
- * hacen I/O (Prisma) se inyectan como dependencia para mantener este módulo
- * testeable sin base de datos.
+ * F10: la función pura de scoring vive aquí para que surtido.service.ts
+ * y bodega.service.ts la invoquen sin duplicar lógica. Esta función NO
+ * toca Prisma — el caller pasa los datos ya cargados. Eso permite
+ * testearla sin levantar la BD.
  */
 
 export interface ItemParaSimilitud {
@@ -34,20 +32,21 @@ export interface PedidoSimilarResultado {
   minutosEnCola: number;
 }
 
-/** Mismos pesos que el monitor (jul 2026). */
-export const UMBRAL_SCORE_MINIMO = 4;
-export const TOP_POR_PEDIDO = 3;
+/** Umbral mínimo de score para considerar un pedido "similar". */
+const UMBRAL_SCORE_MINIMO = 4;
+/** Top por pedido: el detalle de surtido muestra hasta 3 similares. */
+const TOP_POR_PEDIDO = 3;
+/** Top del listado general de la tienda. */
 export const TOP_LISTA = 10;
-export const PESO_PRECIO_CO_COMPARTIDO = 10;
-export const PESO_PRODUCTO_COMPARTIDO = 4;
+
+const PESO_PRECIO_CO_COMPARTIDO = 10;
+const PESO_PRODUCTO_COMPARTIDO = 4;
 
 /**
  * Calcula la similitud entre un conjunto de "items de referencia" y N
  * pedidos candidatos. Devuelve los candidatos que comparten al menos un
  * item (por productoId o precioCOId) con score >= UMBRAL_SCORE_MINIMO,
  * ordenados por score descendente y recortados al TOP indicado.
- *
- * Función pura — no toca Prisma. El caller pasa los datos ya cargados.
  *
  * El "score" incluye un bono por antigüedad en cola (1 punto por minuto
  * desde fechaPedido) para que los pedidos más viejos suban en el ranking.
@@ -96,10 +95,3 @@ export function rankearSimilares(
     .sort((a, b) => b.score - a.score)
     .slice(0, top);
 }
-
-/**
- * Helper para acceder a Prisma desde los services que importen este módulo.
- * Tipado contra PrismaClient para que sea explícito sin importar PrismaService
- * desde aquí (mantiene este archivo 100% puro, testeable sin DI de Nest).
- */
-export type PrismaLike = Pick<PrismaClient, 'itemPedido' | 'pedido'>;
