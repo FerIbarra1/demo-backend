@@ -96,10 +96,7 @@ export class BodegaController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Obtener pedido completo (items, revisiones, mensajes)' })
-  async obtenerPedido(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async obtenerPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.pedidoState.obtenerDetalle(id, user);
   }
 
@@ -139,10 +136,7 @@ export class BodegaController {
     summary:
       'PAID → SHIPPED. Sólo aplica a pedidos a domicilio (con shippingDireccion). Kiosko/web-recoger van al módulo Mostrador para entrega directa (PAID → COMPLETED).',
   })
-  async marcarEnviado(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async marcarEnviado(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.bodegaService.marcarEnviado(id, user);
   }
 
@@ -170,10 +164,7 @@ export class BodegaController {
     summary:
       'Cerrar surtido. Aplica los cambios (cancela NO_DISPONIBLES, ajusta cantidades, crea sustituciones) y pasa el pedido a APPROVED. La negociación con el cliente ocurre por chat.',
   })
-  async confirmarSurtido(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async confirmarSurtido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     const esAdmin = user.rol === RolUsuario.ADMIN;
     return this.surtidoService.confirmarSurtido(id, user, esAdmin);
   }
