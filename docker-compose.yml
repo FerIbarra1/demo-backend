@@ -29,6 +29,14 @@ services:
       - redis_data:/data
     command: redis-server --appendonly yes
 
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: tienda-mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP (Nodemailer)
+      - "8025:8025"   # Web UI (http://localhost:8025)
+
 volumes:
   postgres_data:
     driver: local

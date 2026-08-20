@@ -12,30 +12,93 @@ datasource db {
 enum RolUsuario {
   CLIENTE
   BODEGA
+  BODEGA_MONITOR
   CAJERO
+  CAJERO_MONITOR
   MOSTRADOR
   ADMIN
 }
 
 enum EstadoPedido {
+  PENDING_REVIEW
+  REVIEWING
+  WAITING_CUSTOMER_APPROVAL
+  APPROVED
+  PENDING_PAID
+  PAID
+  SHIPPED
+  COMPLETED
+  CANCELLED
+}
+
+enum EstadoRevision {
   PENDIENTE
-  EN_BODEGA
-  LISTO_PARA_ENTREGA
+  APROBADA
+  RECHAZADA
+}
+
+enum EstadoDecision {
+  PENDIENTE
+  ACEPTADO
+  RECHAZADO
+}
+
+enum CanalOrigen {
+  WEB
+  KIOSKO
+}
+
+// F8 (jul 2026): modo de entrega del pedido. Determina qué datos se requieren
+// al crearlo desde el checkout y cómo lo procesa bodega/mostrador.
+// - DOMICILIO: requiere dirección + colonia + CP + paquetería (o "admin decide").
+// - RECOGER_TIENDA: requiere fecha+hora del slot de recogida (helper isValidPickupSlot).
+// - KIOSKO: siempre recoger en tienda, sin horario. El canalOrigen debe ser KIOSKO.
+enum ModoEntrega {
+  DOMICILIO
+  RECOGER_TIENDA
+  KIOSKO
+}
+
+// F8 (jul 2026): paqueterías soportadas para envío a domicilio. El cliente
+// elige una o, alternativamente, deja que el admin decida (ver
+// Pedido.dejarAdminDecidePaqueteria).
+enum Paqueteria {
+  ALBATROS
+  TUFESA
+  ESTAFETA
+  DHL
+  FEDEX
+  PAQUETEXPRESS
+}
+
+enum CanalNotificacion {
+  EMAIL
+}
+
+enum TipoNotificacion {
+  PEDIDO_RECIBIDO
+  REVISION_PROPUESTA
+  REVISION_APROBADA
+  REVISION_RECHAZADA
+  PAGO_CONFIRMADO
+  ENVIADO
   ENTREGADO
   CANCELADO
+  MENSAJE_BODEGUERO
+  RESET_PASSWORD
+  BIENVENIDA
 }
 
-enum TipoPago {
-  EFECTIVO
-  TRANSFERENCIA
-  DEPOSITO
-  TARJETA
+enum EstadoSurtido {
+  PENDIENTE // Aún no se ha trabajado este item
+  PARCIAL // Se surtió menos de lo pedido (pero algo sí)
+  COMPLETO // Se surtió todo lo pedido
+  NO_DISPONIBLE // No se pudo surtir nada
 }
 
-enum EstadoPago {
-  PENDIENTE
-  VERIFICADO
-  RECHAZADO
+enum EstadoKiosko {
+  ACTIVO
+  INACTIVO
 }
 
 // ==================== ENTIDADES CORE ====================
@@ -49,6 +112,10 @@ model Tienda {
   telefono  String?  @db.VarChar(20)
   email     String?  @db.VarChar(100)
   activa    Boolean  @default(true)
+  // F9 (ago 2026): ID de la tienda en Firebird (TIENDAS.IDTIENDA). Único
+  // porque hay una sola BD Firebird central para todas las tiendas y la
+  // relación nube↔local es 1:1 por tienda.
+  externalId Int? @unique @map("external_id")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -58,50 +125,56 @@ model Tienda {
   precios         Precio[]
   preciosCO       PrecioCO[]
   pedidos         Pedido[]
-  stock           Stock[]
+  kioskos         Kiosko[]
+  // SyncModule: checkpoint por tienda (último BANDEJA_SYNC.ID procesado).
+  checkpoint      SyncCheckpoint?
 
   @@map("tiendas")
 }
 
 model Usuario {
-  id            Int        @id @default(autoincrement())
-  email         String     @unique @db.VarChar(100)
-  password      String     @db.VarChar(255)
-  nombre        String     @db.VarChar(100)
-  apellido      String?    @db.VarChar(100)
-  telefono      String?    @db.VarChar(20)
-  rol           RolUsuario @default(CLIENTE)
-  activo        Boolean    @default(true)
-  tiendaId      Int?       @map("tienda_id")
-  emailVerified Boolean    @default(false) @map("email_verified")
-  lastLogin     DateTime?  @map("last_login")
-  createdAt     DateTime   @default(now()) @map("created_at")
-  updatedAt     DateTime   @updatedAt @map("updated_at")
+  id              Int        @id @default(autoincrement())
+  email           String     @unique @db.VarChar(100)
+  password        String     @db.VarChar(255)
+  nombre          String     @db.VarChar(100)
+  apellido        String?    @db.VarChar(100)
+  telefono        String?    @db.VarChar(20)
+  rol             RolUsuario @default(CLIENTE)
+  activo          Boolean    @default(true)
+  tiendaId        Int?       @map("tienda_id")
+  emailVerified   Boolean    @default(false) @map("email_verified")
+  lastLogin       DateTime?  @map("last_login")
+  // F7 (jul 2026): ping cada 5min desde la tablet del bodeguero/cajero/mostrador.
+  // El monitor lo usa junto con lastLogin para decidir si el operador está
+  // "activo en su estación" (no sólo logueado alguna vez).
+  ultimoHeartbeat DateTime?  @map("ultimo_heartbeat")
+  // F9 (ago 2026): código de lista de precios del cliente sincronizado
+  // desde Firebird (CLIENTES.LISPRE '1'..'6'). El catálogo lo usa para
+  // elegir qué columna de Precio.listaX mostrar al cliente logueado.
+  listaPrecioCodigo String? @map("lista_precio_codigo") @db.VarChar(2)
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
 
   // Relaciones
-  tienda      Tienda?        @relation(fields: [tiendaId], references: [id])
-  pedidos     Pedido[]
-  sesiones    Sesion[]
-  actividades LogActividad[]
+  tienda              Tienda?              @relation(fields: [tiendaId], references: [id])
+  pedidos             Pedido[]             @relation("PedidoCliente")
+  pedidosAsignados    Pedido[]             @relation("PedidoBodeguero")
+  pedidosEnCaja       Pedido[]             @relation("PedidoCajero")
+  actividades         LogActividad[]
+  revisionesCreadas   PedidoRevision[]     @relation("RevisionCreador")
+  revisionesAprobadas PedidoRevision[]     @relation("RevisionAprobador")
+  decisionesTomadas   PedidoRevisionItem[] @relation("RevisionItemDecisor")
+  mensajes            PedidoMensaje[]
+  favoritos           Favorito[]
+  kioskosActivados    Kiosko[]             @relation("KioskoActivador")
+  kioskosDesactivados Kiosko[]             @relation("KioskoDesactivador")
+  passwordResetTokens PasswordResetToken[]
 
   @@map("usuarios")
 }
 
-model Sesion {
-  id           String   @id @default(uuid())
-  usuarioId    Int      @map("usuario_id")
-  token        String   @unique @db.VarChar(500)
-  refreshToken String?  @map("refresh_token") @db.VarChar(500)
-  deviceInfo   String?  @map("device_info") @db.VarChar(255)
-  ipAddress    String?  @map("ip_address") @db.VarChar(45)
-  expiresAt    DateTime @map("expires_at")
-  createdAt    DateTime @default(now()) @map("created_at")
-
-  // Relaciones
-  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
-
-  @@map("sesiones")
-}
+// Sesion eliminada en refactor B2B: auth stateless JWT.
+// Reintroducir con migración si se reactiva revocación de refresh tokens.
 
 // ==================== CATÁLOGO ====================
 
@@ -123,6 +196,7 @@ model Producto {
   precios         Precio[]
   preciosCO       PrecioCO[]
   itemsPedido     ItemPedido[]
+  favoritos       Favorito[]
 
   @@map("productos")
 }
@@ -167,7 +241,6 @@ model Talla {
   // Relaciones
   corrida   Corrida    @relation(fields: [corridaId], references: [id], onDelete: Cascade)
   preciosCO PrecioCO[]
-  stock     Stock[]
 
   @@unique([corridaId, nombre])
   @@map("tallas")
@@ -184,7 +257,6 @@ model Color {
 
   // Relaciones
   preciosCO PrecioCO[]
-  stock     Stock[]
 
   @@map("colores")
 }
@@ -200,6 +272,16 @@ model Precio {
   activo        Boolean   @default(true)
   vigenciaDesde DateTime? @map("vigencia_desde") @db.Date
   vigenciaHasta DateTime? @map("vigencia_hasta") @db.Date
+
+  // F9 (ago 2026): 6 listas de precios sincronizadas desde Firebird
+  // (PRECIOS.PRECIO1..6). precioBase sigue siendo sinónimo de lista1 para
+  // compatibilidad con la API y frontend actuales.
+  lista1 Decimal @default(0) @map("lista1") @db.Decimal(10, 2)
+  lista2 Decimal @default(0) @map("lista2") @db.Decimal(10, 2)
+  lista3 Decimal @default(0) @map("lista3") @db.Decimal(10, 2)
+  lista4 Decimal @default(0) @map("lista4") @db.Decimal(10, 2)
+  lista5 Decimal @default(0) @map("lista5") @db.Decimal(10, 2)
+  lista6 Decimal @default(0) @map("lista6") @db.Decimal(10, 2)
 
   // Relaciones
   producto Producto @relation(fields: [productoId], references: [id], onDelete: Cascade)
@@ -220,56 +302,73 @@ model PrecioCO {
   precio     Decimal @db.Decimal(10, 2)
   sku        String? @unique @db.VarChar(50)
 
+  // F9 (ago 2026): 6 listas de precios sincronizadas desde Firebird
+  // (PRECIOSCO.PRECIO1..6). `precio` sigue siendo sinónimo de lista1.
+  lista1 Decimal @default(0) @map("lista1") @db.Decimal(10, 2)
+  lista2 Decimal @default(0) @map("lista2") @db.Decimal(10, 2)
+  lista3 Decimal @default(0) @map("lista3") @db.Decimal(10, 2)
+  lista4 Decimal @default(0) @map("lista4") @db.Decimal(10, 2)
+  lista5 Decimal @default(0) @map("lista5") @db.Decimal(10, 2)
+  lista6 Decimal @default(0) @map("lista6") @db.Decimal(10, 2)
+
   // Relaciones
-  producto    Producto     @relation(fields: [productoId], references: [id], onDelete: Cascade)
-  tienda      Tienda       @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
-  corrida     Corrida      @relation(fields: [corridaId], references: [id], onDelete: Cascade)
-  talla       Talla        @relation(fields: [tallaId], references: [id], onDelete: Cascade)
-  color       Color        @relation(fields: [colorId], references: [id], onDelete: Cascade)
-  stock       Stock?
-  itemsPedido ItemPedido[]
+  producto                Producto             @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  tienda                  Tienda               @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+  corrida                 Corrida              @relation(fields: [corridaId], references: [id], onDelete: Cascade)
+  talla                   Talla                @relation(fields: [tallaId], references: [id], onDelete: Cascade)
+  color                   Color                @relation(fields: [colorId], references: [id], onDelete: Cascade)
+  itemsPedido             ItemPedido[]
+  revisionItemsNuevo      PedidoRevisionItem[]
+  sustitucionesPropuestas ItemPedido[]         @relation("SustitucionPropuesta")
 
   @@unique([productoId, tiendaId, corridaId, tallaId, colorId])
   @@map("preciosco")
 }
 
-// ==================== STOCK ====================
+// Stock eliminado en refactor B2B: el modelo B2B no maneja inventario confiable.
+// La columna Stock.cantidadReservada quedó sin uso. Reintroducir con migración si
+// en el futuro se reactiva control de stock contra entrega.
 
-model Stock {
-  id                Int      @id @default(autoincrement())
-  precioCOId        Int      @unique @map("precioco_id")
-  tiendaId          Int      @map("tienda_id")
-  tallaId           Int      @map("talla_id")
-  colorId           Int      @map("color_id")
-  cantidad          Int      @default(0)
-  cantidadReservada Int      @default(0) @map("cantidad_reservada")
-  updatedAt         DateTime @updatedAt @map("updated_at")
-
-  // Relaciones
-  precioCO PrecioCO @relation(fields: [precioCOId], references: [id], onDelete: Cascade)
-  tienda   Tienda   @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
-  talla    Talla    @relation(fields: [tallaId], references: [id], onDelete: Cascade)
-  color    Color    @relation(fields: [colorId], references: [id], onDelete: Cascade)
-
-  @@index([tiendaId])
-  @@map("stock")
-}
-
-// ==================== PEDIDOS ====================
+// ==================== PEDIDOS B2B ====================
 
 model Pedido {
   id           Int          @id @default(autoincrement())
   numeroPedido String       @unique @map("numero_pedido") @db.VarChar(20)
   usuarioId    Int          @map("usuario_id")
   tiendaId     Int          @map("tienda_id")
-  estado       EstadoPedido @default(PENDIENTE)
+  estado       EstadoPedido @default(PENDING_REVIEW)
+  canalOrigen  CanalOrigen  @default(WEB) @map("canal_origen")
+  // KIOSKO: si el pedido se originó en un kiosko físico, apunta al kiosko
+  // que lo creó. NULL = pedido web. Permite trazabilidad: el cliente ve en su
+  // historial "Pedido X hecho en kiosko Y, tienda Z".
+  kioskoId     Int?         @map("kiosko_id")
   notas        String?      @db.Text
-  notasBodega  String?      @map("notas_bodega") @db.Text
 
-  // Información del cliente (snapshot)
+  // Información del cliente (snapshot, capturada al crear el pedido)
   clienteNombre   String  @map("cliente_nombre") @db.VarChar(100)
   clienteEmail    String  @map("cliente_email") @db.VarChar(100)
   clienteTelefono String? @map("cliente_telefono") @db.VarChar(20)
+
+  // F8 (jul 2026): modo de entrega. Default DOMICILIO para no romper el flujo
+  // legacy (frontend web siempre asume envío). El servicio lo recalcula en
+  // crearPedido según los campos que llegan y el canalOrigen.
+  modoEntrega ModoEntrega @default(DOMICILIO) @map("modo_entrega")
+
+  // Envío
+  shippingDireccion          String?     @map("shipping_direccion") @db.Text
+  shippingReferencia         String?     @map("shipping_referencia") @db.VarChar(255)
+  // F8 (jul 2026): dirección estructurada para envío a domicilio. Requeridos
+  // por el service cuando modoEntrega=DOMICILIO.
+  shippingColonia            String?     @map("shipping_colonia") @db.VarChar(120)
+  shippingCodigoPostal       String?     @map("shipping_codigo_postal") @db.VarChar(10)
+  // F8 (jul 2026): paquetería. El cliente o elige una, o marca
+  // dejarAdminDecidePaqueteria=true y este campo queda NULL.
+  shippingPaqueteria         Paqueteria? @map("shipping_paqueteria")
+  dejarAdminDecidePaqueteria Boolean     @default(false) @map("dejar_admin_decide_paqueteria")
+  // F8 (jul 2026): fecha+hora exactas en que el cliente pasará a recoger el
+  // pedido. Sólo aplica a modoEntrega=RECOGER_TIENDA. KIOSKO no usa este
+  // campo. Validado contra isValidPickupSlot en el service.
+  recogerProgramado          DateTime?   @map("recoger_programado")
 
   // Totales
   subtotal  Decimal @db.Decimal(12, 2)
@@ -277,33 +376,48 @@ model Pedido {
   impuestos Decimal @default(0) @db.Decimal(12, 2)
   total     Decimal @db.Decimal(12, 2)
 
-  // Pago
-  tipoPago        TipoPago   @map("tipo_pago")
-  estadoPago      EstadoPago @default(PENDIENTE) @map("estado_pago")
-  referenciaPago  String?    @map("referencia_pago") @db.VarChar(100)
-  comprobantePago String?    @map("comprobante_pago") @db.VarChar(255)
+  // Idempotencia para reintentos del cliente
+  idempotencyKey String? @unique @map("idempotency_key") @db.VarChar(64)
 
-  // Timestamps de flujo
-  fechaPedido      DateTime  @default(now()) @map("fecha_pedido")
-  fechaPago        DateTime? @map("fecha_pago")
-  fechaPreparacion DateTime? @map("fecha_preparacion")
-  fechaListo       DateTime? @map("fecha_listo")
-  fechaEntrega     DateTime? @map("fecha_entrega")
+  // Asignación a bodeguero (para el monitor de bodega)
+  // Se setea en /pedidos/bodega/:id/tomar. SetNull si el bodeguero se elimina.
+  // Se limpia al confirmar surtido (el pedido pasa a PENDING_PAID y bodega ya no lo carga).
+  asignadoAId Int?      @map("asignado_a_id")
+  asignadoAt  DateTime? @map("asignado_at")
 
-  // Quién realizó cada acción
-  preparadoPor Int? @map("preparado_por")
-  entregadoPor Int? @map("entregado_por")
+  // Asignación a cajero (monitor de ventanillas). Sólo aplica a pedidos KIOSKO en PENDING_PAID.
+  // 1:1 con el usuario Cajero logueado — no hay tabla Ventanilla, cada Cajero ES su ventanilla.
+  cajeroAsignadoId Int?      @map("cajero_asignado_id")
+  cajeroAsignadoAt DateTime? @map("cajero_asignado_at")
+
+  // Timestamps
+  fechaPedido DateTime  @default(now()) @map("fecha_pedido")
+  // Lo rellena el webhook del sistema externo (Firebird) al confirmar el cobro,
+  // o el admin manualmente como herramienta de soporte.
+  fechaPago   DateTime? @map("fecha_pago")
 
   // Relaciones
-  usuario     Usuario           @relation(fields: [usuarioId], references: [id])
-  tienda      Tienda            @relation(fields: [tiendaId], references: [id])
-  items       ItemPedido[]
-  historial   HistorialPedido[]
-  actividades LogActividad[]
+  usuario        Usuario                  @relation("PedidoCliente", fields: [usuarioId], references: [id])
+  tienda         Tienda                   @relation(fields: [tiendaId], references: [id])
+  kiosko         Kiosko?                  @relation(fields: [kioskoId], references: [id], onDelete: SetNull)
+  asignadoA      Usuario?                 @relation("PedidoBodeguero", fields: [asignadoAId], references: [id], onDelete: SetNull)
+  cajeroAsignado Usuario?                 @relation("PedidoCajero", fields: [cajeroAsignadoId], references: [id], onDelete: SetNull)
+  items          ItemPedido[]
+  historial      HistorialPedido[]
+  actividades    LogActividad[]
+  revisiones     PedidoRevision[]
+  mensajes       PedidoMensaje[]
+  notificaciones Notificacion[]
+  mensajeEnviado MensajeBodegueroEnviado?
+  // F9 (ago 2026): cola de envío hacia Firebird. 1:1 con Pedido.
+  pendienteEnvio PedidoPendienteEnvio?
 
   @@index([tiendaId, estado])
   @@index([usuarioId])
-  @@index([estadoPago])
+  @@index([cajeroAsignadoId])
+  @@index([estado, canalOrigen])
+  @@index([asignadoAId])
+  @@index([kioskoId])
   @@map("pedidos")
 }
 
@@ -311,24 +425,156 @@ model ItemPedido {
   id             Int     @id @default(autoincrement())
   pedidoId       Int     @map("pedido_id")
   productoId     Int     @map("producto_id")
-  precioCOId     Int     @map("precioco_id")
+  precioCOId     Int?    @map("precioco_id") // Opcional: SetNull si PrecioCO se borra (snapshot guarda todo)
   cantidad       Int
   precioUnitario Decimal @map("precio_unitario") @db.Decimal(10, 2)
   subtotal       Decimal @db.Decimal(12, 2)
 
-  // Snapshot de los datos
+  // Snapshot de los datos (no cambia aunque el producto/variante cambien)
   productoNombre String @map("producto_nombre") @db.VarChar(150)
   productoCodigo String @map("producto_codigo") @db.VarChar(50)
   corridaNombre  String @map("corrida_nombre") @db.VarChar(50)
   tallaNombre    String @map("talla_nombre") @db.VarChar(10)
   colorNombre    String @map("color_nombre") @db.VarChar(30)
 
-  // Relaciones
-  pedido   Pedido   @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
-  producto Producto @relation(fields: [productoId], references: [id])
-  precioCO PrecioCO @relation(fields: [precioCOId], references: [id])
+  // B2B: flags para auditoría de revisión
+  original  Boolean @default(true) // false = agregado por revisión aceptada
+  cancelada Boolean @default(false) // true = rechazado en revisión o cancelado por bodega
 
+  // Surtido en bodega: track de qué encontró el bodeguero vs qué pidió el cliente
+  cantidadSurtida Int           @default(0) @map("cantidad_surtida")
+  estadoSurtido   EstadoSurtido @default(PENDIENTE) @map("estado_surtido")
+  surtidoAt       DateTime?     @map("surtido_at")
+
+  // B2B surtido B2.6: motivo textual del bodeguero al marcar el item
+  // (ej. "No hay talla M", "Sólo hay 2 piezas"). Se propaga al PedidoRevisionItem.motivo
+  // al confirmarSurtido si hay faltante. Nullable: items sin tocar no tienen motivo.
+  motivoSurtido String? @map("motivo_surtido") @db.Text
+
+  // B2B surtido B2.6: si el bodeguero eligió una variante sustituta (otra talla/color u
+  // otro producto) desde la quick option, se guarda aquí el PrecioCO propuesto. Al
+  // confirmarSurtido genera una PedidoRevisionItem con nuevoPrecioCOId para que el
+  // cliente apruebe. SetNull si el PrecioCO se elimina (snapshot guarda todos los demás
+  // datos en productoNombre/codigo/talla/color).
+  sustitucionPropuestaPrecioCOId Int?      @map("sustitucion_propuesta_precioco_id")
+  sustitucionPropuesta           PrecioCO? @relation("SustitucionPropuesta", fields: [sustitucionPropuestaPrecioCOId], references: [id], onDelete: SetNull)
+
+  // Relaciones
+  pedido        Pedido               @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  producto      Producto             @relation(fields: [productoId], references: [id])
+  precioCO      PrecioCO?            @relation(fields: [precioCOId], references: [id], onDelete: SetNull)
+  revisionItems PedidoRevisionItem[]
+  mensajes      PedidoMensaje[]
+
+  @@index([pedidoId, cancelada])
   @@map("items_pedido")
+}
+
+model PedidoRevision {
+  id             Int            @id @default(autoincrement())
+  pedidoId       Int            @map("pedido_id")
+  estadoRevision EstadoRevision @default(PENDIENTE) @map("estado_revision")
+  creadaPorId    Int            @map("creada_por_id")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  aprobadaAt     DateTime?      @map("aprobada_at")
+  aprobadaPorId  Int?           @map("aprobada_por_id")
+
+  // Relaciones
+  pedido      Pedido               @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  creadaPor   Usuario              @relation("RevisionCreador", fields: [creadaPorId], references: [id])
+  aprobadaPor Usuario?             @relation("RevisionAprobador", fields: [aprobadaPorId], references: [id])
+  items       PedidoRevisionItem[]
+
+  // SIN @unique en pedidoId: la unicidad activa la garantiza la capa de servicio.
+  // Si bodega quiere re-revisar, marca la anterior como RECHAZADA y crea una nueva.
+  @@index([pedidoId, estadoRevision])
+  @@map("pedidos_revisiones")
+}
+
+model PedidoRevisionItem {
+  id                   Int            @id @default(autoincrement())
+  revisionId           Int            @map("revision_id")
+  itemPedidoOriginalId Int            @map("item_pedido_original_id")
+  // Si la propuesta es sustitución total (otro producto/variante):
+  nuevoPrecioCOId      Int?           @map("nuevo_precioco_id")
+  // Si la propuesta es sólo cambiar cantidad (misma variante):
+  nuevaCantidad        Int?           @map("nueva_cantidad")
+  // Siempre: motivo textual
+  motivo               String         @db.Text
+  // Decisión del cliente
+  decision             EstadoDecision @default(PENDIENTE)
+  decidedAt            DateTime?      @map("decided_at")
+  decidedPorId         Int?           @map("decided_por_id")
+
+  // Relaciones
+  revision           PedidoRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  itemPedidoOriginal ItemPedido     @relation(fields: [itemPedidoOriginalId], references: [id])
+  nuevoPrecioCO      PrecioCO?      @relation(fields: [nuevoPrecioCOId], references: [id], onDelete: SetNull)
+  decidedPor         Usuario?       @relation("RevisionItemDecisor", fields: [decidedPorId], references: [id])
+
+  @@index([revisionId, decision])
+  @@map("pedidos_revisiones_items")
+}
+
+model PedidoMensaje {
+  id                 Int        @id @default(autoincrement())
+  pedidoId           Int        @map("pedido_id")
+  itemId             Int?       @map("item_id")
+  autorId            Int        @map("autor_id")
+  autorRol           RolUsuario @map("autor_rol")
+  contenido          String     @db.Text
+  visibleParaCliente Boolean    @default(true) @map("visible_para_cliente")
+  createdAt          DateTime   @default(now()) @map("created_at")
+
+  // Relaciones
+  pedido         Pedido                    @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  item           ItemPedido?               @relation(fields: [itemId], references: [id], onDelete: SetNull)
+  autor          Usuario                   @relation(fields: [autorId], references: [id])
+  mensajeEnviado MensajeBodegueroEnviado[]
+
+  @@index([pedidoId, createdAt])
+  @@index([itemId])
+  @@map("pedidos_mensajes")
+}
+
+// F8 (jul 2026): marca que ya se envió el email de "primera respuesta del
+// bodeguero" para este pedido. Garantiza que sólo se manda UNA vez por
+// pedido aunque el bodeguero intercambie varios mensajes en el chat.
+// pedidoId es PK (un pedido -> máximo un email de este tipo).
+model MensajeBodegueroEnviado {
+  pedidoId  Int      @id @map("pedido_id")
+  mensajeId Int      @map("mensaje_id")
+  enviadoAt DateTime @default(now()) @map("enviado_at")
+
+  pedido  Pedido        @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  mensaje PedidoMensaje @relation(fields: [mensajeId], references: [id], onDelete: Cascade)
+
+  @@map("mensaje_bodeguero_enviado")
+}
+
+// ComprobantePago eliminado en refactor de pagos fuera del sistema (jun 2026).
+// El cobro se realiza en un sistema externo (Visual FoxPro + Firebird) que
+// notifica al backend vía webhook (`POST /pedidos/admin/:id/marcar-pagado`,
+// autenticado por X-Agent-Key). No reintroducir este modelo sin antes evaluar
+// si el sistema externo va a generar sus propios recibos.
+
+model Notificacion {
+  id           Int               @id @default(autoincrement())
+  pedidoId     Int?              @map("pedido_id")
+  canal        CanalNotificacion
+  tipo         TipoNotificacion
+  destinatario String            @db.VarChar(200)
+  payload      Json?
+  exitosa      Boolean           @default(false)
+  errorMsg     String?           @map("error_msg") @db.Text
+  enviadaAt    DateTime          @default(now()) @map("enviada_at")
+
+  // Relaciones
+  pedido Pedido? @relation(fields: [pedidoId], references: [id], onDelete: SetNull)
+
+  @@index([pedidoId])
+  @@index([enviadaAt])
+  @@map("notificaciones")
 }
 
 // ==================== HISTORIAL Y AUDITORÍA ====================
@@ -368,4 +614,168 @@ model LogActividad {
   @@index([pedidoId])
   @@index([createdAt])
   @@map("log_actividades")
+}
+
+// ==================== KIOSKOS ====================
+
+// Un kiosko representa una tablet física en una tienda. El cliente que
+// llega usa SU propia cuenta (no hay cuenta kiosko compartida). El kiosko
+// sólo aporta trazabilidad: cada pedido guardará kioskoId para que el
+// cliente vea en su historial "Pedido X hecho en kiosko Y, tienda Z".
+model Kiosko {
+  id               Int          @id @default(autoincrement())
+  tiendaId         Int          @map("tienda_id")
+  nombre           String       @db.VarChar(50) // ej: "Kiosko Entrada", "Kiosko 1"
+  estado           EstadoKiosko @default(ACTIVO)
+  activadoAt       DateTime     @default(now()) @map("activado_at")
+  activadoPorId    Int          @map("activado_por_id")
+  desactivadoAt    DateTime?    @map("desactivado_at")
+  desactivadoPorId Int?         @map("desactivado_por_id")
+  // Heartbeat desde la tablet cada 60s. NULL = kiosko nunca reportado
+  // (recién activado) o tablet apagada. La UI admin usa esto para alertar.
+  ultimoHeartbeat  DateTime?    @map("ultimo_heartbeat")
+  // Se setea en el primer heartbeat que activa el kiosko (transición
+  // INACTIVO → ACTIVO). NULL = la tablet nunca se conectó.
+  // La UI admin usa esto para distinguir "Inactivo · pendiente de conectar"
+  // (estado=INACTIVO + primerConexionAt IS NULL) vs "Inactivo · desactivado"
+  // (estado=INACTIVO + primerConexionAt IS NOT NULL).
+  primerConexionAt DateTime?    @map("primer_conexion_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  // Relaciones
+  tienda         Tienda   @relation(fields: [tiendaId], references: [id])
+  activadoPor    Usuario  @relation("KioskoActivador", fields: [activadoPorId], references: [id])
+  desactivadoPor Usuario? @relation("KioskoDesactivador", fields: [desactivadoPorId], references: [id])
+  pedidos        Pedido[]
+
+  @@unique([tiendaId, nombre])
+  @@index([tiendaId, estado])
+  @@map("kioskos")
+}
+
+// ==================== FAVORITOS ====================
+
+model Favorito {
+  id         Int      @id @default(autoincrement())
+  usuarioId  Int      @map("usuario_id")
+  productoId Int      @map("producto_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  usuario  Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  producto Producto @relation(fields: [productoId], references: [id], onDelete: Cascade)
+
+  @@unique([usuarioId, productoId])
+  @@index([usuarioId])
+  @@map("favoritos")
+}
+
+// ==================== PASSWORD RESET ====================
+
+// F8 (jul 2026): tokens de un solo uso para recuperación de contraseña.
+// `token` guarda el SHA256 del token random que se manda por email (nunca
+// el token en claro). Al usarse se marca usedAt; expirado o usado = inválido.
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  usuarioId Int       @map("usuario_id")
+  token     String    @unique @db.VarChar(128)
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  ipOrigen  String?   @map("ip_origen") @db.VarChar(45)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// ==================== SINCRONIZACIÓN BIDIRECCIONAL (F9 ago 2026) ====================
+// Infraestructura para sincronizar PostgreSQL (nube) con Firebird local
+// (DATOSINV.FDB + BANDEJA_SYNC). El agente local corre en el servidor
+// central de Firebird y replica cambios en ambos sentidos.
+
+// Mapeo polimórfico entre IDs de la nube (PostgreSQL) y Firebird local.
+// Una sola fila = "este entityId en la nube corresponde a este ID local
+// en Firebird tienda X". Soporta el caso de un usuario que es cliente en
+// varias tiendas (un ExternalRef por tienda).
+model ExternalRef {
+  id            Int      @id @default(autoincrement())
+  systemEntity  String   @db.VarChar(40)  // USUARIO|TIENDA|PRODUCTO|CORRIDA|COLOR|TALLA|PRECIO|PRECIOCO|PEDIDO
+  systemId      Int      // PK en PG
+  localEntity   String   @db.VarChar(40)  // CLIENTES|CLIENTESCXC|TIENDAS|PRODUCTOS|...
+  localId       Int
+  localTiendaId Int?     // FK lógica a TIENDAS.IDTIENDA. NULL para entidades globales.
+  syncedAt      DateTime @default(now()) @map("synced_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@unique([systemEntity, systemId, localEntity, localTiendaId])
+  @@index([systemEntity, systemId])
+  @@index([localEntity, localId])
+  @@index([localEntity, localTiendaId, localId])
+  @@map("external_refs")
+}
+
+// Watermark por tienda: el agente local guarda aquí el último BANDEJA_SYNC.ID
+// que ya subió a la nube. El checkpoint es por tienda (no por instancia
+// de agente), para soportar reinstalación del agente sin perder progreso.
+model SyncCheckpoint {
+  id                Int       @id @default(autoincrement())
+  tiendaId          Int       @unique @map("tienda_id")
+  ultimoBANDEJAId   BigInt    @default(0) @map("ultimo_bandeja_id")
+  ultimoHeartbeatAt DateTime? @map("ultimo_heartbeat_at")
+  agentVersion      String?   @db.VarChar(20) @map("agent_version")
+  lastError         String?   @db.Text @map("last_error")
+  lastErrorAt       DateTime? @map("last_error_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  tienda Tienda @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+
+  @@map("sync_checkpoints")
+}
+
+// Cola de pedidos NUEVOS nube→Firebird. Cuando ClienteService.crearPedido
+// genera un pedido, también inserta aquí un registro. El agente lo sondea,
+// lo baja a Firebird via GRABAR_PEDIDOS + GRABAR_MOVPED, y al terminar
+// hace ack cambiando estado a PROCESADO con externalIdPEDIDOS.
+model PedidoPendienteEnvio {
+  id                Int       @id @default(autoincrement())
+  pedidoId          Int       @unique @map("pedido_id")
+  estado            String    @default("PENDIENTE") @db.VarChar(20)
+  // PENDIENTE → PROCESADO en éxito; → ERROR tras agotar reintentos;
+  // → EXPIRADO si pasó más de 24h sin procesarse.
+  intentos          Int       @default(0)
+  ultimoError       String?   @db.Text @map("ultimo_error")
+  ultimoIntentoAt   DateTime? @map("ultimo_intento_at")
+  // IDPEDIDO en Firebird devuelto por GRABAR_PEDIDOS. Permite idempotencia
+  // en reintentos: si el agente crashea entre el INSERT y el ack, al
+  // reintentar usa este ID en lugar de generar uno nuevo.
+  externalIdPEDIDOS Int?      @map("external_id_pedidos")
+  externalFolio     String?   @map("external_folio") @db.VarChar(10)
+  createdAt         DateTime  @default(now()) @map("created_at")
+  processedAt       DateTime? @map("processed_at")
+
+  pedido Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+
+  @@index([estado, createdAt])
+  @@map("pedidos_pendientes_envio")
+}
+
+// Auditoría bidireccional: cada evento de sync (cambio procesado, error,
+// ack, heartbeat) deja un rastro para debugging desde panel admin.
+model SyncEventLog {
+  id          Int      @id @default(autoincrement())
+  tiendaId    Int?     @map("tienda_id")
+  direccion   String   @db.VarChar(10) @map("direccion") // UP | DOWN
+  tipo        String   @db.VarChar(20) @map("tipo")       // CATALOGO|CLIENTE|PEDIDO|PAGO|HEARTBEAT
+  referencia  String?  @db.VarChar(100) @map("referencia")
+  exitoso     Boolean  @default(true)
+  mensaje     String?  @db.Text
+  payloadSize Int?     @map("payload_size")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([tiendaId, createdAt])
+  @@index([tipo, exitoso, createdAt])
+  @@map("sync_event_log")
 }

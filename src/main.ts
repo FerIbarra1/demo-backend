@@ -3,12 +3,19 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
-import * as compression from 'compression';
+import compression from 'compression';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const configService = app.get(ConfigService);
+
+  const jwtSecret = configService.get<string>('app.jwtSecret');
+  if (!jwtSecret) {
+    throw new Error('JWT_SECRET es obligatorio y debe ser un valor seguro en producción');
+  }
 
   // Configuración de seguridad
   app.use(helmet());
@@ -16,15 +23,17 @@ async function bootstrap() {
 
   // CORS
   app.enableCors({
-    origin: process.env.NODE_ENV === 'production'
-      ? ['https://demo-frontend-pi.vercel.app']
-      : true,
+    origin: process.env.NODE_ENV === 'production' ? ['https://demo-frontend-pi.vercel.app'] : true,
     credentials: true,
   });
 
   // Prefijo global
-  const apiPrefix = configService.get('API_PREFIX') || '/api/v1';
+  const apiPrefix = configService.get<string>('app.apiPrefix') || '/api';
   app.setGlobalPrefix(apiPrefix);
+
+  // Archivos subidos dinámicamente (uploads de productos / imágenes que
+  // sincronice el agente externo) bajo /files/...
+  app.useStaticAssets(join(process.cwd(), 'uploads'), { prefix: '/files/' });
 
   // Pipes de validación
   app.useGlobalPipes(

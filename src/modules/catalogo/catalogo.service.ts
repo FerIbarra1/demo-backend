@@ -2,26 +2,62 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FiltroCatalogoDto } from './dto/filtro-catalogo.dto';
 
+/**
+ * F9 (ago 2026): elige qué columna de Precio.listaX usar según el
+ * Usuario.listaPrecioCodigo (sincronizado desde Firebird CLIENTES.LISPRE).
+ *
+ * Si el cliente tiene `listaPrecioCodigo='3'` → mostrar Precio.lista3.
+ * Si no, fallback a `precioBase` (= lista1) para mantener compatibilidad.
+ */
+function resolverColumnaLista(
+  listaPrecioCodigo: string | null | undefined,
+): 'lista1' | 'lista2' | 'lista3' | 'lista4' | 'lista5' | 'lista6' {
+  switch ((listaPrecioCodigo ?? '').trim()) {
+    case '2':
+      return 'lista2';
+    case '3':
+      return 'lista3';
+    case '4':
+      return 'lista4';
+    case '5':
+      return 'lista5';
+    case '6':
+      return 'lista6';
+    default:
+      return 'lista1';
+  }
+}
+
 @Injectable()
 export class CatalogoService {
   constructor(private prisma: PrismaService) {}
 
-  async obtenerProductos(filtros: FiltroCatalogoDto) {
-    const { tiendaId, categoria, corridaId, colorId, busqueda, soloDisponibles, pagina = 1, limite = 20 } = filtros;
+  async obtenerProductos(filtros: FiltroCatalogoDto, usuarioId?: number) {
+    const { tiendaId, categoria, corridaId, colorId, busqueda, pagina = 1, limite = 20 } = filtros;
 
     if (!tiendaId) {
       throw new NotFoundException('Debe especificar una tienda');
     }
 
+    // F9: detectar la lista de precios del cliente logueado.
+    let columnaLista: 'lista1' | 'lista2' | 'lista3' | 'lista4' | 'lista5' | 'lista6' =
+      'lista1';
+    if (usuarioId) {
+      const usuario = await this.prisma.usuario.findUnique({
+        where: { id: usuarioId },
+        select: { listaPrecioCodigo: true },
+      });
+      columnaLista = resolverColumnaLista(usuario?.listaPrecioCodigo);
+    }
+
     const skip = (pagina - 1) * limite;
 
-    // Construir where dinámico
+    // B2B: no hay stock en tiempo real. El "soloDisponibles" sólo filtra
+    // productos visibles y activos.
     const where: any = {
       tiendaId,
       visible: true,
-      producto: {
-        activo: true,
-      },
+      producto: { activo: true },
     };
 
     if (categoria) {
@@ -43,29 +79,36 @@ export class CatalogoService {
             include: {
               precios: {
                 where: { tiendaId },
-                select: { precioBase: true, precioOferta: true },
+                select: {
+                  precioBase: true,
+                  precioOferta: true,
+                  // F9: incluir la lista del cliente para evitar un round-trip.
+                  lista1: true,
+                  lista2: true,
+                  lista3: true,
+                  lista4: true,
+                  lista5: true,
+                  lista6: true,
+                },
               },
               preciosCO: {
                 where: {
                   tiendaId,
                   ...(corridaId && { corridaId }),
                   ...(colorId && { colorId }),
-                  ...(soloDisponibles && {
-                    stock: {
-                      cantidad: { gt: 0 },
-                    },
-                  }),
                 },
-                include: {
+                select: {
+                  id: true,
+                  precio: true,
+                  lista1: true,
+                  lista2: true,
+                  lista3: true,
+                  lista4: true,
+                  lista5: true,
+                  lista6: true,
                   corrida: true,
                   talla: true,
                   color: true,
-                  stock: {
-                    select: {
-                      cantidad: true,
-                      cantidadReservada: true,
-                    },
-                  },
                 },
                 orderBy: [
                   { talla: { orden: 'asc' } },
@@ -82,24 +125,38 @@ export class CatalogoService {
       this.prisma.productoTienda.count({ where }),
     ]);
 
-    // Transformar respuesta
+    // Si hay usuario autenticado, cargamos sus favoritos para marcarlos.
+    const favoritosSet = usuarioId
+      ? await this.cargarFavoritosDelUsuario(usuarioId)
+      : new Set<number>();
+
     const productosFormateados = productosTienda.map((pt) => {
       const producto = pt.producto;
       const precio = producto.precios[0];
-
-      // Agrupar variantes
-      const variantes = producto.preciosCO.map((pco) => ({
-        id: pco.id,
-        corrida: pco.corrida.nombre,
-        talla: pco.talla.nombre,
-        color: pco.color.nombre,
-        colorHex: pco.color.hex,
-        precio: pco.precio,
-        stockDisponible: pco.stock
-          ? pco.stock.cantidad - pco.stock.cantidadReservada
-          : 0,
-      }));
-
+      // F9: precioBase según la lista del cliente. Si no hay precio para
+      // la lista del cliente, fallback a precioBase.
+      const precioBaseLista = precio ? Number(precio[columnaLista] ?? 0) : 0;
+      const precioBase = precioBaseLista > 0 ? precioBaseLista : Number(precio?.precioBase ?? 0);
+      const variantes = producto.preciosCO.map((pco) => {
+        const pcoPrecioLista = Number(pco[columnaLista] ?? 0);
+        return {
+          id: pco.id,
+          // precioCOId es el id de PrecioCO (la variante viva). Necesario
+          // para que la pantalla de surtir pueda proponer sustituciones
+          // (quick option "Otra variante" / "Otro producto").
+          precioCOId: pco.id,
+          corrida: pco.corrida.nombre,
+          talla: pco.talla.nombre,
+          color: pco.color.nombre,
+          colorHex: pco.color.hex,
+          // F9: mismo criterio que precioBase — usar la lista del cliente.
+          precio: pcoPrecioLista > 0 ? pcoPrecioLista : Number(pco.precio),
+          // B2B: sin manejo de stock. La disponibilidad la confirma bodega al
+          // revisar el pedido. Este campo existe por compatibilidad con la
+          // UI legacy; el frontend debe ignorarlo.
+          stockDisponible: null,
+        };
+      });
       return {
         id: producto.id,
         codigo: producto.codigo,
@@ -109,9 +166,10 @@ export class CatalogoService {
         imagenes: producto.imagenes,
         categoria: producto.categoria,
         subcategoria: producto.subcategoria,
-        precioBase: precio?.precioBase || 0,
+        precioBase,
         precioOferta: precio?.precioOferta,
         variantes,
+        esFavorito: favoritosSet.has(producto.id),
       };
     });
 
@@ -136,17 +194,7 @@ export class CatalogoService {
         },
         preciosCO: {
           where: { tiendaId },
-          include: {
-            corrida: true,
-            talla: true,
-            color: true,
-            stock: {
-              select: {
-                cantidad: true,
-                cantidadReservada: true,
-              },
-            },
-          },
+          include: { corrida: true, talla: true, color: true },
           orderBy: [
             { talla: { orden: 'asc' } },
             { color: { nombre: 'asc' } },
@@ -160,10 +208,11 @@ export class CatalogoService {
     }
 
     const precio = producto.precios[0];
-
-    // Agrupar variantes por corrida y color
     const variantes = producto.preciosCO.map((pco) => ({
       id: pco.id,
+      // precioCOId es el id de PrecioCO. Necesario para proponer
+      // sustituciones desde la pantalla de surtir.
+      precioCOId: pco.id,
       corridaId: pco.corridaId,
       corrida: pco.corrida.nombre,
       tallaId: pco.tallaId,
@@ -173,9 +222,9 @@ export class CatalogoService {
       colorHex: pco.color.hex,
       sku: pco.sku,
       precio: pco.precio,
-      stockDisponible: pco.stock
-        ? pco.stock.cantidad - pco.stock.cantidadReservada
-        : 0,
+      // B2B: sin manejo de stock. La disponibilidad la confirma bodega al
+      // revisar el pedido. Ver nota en obtenerProductos.
+      stockDisponible: null,
     }));
 
     return {
@@ -204,11 +253,7 @@ export class CatalogoService {
       }),
       this.prisma.corrida.findMany({
         where: { activa: true },
-        include: {
-          tallas: {
-            orderBy: { orden: 'asc' },
-          },
-        },
+        include: { tallas: { orderBy: { orden: 'asc' } } },
         orderBy: { nombre: 'asc' },
       }),
       this.prisma.color.findMany({
@@ -224,57 +269,44 @@ export class CatalogoService {
     };
   }
 
-  async verificarDisponibilidad(items: { precioCOId: number; cantidad: number }[]) {
-    const preciosCO = await this.prisma.precioCO.findMany({
-      where: {
-        id: { in: items.map((i) => i.precioCOId) },
-      },
-      include: {
-        producto: true,
-        talla: true,
-        color: true,
-        stock: true,
-      },
+  /**
+   * Resuelve un set de precioCOIds a un objeto con datos mínimos para mostrar
+   * en el carrito/checkout. Devuelve [] si la lista está vacía.
+   */
+  async obtenerPreciosPorIds(ids: number[]) {
+    if (ids.length === 0) return [];
+    const precios = await this.prisma.precioCO.findMany({
+      where: { id: { in: ids } },
+      include: { producto: true, talla: true, color: true, corrida: true },
     });
+    return precios.map((p) => ({
+      id: p.id,
+      tiendaId: p.tiendaId,
+      precio: p.precio,
+      producto: {
+        id: p.producto.id,
+        codigo: p.producto.codigo,
+        nombre: p.producto.nombre,
+        imagenPrincipal: p.producto.imagenPrincipal,
+      },
+      variante: {
+        corrida: p.corrida.nombre,
+        talla: p.talla.nombre,
+        color: p.color.nombre,
+        colorHex: p.color.hex,
+      },
+    }));
+  }
 
-    const resultado = items.map((item) => {
-      const pco = preciosCO.find((p) => p.id === item.precioCOId);
-
-      if (!pco) {
-        return {
-          precioCOId: item.precioCOId,
-          disponible: false,
-          stockActual: 0,
-          mensaje: 'Producto no encontrado',
-        };
-      }
-
-      const stockDisponible = pco.stock
-        ? pco.stock.cantidad - pco.stock.cantidadReservada
-        : 0;
-
-      return {
-        precioCOId: item.precioCOId,
-        disponible: stockDisponible >= item.cantidad,
-        stockActual: stockDisponible,
-        cantidadSolicitada: item.cantidad,
-        producto: {
-          nombre: pco.producto.nombre,
-          talla: pco.talla.nombre,
-          color: pco.color.nombre,
-        },
-        mensaje:
-          stockDisponible >= item.cantidad
-            ? 'Disponible'
-            : `Stock insuficiente. Disponible: ${stockDisponible}`,
-      };
+  /**
+   * Devuelve el set de productoIds marcados como favoritos por el usuario.
+   * Usado por el endpoint de catálogo para inyectar esFavorito por producto.
+   */
+  private async cargarFavoritosDelUsuario(usuarioId: number): Promise<Set<number>> {
+    const rows = await this.prisma.favorito.findMany({
+      where: { usuarioId },
+      select: { productoId: true },
     });
-
-    const todosDisponibles = resultado.every((r) => r.disponible);
-
-    return {
-      disponible: todosDisponibles,
-      items: resultado,
-    };
+    return new Set(rows.map((r) => r.productoId));
   }
 }

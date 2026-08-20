@@ -15,6 +15,9 @@ class UserResponseDto {
 
   @ApiProperty({ required: false })
   tiendaId?: number;
+
+  @ApiProperty({ required: false, description: 'Teléfono en formato E.164 (ej. +525512345678)' })
+  telefono?: string;
 }
 
 export class AuthResponseDto {

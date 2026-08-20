@@ -1,4 +1,4 @@
-import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { RolUsuario } from '@prisma/client';
 import { ROLES_KEY } from '../decorators/roles.decorator';
@@ -13,17 +13,27 @@ export class RolesGuard implements CanActivate {
       context.getClass(),
     ]);
 
-    if (!requiredRoles) {
+    // Sin @Roles() el endpoint es accesible para cualquier rol autenticado.
+    if (!requiredRoles || requiredRoles.length === 0) {
       return true;
     }
 
     const { user } = context.switchToHttp().getRequest();
+    if (!user) {
+      throw new ForbiddenException('Usuario no autenticado');
+    }
 
-    // ADMIN puede hacer todo
-    if (user?.rol === RolUsuario.ADMIN) {
+    // ADMIN pasa siempre (superusuario).
+    if (user.rol === RolUsuario.ADMIN) {
       return true;
     }
 
-    return requiredRoles.includes(user?.rol);
+    if (requiredRoles.includes(user.rol)) {
+      return true;
+    }
+
+    throw new ForbiddenException(
+      `Acceso denegado: rol ${user.rol} no autorizado para este recurso`,
+    );
   }
 }

@@ -7,6 +7,12 @@ export interface JwtPayload {
   tiendaId?: number;
 }
 
+export interface KioskTokenPayload {
+  sub: number;
+  kind: 'kiosk';
+  tiendaId: number;
+}
+
 export interface AuthenticatedUser {
   userId: number;
   email: string;
@@ -26,7 +32,9 @@ export interface AuthResponse extends TokenResponse {
     id: number;
     email: string;
     nombre: string;
+    apellido?: string;
     rol: RolUsuario;
     tiendaId?: number;
+    telefono?: string;
   };
 }

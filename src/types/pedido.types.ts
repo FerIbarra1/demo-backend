@@ -1,4 +1,4 @@
-import { EstadoPedido, EstadoPago, TipoPago, RolUsuario, PrecioCO } from '@prisma/client';
+import { EstadoPedido, RolUsuario, PrecioCO } from '@prisma/client';
 
 export interface UserContext {
   userId: number;
@@ -27,9 +27,7 @@ export interface ItemPedidoData {
 
 export interface CrearPedidoData {
   items: ItemPedidoInput[];
-  tipoPago: TipoPago;
   notas?: string;
-  referenciaPago?: string;
 }
 
 export interface CambioEstadoData {
@@ -37,21 +35,7 @@ export interface CambioEstadoData {
   observacion?: string;
 }
 
-export interface VerificacionPagoData {
-  aprobado: boolean;
-  observacion?: string;
-}
-
-export interface StockVerificacion {
-  itemId: number;
-  producto: string;
-  talla: string;
-  color: string;
-  cantidadSolicitada: number;
-  stockDisponible: number;
-  suficiente: boolean;
-}
-
+/** B2B: no hay stock en tiempo real. Tipos deprecados. */
 export interface PrecioCOWithRelations extends PrecioCO {
   producto: {
     nombre: string;
@@ -66,8 +50,4 @@ export interface PrecioCOWithRelations extends PrecioCO {
   corrida: {
     nombre: string;
   };
-  stock?: {
-    cantidad: number;
-    cantidadReservada: number;
-  } | null;
 }

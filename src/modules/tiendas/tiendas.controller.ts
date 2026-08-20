@@ -1,10 +1,8 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, UseGuards, ParseIntPipe, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Patch, Param, Delete, ParseIntPipe, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { TiendasService } from './tiendas.service';
 import { CreateTiendaDto } from './dto/create-tienda.dto';
 import { UpdateTiendaDto } from './dto/update-tienda.dto';
-import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolUsuario } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
@@ -49,7 +47,6 @@ export class TiendasController {
   }
 
   @Post()
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(RolUsuario.ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Crear nueva tienda (Admin)' })
@@ -58,7 +55,6 @@ export class TiendasController {
   }
 
   @Patch(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(RolUsuario.ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Actualizar tienda (Admin)' })
@@ -67,7 +63,6 @@ export class TiendasController {
   }
 
   @Delete(':id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(RolUsuario.ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Desactivar tienda (Admin)' })

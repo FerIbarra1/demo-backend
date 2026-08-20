@@ -1,0 +1,30 @@
+{
+  "name": "@playerytees/sync-agent",
+  "version": "1.0.0",
+  "description": "Servicio local que sincroniza Firebird/VFP -&gt; NestJS nube para PlayeryTees",
+  "main": "dist/index.js",
+  "scripts": {
+    "build:ts": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "install-service": "node dist/install/install-windows-service.js",
+    "uninstall-service": "node dist/install/uninstall-windows-service.js",
+    "package": "node scripts/package.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.4.5",
+    "node-firebird": "^2.14.4",
+    "node-windows": "^1.0.0-beta.6",
+    "pino": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

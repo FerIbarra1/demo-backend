@@ -1,4 +1,4 @@
-import { PrismaClient, RolUsuario, EstadoPedido, TipoPago, EstadoPago } from '@prisma/client';
+import { PrismaClient, RolUsuario } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
 const prisma = new PrismaClient();
@@ -58,11 +58,14 @@ async function limpiarBaseDeDatos() {
   console.log('🗑️  Eliminando datos existentes...');
 
   // Borrar en orden para respetar foreign keys
+  await prisma.notificacion.deleteMany({});
+  await prisma.pedidoMensaje.deleteMany({});
+  await prisma.pedidoRevisionItem.deleteMany({});
+  await prisma.pedidoRevision.deleteMany({});
   await prisma.itemPedido.deleteMany({});
   await prisma.historialPedido.deleteMany({});
   await prisma.logActividad.deleteMany({});
   await prisma.pedido.deleteMany({});
-  await prisma.stock.deleteMany({});
   await prisma.precioCO.deleteMany({});
   await prisma.precio.deleteMany({});
   await prisma.productoTienda.deleteMany({});
@@ -70,7 +73,8 @@ async function limpiarBaseDeDatos() {
   await prisma.talla.deleteMany({});
   await prisma.corrida.deleteMany({});
   await prisma.color.deleteMany({});
-  await prisma.sesion.deleteMany({});
+  // kiosko tiene FK activado_por_id → usuarios. Hay que borrarlo ANTES.
+  await prisma.kiosko.deleteMany({});
   await prisma.usuario.deleteMany({});
   await prisma.tienda.deleteMany({});
 
@@ -84,10 +88,14 @@ async function limpiarBaseDeDatos() {
   await prisma.$executeRaw`ALTER SEQUENCE "productos_tienda_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "precios_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "preciosco_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "stock_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "items_pedido_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "historial_pedidos_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_revisiones_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_revisiones_items_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_mensajes_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "notificaciones_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "kioskos_id_seq" RESTART WITH 1`;
 
   console.log('  ✓ Base de datos limpiada\n');
 }
@@ -105,38 +113,63 @@ async function main() {
 
   // ========== CREAR TIENDAS ==========
   console.log('🏪 Creando tiendas...');
-  const tiendaCentro = await prisma.tienda.create({
+
+  const tiendaMexicali = await prisma.tienda.create({
     data: {
-      nombre: 'Sucursal Centro',
-      direccion: 'Calle Principal 123, Centro',
-      ciudad: 'Ciudad de México',
-      estado: 'Ciudad de México',
-      telefono: '555-0100',
-      email: 'centro@tienda.com',
+      nombre: 'Punto Textil Mexicali',
+      direccion: 'Blvd. Lázaro Cárdenas 481, Ex-Ejido Coahuila, C.P. 21360',
+      ciudad: 'Mexicali',
+      estado: 'Baja California',
+      telefono: '686-000-0001',
+      email: 'mexicali@puntotextil.com',
     },
   });
 
-  const tiendaNorte = await prisma.tienda.create({
+  const tiendaObregon = await prisma.tienda.create({
     data: {
-      nombre: 'Sucursal Guadalajara',
-      direccion: 'Av. Chapultepec 789, Juárez',
-      ciudad: 'Guadalajara',
-      estado: 'Jalisco',
-      telefono: '333-0200',
-      email: 'guadalajara@tienda.com',
+      nombre: 'Punto Textil Mayoreo Cd Obregón',
+      direccion: 'Calle Nicolás Bravo 700 B, Col. Centro (Urb. No. 1), C.P. 85000',
+      ciudad: 'Ciudad Obregón',
+      estado: 'Sonora',
+      telefono: '644-000-0002',
+      email: 'obregon@puntotextil.com',
     },
   });
 
-  console.log(`  ✓ Tienda: ${tiendaCentro.nombre}`);
-  console.log(`  ✓ Tienda: ${tiendaNorte.nombre}\n`);
+  const tiendaHermosillo = await prisma.tienda.create({
+    data: {
+      nombre: 'Distribuidora Punto Textil Hermosillo',
+      direccion: 'Boulevard Luis Encinas J. N°573, Col. Pimentel, C.P. 83188',
+      ciudad: 'Hermosillo',
+      estado: 'Sonora',
+      telefono: '662-000-0003',
+      email: 'hermosillo@puntotextil.com',
+    },
+  });
+
+  const tiendaMonterrey = await prisma.tienda.create({
+    data: {
+      nombre: 'Distribuidora Punto Textil Monterrey Tec',
+      direccion: 'Av. Eugenio Garza Sada Sur N° 2620, Col. Tecnológico, C.P. 64700',
+      ciudad: 'Monterrey',
+      estado: 'Nuevo León',
+      telefono: '81-0000-0004',
+      email: 'monterrey@puntotextil.com',
+    },
+  });
+
+  console.log(`  ✓ Tienda: ${tiendaMexicali.nombre}`);
+  console.log(`  ✓ Tienda: ${tiendaObregon.nombre}`);
+  console.log(`  ✓ Tienda: ${tiendaHermosillo.nombre}`);
+  console.log(`  ✓ Tienda: ${tiendaMonterrey.nombre}\n`);
 
   // ========== CREAR USUARIOS ==========
   console.log('👤 Creando usuarios...');
-  const passwordHash = await bcrypt.hash('password123', 10);
+  const passwordHash = await bcrypt.hash('123456', 10);
 
   const admin = await prisma.usuario.create({
     data: {
-      email: 'admin@tienda.com',
+      email: 'admin@puntotextil.com',
       password: passwordHash,
       nombre: 'Administrador',
       apellido: 'Sistema',
@@ -147,56 +180,100 @@ async function main() {
 
   const usuarioBodega = await prisma.usuario.create({
     data: {
-      email: 'bodega@tienda.com',
+      email: 'bodega@puntotextil.com',
       password: passwordHash,
       nombre: 'Usuario',
       apellido: 'Bodega',
       rol: RolUsuario.BODEGA,
-      tiendaId: tiendaCentro.id,
+      tiendaId: tiendaMexicali.id,
       activo: true,
     },
   });
 
   const usuarioCajero = await prisma.usuario.create({
     data: {
-      email: 'cajero@tienda.com',
+      email: 'cajero@puntotextil.com',
       password: passwordHash,
       nombre: 'Usuario',
       apellido: 'Cajero',
       rol: RolUsuario.CAJERO,
-      tiendaId: tiendaCentro.id,
+      tiendaId: tiendaMexicali.id,
       activo: true,
     },
   });
 
-  const usuarioMostrador = await prisma.usuario.create({
+  // Usuarios dedicados al monitor de bodega (uno por tienda).
+  // Pensados para dejarse logueados en TVs de la bodega.
+  // Rol BODEGA_MONITOR: login redirige a /bodega-monitor; no puede tomar pedidos.
+  await prisma.usuario.create({
     data: {
-      email: 'mostrador@tienda.com',
+      email: 'monitor.mexicali@puntotextil.com',
       password: passwordHash,
-      nombre: 'Usuario',
-      apellido: 'Mostrador',
-      rol: RolUsuario.MOSTRADOR,
-      tiendaId: tiendaCentro.id,
+      nombre: 'Monitor',
+      apellido: 'Mexicali',
+      rol: RolUsuario.BODEGA_MONITOR,
+      tiendaId: tiendaMexicali.id,
+      activo: true,
+    },
+  });
+
+  await prisma.usuario.create({
+    data: {
+      email: 'monitor.mty@puntotextil.com',
+      password: passwordHash,
+      nombre: 'Monitor',
+      apellido: 'Monterrey',
+      rol: RolUsuario.BODEGA_MONITOR,
+      tiendaId: tiendaMonterrey.id,
       activo: true,
     },
   });
 
   const clienteDemo = await prisma.usuario.create({
     data: {
-      email: 'cliente@demo.com',
+      email: 'cliente@puntotextil.com',
       password: passwordHash,
       nombre: 'Cliente',
       apellido: 'Demo',
+      telefono: '+525512345678',
       rol: RolUsuario.CLIENTE,
       activo: true,
     },
   });
 
-  console.log(`  ✓ Admin: ${admin.email} / password123`);
-  console.log(`  ✓ Bodega: ${usuarioBodega.email} / password123`);
-  console.log(`  ✓ Cajero: ${usuarioCajero.email} / password123`);
-  console.log(`  ✓ Mostrador: ${usuarioMostrador.email} / password123`);
-  console.log(`  ✓ Cliente: ${clienteDemo.email} / password123\n`);
+  // Mostrador: usuario que entrega pedidos ya pagados en tienda.
+  // Rol MOSTRADOR. Login redirige a /mostrador.
+  const usuarioMostrador = await prisma.usuario.create({
+    data: {
+      email: 'mostrador@puntotextil.com',
+      password: passwordHash,
+      nombre: 'Usuario',
+      apellido: 'Mostrador',
+      rol: RolUsuario.MOSTRADOR,
+      tiendaId: tiendaMexicali.id,
+      activo: true,
+    },
+  });
+
+  console.log(`  ✓ Admin: ${admin.email} / 123456`);
+  console.log(`  ✓ Bodega: ${usuarioBodega.email} / 123456 (${tiendaMexicali.nombre})`);
+  console.log(`  ✓ Cajero: ${usuarioCajero.email} / 123456 (${tiendaMexicali.nombre})`);
+  console.log(`  ✓ Mostrador: ${usuarioMostrador.email} / 123456 (${tiendaMexicali.nombre})`);
+  console.log(`  ✓ Cliente: ${clienteDemo.email} / 123456\n`);
+
+  // ========== CREAR KIOSKO DEMO ==========
+  console.log('📱 Creando kiosko demo...');
+  await prisma.kiosko.upsert({
+    where: { tiendaId_nombre: { tiendaId: tiendaMexicali.id, nombre: 'Kiosko Entrada' } },
+    update: {},
+    create: {
+      tiendaId: tiendaMexicali.id,
+      nombre: 'Kiosko Entrada',
+      estado: 'ACTIVO',
+      activadoPorId: admin.id,
+    },
+  });
+  console.log(`  ✓ Kiosko: "Kiosko Entrada" en ${tiendaMexicali.nombre}\n`);
 
   // ========== CREAR CORRIDAS Y TALLAS ==========
   console.log('📏 Creando corridas y tallas...');
@@ -296,10 +373,10 @@ async function main() {
   }
   console.log('');
 
-  // ========== CREAR PRECIOS Y STOCK ==========
-  console.log('💰 Creando precios y stock...');
+  // ========== CREAR PRECIOS ==========
+  console.log('💰 Creando precios y variantes (PrecioCO)...');
 
-  const tiendas = [tiendaCentro, tiendaNorte];
+  const tiendas = [tiendaMexicali, tiendaObregon, tiendaHermosillo, tiendaMonterrey];
   const tallasAdulto = corridaAdulto.tallas;
 
   for (const tienda of tiendas) {
@@ -324,7 +401,8 @@ async function main() {
         },
       });
 
-      // Crear PrecioCO y Stock para cada combinación talla/color
+      // Crear PrecioCO para cada combinación talla/color
+      // (Stock eliminado en refactor B2B: no manejamos inventario confiable)
       for (const talla of tallasAdulto) {
         for (const colorConfig of producto.colores) {
           const colorDB = coloresDB.find(c => c.nombre === colorConfig.nombre);
@@ -335,7 +413,7 @@ async function main() {
             ? producto.precioBase + 30
             : producto.precioBase;
 
-          const precioCO = await prisma.precioCO.create({
+          await prisma.precioCO.create({
             data: {
               productoId: producto.id,
               tiendaId: tienda.id,
@@ -346,91 +424,36 @@ async function main() {
               sku,
             },
           });
-
-          // Stock aleatorio entre 5 y 50 (mínimo 5 para poder comprar)
-          const stockCantidad = Math.floor(Math.random() * 46) + 5;
-          await prisma.stock.create({
-            data: {
-              precioCOId: precioCO.id,
-              tiendaId: tienda.id,
-              tallaId: talla.id,
-              colorId: colorDB.id,
-              cantidad: stockCantidad,
-              cantidadReservada: 0,
-            },
-          });
         }
       }
     }
-    console.log(`  ✓ Precios y stock creados para ${tienda.nombre}`);
+    console.log(`  ✓ Precios creados para ${tienda.nombre}`);
   }
   console.log('');
 
-  // ========== CREAR PEDIDO DE EJEMPLO ==========
-  console.log('📦 Creando pedido de ejemplo...');
-
-  const precioCOEjemplo = await prisma.precioCO.findFirst({
-    where: { tiendaId: tiendaCentro.id },
-    include: { producto: true, talla: true, color: true, corrida: true },
-  });
-
-  if (precioCOEjemplo) {
-    const numeroPedido = `PD-${new Date().getFullYear()}-000001`;
-
-    const pedido = await prisma.pedido.create({
-      data: {
-        numeroPedido,
-        usuarioId: clienteDemo.id,
-        tiendaId: tiendaCentro.id,
-        estado: EstadoPedido.PENDIENTE,
-        tipoPago: TipoPago.TRANSFERENCIA,
-        estadoPago: EstadoPago.PENDIENTE,
-        subtotal: precioCOEjemplo.precio,
-        total: precioCOEjemplo.precio,
-        clienteNombre: `${clienteDemo.nombre} ${clienteDemo.apellido}`,
-        clienteEmail: clienteDemo.email,
-        items: {
-          create: {
-            productoId: precioCOEjemplo.productoId,
-            precioCOId: precioCOEjemplo.id,
-            cantidad: 1,
-            precioUnitario: precioCOEjemplo.precio,
-            subtotal: precioCOEjemplo.precio,
-            productoNombre: precioCOEjemplo.producto.nombre,
-            productoCodigo: precioCOEjemplo.producto.codigo,
-            corridaNombre: precioCOEjemplo.corrida.nombre,
-            tallaNombre: precioCOEjemplo.talla.nombre,
-            colorNombre: precioCOEjemplo.color.nombre,
-          },
-        },
-        historial: {
-          create: {
-            estadoNuevo: EstadoPedido.PENDIENTE,
-            observacion: 'Pedido creado desde seed',
-            usuarioId: clienteDemo.id,
-            usuarioNombre: `${clienteDemo.nombre} ${clienteDemo.apellido}`,
-          },
-        },
-      },
-    });
-
-    console.log(`  ✓ Pedido creado: ${pedido.numeroPedido}`);
-  }
+  // ========== PEDIDOS ==========
+  // (jul 2026: ya no se crea un pedido demo en el seed. Los pedidos se crean
+  // manualmente desde la app — kiosko, web o por el admin — para probar el
+  // flujo completo de bodega/cajero/mostrador. Si necesitas datos de prueba,
+  // créalos desde la UI con los usuarios listados al final de este script.)
 
   console.log('\n✅ Seed completado exitosamente!\n');
   console.log('────────────────────────────────────────');
   console.log(`Productos creados: ${productosCreados.length}`);
   console.log(`Colores creados: ${coloresDB.length}`);
+  console.log(`Tiendas creadas: 4 (Mexicali, Cd Obregón, Hermosillo, Monterrey Tec)`);
   console.log(`Tallas por color: ${tallasAdulto.length}`);
   console.log(`Variantes totales: ${productosCreados.length * coloresDB.length * tallasAdulto.length * tiendas.length}`);
   console.log('');
-  console.log('Usuarios de prueba:');
-  console.log('  admin@tienda.com / password123');
-  console.log('  bodega@tienda.com / password123');
-  console.log('  cajero@tienda.com / password123');
-  console.log('  mostrador@tienda.com / password123');
-  console.log('  cliente@demo.com / password123');
-  console.log('────────────────────────────���───────────');
+  console.log('Usuarios de prueba (password = 123456):');
+  console.log('  admin@puntotextil.com');
+  console.log('  bodega@puntotextil.com              (Mexicali)');
+  console.log('  cajero@puntotextil.com              (Mexicali)');
+  console.log('  mostrador@puntotextil.com           (Mexicali)');
+  console.log('  cliente@puntotextil.com');
+  console.log('  monitor.mexicali@puntotextil.com    (TV monitor Mexicali, rol BODEGA_MONITOR)');
+  console.log('  monitor.mty@puntotextil.com         (TV monitor Monterrey, rol BODEGA_MONITOR)');
+  console.log('────────────────────────────────────────');
   console.log('\nLas imágenes usan rutas relativas (/products/...)');
   console.log('El navegador las resolverá automáticamente según el dominio del frontend');
 }

@@ -28,17 +28,24 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
       throw err || new UnauthorizedException('Token inválido o expirado');
     }
 
-    // Validar que se especifique tienda para clientes
+    // Si llega la tienda por header, la propagamos al request.user para
+    // que esté disponible en el service. NO exigimos tienda en cada
+    // request autenticada: la selección de tienda es por sesión y se
+    // valida en los servicios que la requieren (ej. crearPedido).
     const request = context.switchToHttp().getRequest();
     const tiendaHeader = request.headers['x-tienda-id'];
 
-    if (user.rol === RolUsuario.CLIENTE && !user.tiendaId && !tiendaHeader) {
-      throw new UnauthorizedException('Debe seleccionar una tienda (header X-Tienda-Id)');
-    }
-
-    // Asignar tienda del header si no la tiene
-    if (!user.tiendaId && tiendaHeader) {
-      user.tiendaId = parseInt(tiendaHeader, 10);
+    if (tiendaHeader) {
+      const parsed = parseInt(tiendaHeader, 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        user.tiendaIdHeader = parsed;
+        // Mantenemos compatibilidad: si user.tiendaId no está set, lo
+        // reflejamos desde el header (legacy code que lee user.tiendaId
+        // todavía funciona).
+        if (!user.tiendaId) {
+          user.tiendaId = parsed;
+        }
+      }
     }
 
     return user;

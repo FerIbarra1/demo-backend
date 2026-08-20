@@ -1,0 +1,10 @@
+agent.config.json
+agent-data/
+agent-data.db
+agent-data.db-journal
+node_modules/
+dist/
+dist-bin/
+*.log
+.env
+.env.*

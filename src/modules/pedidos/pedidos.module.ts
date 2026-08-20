@@ -1,20 +1,69 @@
 import { Module } from '@nestjs/common';
-import { PedidosService } from './pedidos.service';
-import { PedidosClienteController } from './pedidos-cliente.controller';
-import { PedidosBodegaController } from './pedidos-bodega.controller';
-import { PedidosCajeroController } from './pedidos-cajero.controller';
-import { PedidosMostradorController } from './pedidos-mostrador.controller';
-import { PedidosAdminController } from './pedidos-admin.controller';
+import { ClienteController } from './cliente/cliente.controller';
+import { ClienteService } from './cliente/cliente.service';
+import { BodegaController } from './bodega/bodega.controller';
+import { BodegaService } from './bodega/bodega.service';
+import { BodegaMonitorController } from './bodega/bodega-monitor.controller';
+import { SurtidoService } from './bodega/surtido.service';
+import { MonitorService } from './bodega/monitor.service';
+import { CajeroController } from './cajero/cajero.controller';
+import { CajeroService } from './cajero/cajero.service';
+import { CajeroMonitorController } from './cajero/cajero-monitor.controller';
+import { AdminController } from './admin/admin.controller';
+import { AdminService } from './admin/admin.service';
+import { MessagesController } from './messages/messages.controller';
+import { MessagesService } from './messages/messages.service';
+import { PedidoAccessService } from './core/pedido-access.service';
+import { PedidoStateService } from './core/pedido-state.service';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { MailModule } from '../mail/mail.module';
 
+/**
+ * Módulo de Pedidos.
+ *
+ * Estructura por dominio (jul 2026, refactor):
+ *   - core/        — piezas compartidas: máquina de estados, access, utils.
+ *   - cliente/     — endpoints y service del cliente web.
+ *   - bodega/      — endpoints y service de bodega + surtido + monitor bodega.
+ *   - cajero/      — endpoints y service de cajero + monitor cajero.
+ *   - admin/       — endpoints y service de admin + webhook de pago.
+ *   - messages/    — chat cross-rol (cliente, bodega, cajero, admin).
+ *
+ * Cada subdominio es una carpeta con su controller + service. Todos se
+ * registran en este único @Module para mantener un solo punto de DI.
+ *
+ * Otros módulos consumen los services de `core/`:
+ *   - `mostrador/` importa `PedidosModule` y usa
+ *     `PedidoStateService.cambiarEstado` y `PedidoAccessService`.
+ */
 @Module({
+  imports: [NotificationsModule, MailModule],
   controllers: [
-    PedidosClienteController,
-    PedidosBodegaController,
-    PedidosCajeroController,
-    PedidosMostradorController,
-    PedidosAdminController,
+    ClienteController,
+    BodegaController,
+    BodegaMonitorController,
+    CajeroController,
+    CajeroMonitorController,
+    AdminController,
+    MessagesController,
   ],
-  providers: [PedidosService],
-  exports: [PedidosService],
+  providers: [
+    ClienteService,
+    BodegaService,
+    SurtidoService,
+    MonitorService,
+    CajeroService,
+    AdminService,
+    MessagesService,
+    PedidoAccessService,
+    PedidoStateService,
+  ],
+  exports: [
+    PedidoAccessService,
+    PedidoStateService,
+    MonitorService,
+    SurtidoService,
+    AdminService,
+  ],
 })
 export class PedidosModule {}

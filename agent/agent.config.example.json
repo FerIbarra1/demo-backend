@@ -1,0 +1,32 @@
+{
+  "$comment": "Copia este archivo a agent.config.json y rellena los valores reales. NO commitear agent.config.json con passwords reales.",
+  "cloud": {
+    "baseUrl": "https://api.playerytees.com",
+    "agentKey": "PEGA-AQUI-EL-VALOR-DE-AGENT_API_KEY-DEL-PANEL-ADMIN",
+    "sucursalIds": [1, 2, 3, 4, 5],
+    "timeoutMs": 30000
+  },
+  "firebird": {
+    "host": "127.0.0.1",
+    "port": 3050,
+    "database": "C:\\Datos\\TIENDA.FDB",
+    "user": "SYSDBA",
+    "password": "masterkey",
+    "charset": "ISO8859_1",
+    "poolSize": 4
+  },
+  "sync": {
+    "pollIntervalMs": 5000,
+    "backoffMinMs": 5000,
+    "backoffMaxMs": 60000,
+    "batchSize": 200,
+    "checkpointBatch": 50,
+    "queueRetentionDays": 7,
+    "expirationHours": 24,
+    "logLevel": "info"
+  },
+  "service": {
+    "name": "playerytees-sync-agent",
+    "description": "Sincronizacion bidireccional Firebird &lt;-&gt; PlayeryTees Cloud"
+  }
+}

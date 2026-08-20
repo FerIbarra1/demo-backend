@@ -1,6 +1,5 @@
-import { IsEmail, IsString, MinLength, IsOptional, IsEnum } from 'class-validator';
+import { IsEmail, IsString, MinLength, IsOptional, Matches } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { RolUsuario } from '@prisma/client';
 
 export class RegisterDto {
   @ApiProperty({ example: 'nuevo@cliente.com' })
@@ -22,13 +21,11 @@ export class RegisterDto {
   @IsString()
   apellido?: string;
 
-  @ApiPropertyOptional({ example: '555-1234' })
-  @IsOptional()
+  @ApiProperty({
+    example: '+525512345678',
+    description: 'Teléfono en formato E.164 (con código de país)',
+  })
   @IsString()
-  telefono?: string;
-
-  @ApiPropertyOptional({ enum: RolUsuario })
-  @IsOptional()
-  @IsEnum(RolUsuario)
-  rol?: RolUsuario;
+  @Matches(/^\+\d{6,15}$/, { message: 'telefono debe tener formato E.164 (+<6-15 dígitos>)' })
+  telefono: string;
 }
