@@ -11,6 +11,8 @@ import { PedidoStateService } from '../core/pedido-state.service';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
+import { rankearSimilares, TOP_LISTA } from '../core/similitud.util';
+import type { SurtirJuntosPedidoDto } from './dto/surtir-juntos.dto';
 
 /**
  * Servicio del dominio BODEGA.
@@ -267,5 +269,161 @@ export class BodegaService {
       { nuevoEstado: EstadoPedido.SHIPPED, observacion: 'Pedido enviado al cliente' },
       usuario,
     );
+  }
+
+  /**
+   * F10 (ago 2026): lista pedidos en cola que comparten items con los
+   * pedidos que el bodeguero autenticado tiene asignados. Alimenta el
+   * banner "Surtir juntos" en /bodega.
+   *
+   * Algoritmo (mismos pesos que el monitor y que `calcularSimilaresParaPedido`
+   * del surtido.service.ts, centralizados en `core/similitud.util.ts`):
+   *
+   *   1. Tomar los items NO cancelados de los pedidos del bodeguero.
+   *   2. Buscar pedidos en PENDING_REVIEW o REVIEWING-sin-asignar de la
+   *      misma tienda, distintos a los del bodeguero.
+   *   3. Rankearlos con `rankearSimilares` (10/precioCO + 4/producto +
+   *      1/minuto antigüedad, umbral 4, top 10).
+   *   4. Para cada pedido rankeado, hidratar el detalle de items
+   *      compartidos (qué producto, qué cantidad, con qué pedidos del
+   *      bodeguero lo comparten) para que el frontend pueda renderizar
+   *      el banner sin pedir más queries.
+   *
+   * Devuelve array vacío si el bodeguero no tiene pedidos asignados o si
+   * ninguno tiene productos compartidos con la cola.
+   */
+  async obtenerSurtirJuntos(
+    usuarioId: number,
+    tiendaId?: number,
+  ): Promise<SurtirJuntosPedidoDto[]> {
+    if (!tiendaId) return [];
+
+    // 1) Items de referencia: todos los no-cancelados de los pedidos del bodeguero.
+    const pedidosDelBodeguero = await this.prisma.pedido.findMany({
+      where: {
+        asignadoAId: usuarioId,
+        estado: {
+          in: [
+            EstadoPedido.REVIEWING,
+            EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+          ],
+        },
+        tiendaId,
+      },
+      select: { id: true },
+    });
+
+    if (pedidosDelBodeguero.length === 0) return [];
+
+    const itemsReferencia = await this.prisma.itemPedido.findMany({
+      where: { pedidoId: { in: pedidosDelBodeguero.map((p) => p.id) }, cancelada: false },
+      select: { productoId: true, precioCOId: true },
+    });
+    if (itemsReferencia.length === 0) return [];
+
+    // 2) Candidatos: cola abierta de la misma tienda, distintos a los del bodeguero.
+    const idsDelBodeguero = new Set(pedidosDelBodeguero.map((p) => p.id));
+    const candidatos = await this.prisma.pedido.findMany({
+      where: {
+        tiendaId,
+        estado: {
+          in: [EstadoPedido.PENDING_REVIEW, EstadoPedido.REVIEWING],
+        },
+        asignadoAId: null,
+        id: { notIn: Array.from(idsDelBodeguero) },
+      },
+      select: {
+        id: true,
+        numeroPedido: true,
+        clienteNombre: true,
+        canalOrigen: true,
+        fechaPedido: true,
+        items: {
+          where: { cancelada: false },
+          select: { id: true, productoId: true, precioCOId: true, cantidad: true },
+        },
+      },
+      orderBy: { fechaPedido: 'asc' },
+    });
+    if (candidatos.length === 0) return [];
+
+    // 3) Rankear con helper puro (mismo algoritmo que el monitor).
+    const ranked = rankearSimilares(
+      itemsReferencia,
+      candidatos.map((c) => ({
+        id: c.id,
+        numeroPedido: c.numeroPedido,
+        fechaPedido: c.fechaPedido,
+        items: c.items.map((it) => ({
+          productoId: it.productoId,
+          precioCOId: it.precioCOId,
+        })),
+      })),
+      { top: TOP_LISTA },
+    );
+    if (ranked.length === 0) return [];
+
+    // 4) Hidratar detalle para los N pedidos que pasaron el umbral.
+    const rankedIds = new Set(ranked.map((r) => r.id));
+    const candidatosDetalle = new Map(candidatos.map((c) => [c.id, c]));
+
+    // Mapa productoId → nombre para enriquecer items compartidos sin un join extra.
+    const productoIds = new Set<number>();
+    for (const r of ranked) {
+      const c = candidatosDetalle.get(r.id);
+      if (!c) continue;
+      for (const it of c.items) productoIds.add(it.productoId);
+    }
+    const productos = await this.prisma.producto.findMany({
+      where: { id: { in: Array.from(productoIds) } },
+      select: { id: true, nombre: true },
+    });
+    const productoNombreById = new Map(productos.map((p) => [p.id, p.nombre]));
+
+    // Mapa productoId → con qué pedidos del bodeguero lo comparten.
+    // productoCompartidoConBodeguero.get(productoId) = Set<pedidoIdDelBodeguero>
+    const productoCompartidoConBodeguero = new Map<number, Set<number>>();
+    for (const p of pedidosDelBodeguero) {
+      const items = await this.prisma.itemPedido.findMany({
+        where: { pedidoId: p.id, cancelada: false },
+        select: { productoId: true },
+      });
+      for (const it of items) {
+        let s = productoCompartidoConBodeguero.get(it.productoId);
+        if (!s) {
+          s = new Set();
+          productoCompartidoConBodeguero.set(it.productoId, s);
+        }
+        s.add(p.id);
+      }
+    }
+
+    const ahora = new Date();
+    return ranked.map((r) => {
+      const c = candidatosDetalle.get(r.id)!;
+      const itemsCompartidos: SurtirJuntosPedidoDto['items'] = [];
+      for (const it of c.items) {
+        const compartidoCon = productoCompartidoConBodeguero.get(it.productoId);
+        if (!compartidoCon || compartidoCon.size === 0) continue;
+        itemsCompartidos.push({
+          productoId: it.productoId,
+          productoNombre: productoNombreById.get(it.productoId) ?? '(producto)',
+          cantidad: it.cantidad,
+          pedidosCompartidosCon: Array.from(compartidoCon),
+        });
+      }
+      return {
+        id: r.id,
+        numeroPedido: r.numeroPedido,
+        clienteNombre: c.clienteNombre,
+        canalOrigen: c.canalOrigen,
+        minutosEnCola: Math.floor(
+          (ahora.getTime() - c.fechaPedido.getTime()) / 60000,
+        ),
+        itemsCompartidos: r.itemsCompartidos,
+        score: r.score,
+        items: itemsCompartidos,
+      };
+    });
   }
 }

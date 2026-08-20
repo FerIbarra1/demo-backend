@@ -8,7 +8,7 @@ import {
   Body,
   BadRequestException,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiResponse } from '@nestjs/swagger';
 import { BodegaService } from './bodega.service';
 import { SurtidoService } from './surtido.service';
 import { PedidoStateService } from '../core/pedido-state.service';
@@ -162,5 +162,28 @@ export class BodegaController {
   ) {
     const esAdmin = user.rol === RolUsuario.ADMIN;
     return this.surtidoService.confirmarSurtido(id, user, esAdmin);
+  }
+
+  /**
+   * F10 (ago 2026): pedidos en cola que comparten items con los que el
+   * bodeguero tiene asignados. Alimenta el banner "Surtir juntos" en
+   * /bodega para sugerir qué pedidos conviene tomar a continuación.
+   *
+   * Mismo algoritmo de scoring que `calcularSimilaresParaPedido` del
+   * surtido.service.ts y que el monitor, centralizado en
+   * `core/similitud.util.ts`.
+   */
+  @Get('surtir-juntos')
+  @ApiOperation({
+    summary:
+      'Pedidos en cola con items compartidos con los del bodeguero autenticado. ' +
+      'Top 10, score = 10/precioCO + 4/producto + 1/minuto antigüedad.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Array (puede ser vacío). Cada elemento trae los items compartidos con detalle.',
+  })
+  async surtirJuntos(@CurrentUser() user: any) {
+    return this.bodegaService.obtenerSurtirJuntos(user.userId, user.tiendaId);
   }
 }

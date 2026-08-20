@@ -11,6 +11,7 @@ import { MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
+import { rankearSimilares } from '../core/similitud.util';
 
 /**
  * Servicio de surtido en bodega.
@@ -509,8 +510,9 @@ export class SurtidoService {
 
   /**
    * Calcula los pedidos PENDING_REVIEW de la misma tienda que comparten items
-   * (por producto) con el pedido dado. Es la versión "vs este pedido" del
-   * algoritmo del monitor; reusa los mismos pesos pero adaptado.
+   * (por producto) con el pedido dado. F10 (ago 2026): delega en
+   * `rankearSimilares` (helper puro en core/similitud.util.ts) para no
+   * duplicar la lógica con `BodegaService.obtenerSurtirJuntos`.
    */
   private async calcularSimilaresParaPedido(pedido: {
     id: number;
@@ -532,11 +534,6 @@ export class SurtidoService {
     });
     if (itemsActuales.length === 0) return [];
 
-    const productoIdsActuales = new Set(itemsActuales.map((i) => i.productoId));
-    const precioCOIdsActuales = new Set(
-      itemsActuales.map((i) => i.precioCOId).filter((v): v is number => v != null),
-    );
-
     // Pedidos en cola de la misma tienda, distintos al actual
     const candidatos = await this.prisma.pedido.findMany({
       where: {
@@ -556,40 +553,7 @@ export class SurtidoService {
     });
     if (candidatos.length === 0) return [];
 
-    const ahora = new Date();
-    const UMBRAL = 4; // mismo que el monitor
-    const TOP = 3;
-
-    const scored = candidatos
-      .map((c) => {
-        let score = 0;
-        let itemsCompartidos = 0;
-        for (const it of c.items) {
-          if (it.precioCOId && precioCOIdsActuales.has(it.precioCOId)) {
-            score += 10;
-            itemsCompartidos++;
-          } else if (productoIdsActuales.has(it.productoId)) {
-            score += 4;
-            itemsCompartidos++;
-          }
-        }
-        const minutosEnCola = Math.floor(
-          (ahora.getTime() - c.fechaPedido.getTime()) / 60000,
-        );
-        score += minutosEnCola; // bono antigüedad
-        return {
-          id: c.id,
-          numeroPedido: c.numeroPedido,
-          score,
-          itemsCompartidos,
-          minutosEnCola,
-        };
-      })
-      .filter((r) => r.score >= UMBRAL && r.itemsCompartidos > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, TOP);
-
-    return scored;
+    return rankearSimilares(itemsActuales, candidatos, { top: 3 });
   }
 
   private validarCoherencia(dto: MarcarSurtidoItemDto) {
