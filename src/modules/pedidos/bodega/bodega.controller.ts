@@ -80,6 +80,20 @@ export class BodegaController {
     );
   }
 
+  @Get('surtir-juntos')
+  @ApiOperation({
+    summary:
+      'Pedidos en cola con items compartidos con los del bodeguero autenticado. ' +
+      'Top 10, score = 10/precioCO + 4/producto + 1/minuto antigüedad.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Array (puede ser vacío). Cada elemento trae los items compartidos con detalle.',
+  })
+  async surtirJuntos(@CurrentUser() user: any) {
+    return this.bodegaService.obtenerSurtirJuntos(user.userId, user.tiendaId);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Obtener pedido completo (items, revisiones, mensajes)' })
   async obtenerPedido(
@@ -172,18 +186,10 @@ export class BodegaController {
    * Mismo algoritmo de scoring que `calcularSimilaresParaPedido` del
    * surtido.service.ts y que el monitor, centralizado en
    * `core/similitud.util.ts`.
+   *
+   * NOTA: la ruta fija `surtir-juntos` está declarada arriba de @Get(':id')
+   * para que NestJS la matchee antes que el parámetro dinámico — si no,
+   * ParseIntPipe falla con "numeric string is expected" sobre la cadena
+   * literal "surtir-juntos".
    */
-  @Get('surtir-juntos')
-  @ApiOperation({
-    summary:
-      'Pedidos en cola con items compartidos con los del bodeguero autenticado. ' +
-      'Top 10, score = 10/precioCO + 4/producto + 1/minuto antigüedad.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Array (puede ser vacío). Cada elemento trae los items compartidos con detalle.',
-  })
-  async surtirJuntos(@CurrentUser() user: any) {
-    return this.bodegaService.obtenerSurtirJuntos(user.userId, user.tiendaId);
-  }
 }
