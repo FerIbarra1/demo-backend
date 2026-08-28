@@ -42,6 +42,18 @@ export interface PedidoEmailData {
   motivoCancelacion?: string | null;
   tiendaNombre?: string;
   tiendaTelefono?: string;
+  // Folio VFP (externalFolio). El folio visible es este; numeroPedido es interno.
+  externalFolio?: string | null;
+  // Data URL del QR del folio VFP (solo en el email "listo para pagar").
+  qrDataUrl?: string | null;
+}
+
+/**
+ * Folio visible al cliente: el de VFP si existe, si no "Pedido #id".
+ * numeroPedido (folio web) nunca se muestra.
+ */
+export function folioVisible(pedido: PedidoEmailData): string {
+  return pedido.externalFolio ?? `Pedido #${pedido.pedidoId}`;
 }
 
 export interface MailContext {
@@ -69,6 +81,7 @@ export const mailTemplates = {
   PedidoAprobado: (props: {
     pedido: PedidoEmailData;
     pedidoUrl: string;
+    qrDataUrl?: string | null;
   } & MailContext): ReactElement => PedidoAprobado(props),
   PagoConfirmado: (props: {
     pedido: PedidoEmailData;

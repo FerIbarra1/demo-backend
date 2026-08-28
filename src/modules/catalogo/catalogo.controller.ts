@@ -34,8 +34,13 @@ export class CatalogoController {
   async obtenerProductoDetalle(
     @Param('id', ParseIntPipe) id: number,
     @Param('tiendaId', ParseIntPipe) tiendaId: number,
+    @Req() req: Request,
   ) {
-    return this.catalogoService.obtenerProductoDetalle(id, tiendaId);
+    return this.catalogoService.obtenerProductoDetalle(
+      id,
+      tiendaId,
+      this.leerUserIdOpcional(req),
+    );
   }
 
   @Get('filtros/:tiendaId')
@@ -51,12 +56,17 @@ export class CatalogoController {
     summary: 'Resuelve un set de precioCOIds a { producto, variante, precio }',
   })
   @ApiQuery({ name: 'ids', required: true, type: String, example: '1,2,3' })
-  async obtenerPreciosPorIds(@Query('ids') ids: string) {
+  async obtenerPreciosPorIds(@Query('ids') ids: string, @Req() req: Request) {
     const parsed = ids
       .split(',')
       .map((s) => Number(s.trim()))
       .filter((n) => Number.isFinite(n) && n > 0);
-    return this.catalogoService.obtenerPreciosPorIds(parsed);
+    const tiendaId = this.leerTiendaIdOpcional(req);
+    return this.catalogoService.obtenerPreciosPorIds(
+      parsed,
+      tiendaId,
+      this.leerUserIdOpcional(req),
+    );
   }
 
   /**
@@ -73,5 +83,12 @@ export class CatalogoController {
     } catch {
       return undefined;
     }
+  }
+
+  private leerTiendaIdOpcional(req: Request): number | undefined {
+    const raw = req.headers['x-tienda-id'];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    const tiendaId = Number(value);
+    return Number.isInteger(tiendaId) && tiendaId > 0 ? tiendaId : undefined;
   }
 }

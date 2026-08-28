@@ -109,6 +109,20 @@ export class AuthService {
     });
 
     if (dto.tiendaId && usuario.rol === RolUsuario.CLIENTE) {
+      const tienda = await this.prisma.tienda.findFirst({
+        where: { id: dto.tiendaId, activa: true },
+        select: { id: true },
+      });
+      if (!tienda) throw new UnauthorizedException('Tienda no disponible');
+
+      const membership = await this.prisma.usuarioTienda.findFirst({
+        where: { usuarioId: usuario.id, tiendaId: dto.tiendaId, activo: true },
+        select: { id: true },
+      });
+      if (usuario.tiendaId !== dto.tiendaId && !membership) {
+        throw new UnauthorizedException('El usuario no tiene acceso a la tienda');
+      }
+
       await this.prisma.usuario.update({
         where: { id: usuario.id },
         data: { tiendaId: dto.tiendaId },

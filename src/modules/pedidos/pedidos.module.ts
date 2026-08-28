@@ -15,8 +15,10 @@ import { MessagesController } from './messages/messages.controller';
 import { MessagesService } from './messages/messages.service';
 import { PedidoAccessService } from './core/pedido-access.service';
 import { PedidoStateService } from './core/pedido-state.service';
+import { PedidoBusquedaController } from './core/pedido-busqueda.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../mail/mail.module';
+import { VentanillasModule } from '../ventanillas/ventanillas.module';
 
 /**
  * Módulo de Pedidos.
@@ -37,15 +39,22 @@ import { MailModule } from '../mail/mail.module';
  *     `PedidoStateService.cambiarEstado` y `PedidoAccessService`.
  */
 @Module({
-  imports: [NotificationsModule, MailModule],
+  imports: [NotificationsModule, MailModule, VentanillasModule],
   controllers: [
     ClienteController,
-    BodegaController,
+    // IMPORTANTE: BodegaMonitorController (ruta fija `bodega/pedidos/monitor`)
+    // va ANTES de BodegaController (ruta genérica `bodega/pedidos/:id`). Si se
+    // invierte, NestJS matchea `monitor` contra `@Get(':id')` y el RolesGuard
+    // de BodegaController (BODEGA/ADMIN) rechaza a un BODEGA_MONITOR con 403.
     BodegaMonitorController,
-    CajeroController,
+    BodegaController,
+    // Mismo orden que bodega: CajeroMonitorController (ruta fija `cajero/pedidos/monitor`)
+    // va ANTES de CajeroController (ruta genérica `cajero/pedidos/:id`).
     CajeroMonitorController,
+    CajeroController,
     AdminController,
     MessagesController,
+    PedidoBusquedaController,
   ],
   providers: [
     ClienteService,

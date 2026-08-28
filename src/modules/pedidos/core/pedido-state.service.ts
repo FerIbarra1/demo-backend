@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
@@ -86,6 +87,7 @@ export class PedidoStateService {
     dto: CambiarEstadoDto,
     usuario: UserContext,
   ) {
+    await this.access.cargarYValidar(pedidoId, usuario);
     return this.prisma.$transaction(async (tx) => {
       const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
@@ -100,18 +102,30 @@ export class PedidoStateService {
         );
       }
 
-      const pedidoActualizado = await tx.pedido.update({
-        where: { id: pedidoId },
+      const result = await tx.pedido.updateMany({
+        where: { id: pedidoId, estado: estadoAnterior },
         data: {
           estado: estadoNuevo,
-          // Al tomar un pedido (transición a REVIEWING) se asigna al bodeguero
-          // que lo está trabajando. Queda registrado para el monitor de bodega.
           ...(estadoNuevo === EstadoPedido.REVIEWING && {
             asignadoAId: usuario.userId,
             asignadoAt: new Date(),
           }),
         },
       });
+      if (result.count !== 1) {
+        throw new ConflictException(
+          'El pedido cambió mientras se procesaba. Actualiza la pantalla e inténtalo de nuevo.',
+        );
+      }
+      const pedidoActualizado = await tx.pedido.findUnique({
+        where: { id: pedidoId },
+      });
+      if (!pedidoActualizado) {
+        throw new NotFoundException('Pedido no encontrado');
+      }
+
+      // Al tomar un pedido (transición a REVIEWING) se asigna el bodeguero
+      // que lo está trabajando. Queda registrado para el monitor de bodega.
 
       await tx.historialPedido.create({
         data: {
@@ -206,6 +220,9 @@ export class PedidoStateService {
         asignadoA: { select: { id: true, nombre: true, apellido: true } },
         historial: { orderBy: { createdAt: 'asc' } },
         mensajes: { orderBy: { createdAt: 'asc' } },
+        // QR: el folio VFP (externalFolio) se expone para que el frontend
+        // muestre el QR y el folio visible. Solo existe tras el ACK del agente.
+        pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
       },
     });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');

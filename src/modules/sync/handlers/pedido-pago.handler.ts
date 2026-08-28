@@ -20,9 +20,9 @@ import type { UserContext } from '../../../types/pedido.types';
  *     PENDING_PAID→PAID, historial, realtime y email PAGO_CONFIRMADO
  *     vía NotificationsService).
  *
- * Esta fase asume que se agregaron los triggers TRG_PEDIDOS_SYNC y
- * TRG_MOVPED_SYNC en Firebird (Fase 3 del plan). Sin ellos, este handler
- * se activa vía polling cada 30s.
+ * Depende del trigger TRG_PEDIDOS_SYNC en Firebird. Los ajustes de items
+ * (MOVPED) ya NO se sincronizan: el pedido llega a Firebird con cantidades
+ * finales confirmadas por bodega en la web (confirmarSurtido → PENDING_PAID).
  */
 @Injectable()
 export class PedidoPagoHandler {
@@ -70,6 +70,20 @@ export class PedidoPagoHandler {
 
       // Pago confirmado en Firebird (FINALIZADA=TRUE)
       if (d.FINALIZADA === true) {
+        // C3: idempotencia. Si el evento se procesa dos veces (por retry del
+        // agente tras timeout), no queremos reenviar el email PAGO_CONFIRMADO
+        // ni crear otra fila en historial_pedido. Si ya está PAID, omitir.
+        const pedidoActual = await this.prisma.pedido.findUnique({
+          where: { id: pedidoIdNube },
+          select: { estado: true, fechaPago: true },
+        });
+        if (pedidoActual?.estado === EstadoPedido.PAID) {
+          this.logger.log(
+            `Pedido ${pedidoIdNube} ya estaba PAID (sync idempotente), omitido`,
+          );
+          return { ok: true, mensaje: 'PEDIDO ya estaba PAID — omitido (idempotente)' };
+        }
+
         const fechaPago = new Date();
         await this.adminService.marcarComoPagado(
           pedidoIdNube,
@@ -98,12 +112,14 @@ export class PedidoPagoHandler {
 
     // Transición directa con historial explícito. Esto evita acoplar al
     // PedidoStateService (cuyos guards de rol no contemplan AGENT).
-    await this.prisma.$transaction([
-      this.prisma.pedido.update({
-        where: { id: pedidoIdNube },
+    await this.prisma.$transaction(async (tx) => {
+      const result = await tx.pedido.updateMany({
+        where: { id: pedidoIdNube, estado: pedido.estado },
         data: { estado: EstadoPedido.CANCELLED },
-      }),
-      this.prisma.historialPedido.create({
+      });
+      if (result.count !== 1) return;
+
+      await tx.historialPedido.create({
         data: {
           pedidoId: pedidoIdNube,
           estadoAnterior: pedido.estado,
@@ -112,7 +128,7 @@ export class PedidoPagoHandler {
           usuarioId: null,
           usuarioNombre: 'AGENT_EXTERNAL',
         },
-      }),
-    ]);
+      });
+    });
   }
 }

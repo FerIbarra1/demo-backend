@@ -16,6 +16,23 @@ export interface FirebirdConfig {
   password: string;
   charset: string;
   poolSize: number;
+  tiendaMap?: Record<string, number>;
+  localTiendaIds?: number[];
+}
+
+/**
+ * Parámetros de negocio al bajar pedidos a Firebird via GRABAR_PEDIDOS.
+ * Antes estaban hardcodeados en down-processor.ts (=1, '1'); ahora se
+ * configuran por instalación porque el IDVENDEDOR, el IDUSUARIO del
+ * agente y la lista de precios varían de tienda a tienda.
+ */
+export interface PedidoConfig {
+  /** IDVENDEDOR que se asigna al pedido (VENDEDORES.IDVENDEDOR). */
+  vendedorId: number;
+  /** IDUSUARIO del agente en Firebird (USUARIOS.IDUSUARIO). */
+  usuarioId: number;
+  /** LISTA CHAR(1): '1'..'6' según la lista de precios de la tienda. */
+  lista: string;
 }
 
 export interface SyncConfig {
@@ -39,6 +56,7 @@ export interface AgentConfig {
   firebird: FirebirdConfig;
   sync: SyncConfig;
   service: ServiceConfig;
+  pedidos?: PedidoConfig;
 }
 
 /**
@@ -70,9 +88,6 @@ export function loadConfig(): AgentConfig {
 function validateConfig(cfg: AgentConfig): void {
   if (!cfg.cloud?.baseUrl || !cfg.cloud?.agentKey) {
     throw new Error('cloud.baseUrl y cloud.agentKey son obligatorios');
-  }
-  if (!cfg.cloud.sucursalIds?.length) {
-    throw new Error('cloud.sucursalIds no puede estar vacío');
   }
   if (!cfg.firebird?.database) {
     throw new Error('firebird.database es obligatorio');

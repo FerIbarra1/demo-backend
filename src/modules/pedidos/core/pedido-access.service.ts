@@ -14,6 +14,7 @@ export interface PedidoAccessUser {
   userId: number;
   rol: RolUsuario;
   tiendaId?: number;
+  tiendaIdHeader?: number;
 }
 
 export interface PedidoAccessOptions {
@@ -109,12 +110,13 @@ export class PedidoAccessService {
     }
 
     // BODEGA / CAJERO / BODEGA_MONITOR: el pedido debe pertenecer a su tienda.
-    if (!user.tiendaId) {
+    const tiendaEfectiva = user.tiendaIdHeader ?? user.tiendaId;
+    if (!tiendaEfectiva) {
       throw new ForbiddenException(
         'Tu usuario no tiene tienda asignada. Contacta al administrador.',
       );
     }
-    if (pedido.tiendaId !== user.tiendaId) {
+    if (pedido.tiendaId !== tiendaEfectiva) {
       throw new ForbiddenException(
         'Este pedido pertenece a otra tienda',
       );

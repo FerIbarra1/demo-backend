@@ -4,6 +4,7 @@ import {
   Get,
   Body,
   Query,
+  Param,
   UseGuards,
   Headers,
   BadRequestException,
@@ -54,11 +55,16 @@ export class SyncAgentController {
   })
   async pollPedidos(
     @Headers('x-sucursal-id') sucursalIdHeader: string,
+    @Headers('x-agent-id') agentIdHeader: string,
     @Query('limit') limitRaw?: string,
   ) {
     const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    const agentId = agentIdHeader?.trim();
+    if (!agentId) {
+      throw new BadRequestException('Header X-Agent-Id es obligatorio');
+    }
     const limit = Math.min(parseInt(limitRaw ?? '20', 10) || 20, 100);
-    const data = await this.service.pollPedidos(tiendaId, limit);
+    const data = await this.service.pollPedidos(tiendaId, limit, agentId);
     return { tiendaId, pedidos: data };
   }
 
@@ -67,7 +73,14 @@ export class SyncAgentController {
     summary:
       'Batch de cambios desde Firebird (catálogo/clientes/pagos). Avanza checkpoint a hastaBANDEJAId si todos OK.',
   })
-  async upload(@Body() dto: UploadBatchDto) {
+  async upload(
+    @Body() dto: UploadBatchDto,
+    @Headers('x-sucursal-id') sucursalIdHeader: string,
+  ) {
+    const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    if (dto.tiendaId !== tiendaId) {
+      throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
+    }
     return this.service.procesarUpload(dto);
   }
 
@@ -76,7 +89,14 @@ export class SyncAgentController {
     summary:
       'Confirmación del agente: pedidos subidos a Firebird o errores. Marca PedidoPendienteEnvio.',
   })
-  async pedidosAck(@Body() dto: PedidosAckDto) {
+  async pedidosAck(
+    @Body() dto: PedidosAckDto,
+    @Headers('x-sucursal-id') sucursalIdHeader: string,
+  ) {
+    const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    if (dto.tiendaId !== tiendaId) {
+      throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
+    }
     return this.service.procesarPedidosAck(dto);
   }
 
@@ -85,10 +105,28 @@ export class SyncAgentController {
     summary: 'Reporte de error transitorio en un pedido (incrementa intentos).',
   })
   async pedidosError(
-    @Body() body: { pedidoId: number; error: string },
+    @Body() body: {
+      pedidoId: number;
+      error: string;
+      tiendaId: number;
+      agentId: string;
+      leaseToken: string;
+    },
+    @Headers('x-sucursal-id') sucursalIdHeader: string,
   ) {
+    const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    if (body.tiendaId !== tiendaId) {
+      throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
+    }
     return this.service.procesarPedidosAck({
-      acks: [{ pedidoId: body.pedidoId, exito: false, error: body.error }],
+      tiendaId,
+      acks: [{
+        pedidoId: body.pedidoId,
+        agentId: body.agentId,
+        leaseToken: body.leaseToken,
+        exito: false,
+        error: body.error,
+      }],
     });
   }
 

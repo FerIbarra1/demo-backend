@@ -121,6 +121,7 @@ model Tienda {
 
   // Relaciones
   usuarios        Usuario[]
+  usuariosCliente UsuarioTienda[]
   productosTienda ProductoTienda[]
   precios         Precio[]
   preciosCO       PrecioCO[]
@@ -128,6 +129,11 @@ model Tienda {
   kioskos         Kiosko[]
   // SyncModule: checkpoint por tienda (último BANDEJA_SYNC.ID procesado).
   checkpoint      SyncCheckpoint?
+  // F11 (ago 2026): ventanillas físicas del módulo de cajeros (1, 2, 3...).
+  // Cada ventanilla puede estar asignada a un cajero a la vez.
+  ventanillas     Ventanilla[]
+  // F9 ago 2026: inbox de eventos Firebird→nube por tienda.
+  syncEventInbox  SyncEventInbox[]
 
   @@map("tiendas")
 }
@@ -157,6 +163,7 @@ model Usuario {
 
   // Relaciones
   tienda              Tienda?              @relation(fields: [tiendaId], references: [id])
+  tiendasCliente      UsuarioTienda[]
   pedidos             Pedido[]             @relation("PedidoCliente")
   pedidosAsignados    Pedido[]             @relation("PedidoBodeguero")
   pedidosEnCaja       Pedido[]             @relation("PedidoCajero")
@@ -169,8 +176,53 @@ model Usuario {
   kioskosActivados    Kiosko[]             @relation("KioskoActivador")
   kioskosDesactivados Kiosko[]             @relation("KioskoDesactivador")
   passwordResetTokens PasswordResetToken[]
+  // F11 (ago 2026): ventanilla física donde trabaja el cajero (1:1 nullable).
+  // Se setea vía POST /cajero/ventanilla/elegir.
+  ventanilla          Ventanilla?
 
   @@map("usuarios")
+}
+
+model UsuarioTienda {
+  id                Int      @id @default(autoincrement())
+  usuarioId         Int      @map("usuario_id")
+  tiendaId          Int      @map("tienda_id")
+  localClienteId    Int?     @map("local_cliente_id")
+  listaPrecioCodigo String?  @map("lista_precio_codigo") @db.VarChar(2)
+  activo            Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at")
+  // F9: la migración 2212 pone DEFAULT CURRENT_TIMESTAMP. Mantenemos el default
+  // para que coincida con BD. @updatedAt de Prisma lo sobreescribe en updates.
+  updatedAt         DateTime @default(now()) @updatedAt @map("updated_at")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  tienda  Tienda  @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+
+  @@unique([usuarioId, tiendaId])
+  @@index([tiendaId, localClienteId])
+  @@map("usuarios_tiendas")
+}
+
+// F11 (ago 2026): ventanilla física de la tienda. La cantidad de
+// ventanillas por tienda las define el admin. El cajero elige en cuál
+// va a trabajar al iniciar sesión (1:1 con cajero vía cajeroId único).
+model Ventanilla {
+  id        Int      @id @default(autoincrement())
+  tiendaId  Int      @map("tienda_id")
+  numero    Int      // 1, 2, 3... definido por el admin.
+  // FK opcional a Usuario. Si está null, la ventanilla está libre.
+  cajeroId  Int?     @unique @map("cajero_id")
+  activa    Boolean  @default(true) @map("activa")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Relaciones
+  tienda Tienda   @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+  cajero Usuario? @relation(fields: [cajeroId], references: [id], onDelete: SetNull)
+
+  @@unique([tiendaId, numero])
+  @@index([tiendaId])
+  @@map("ventanillas")
 }
 
 // Sesion eliminada en refactor B2B: auth stateless JWT.
@@ -429,6 +481,10 @@ model ItemPedido {
   cantidad       Int
   precioUnitario Decimal @map("precio_unitario") @db.Decimal(10, 2)
   subtotal       Decimal @db.Decimal(12, 2)
+  // Sincronización bidireccional (F9+): snapshot de la cantidad que tenía el
+  // item al crear el pedido. Se compara contra la nueva cantidad que reporta
+  // MOVPED para distinguir COMPLETO (igual), PARCIAL (menor) o NO_DISPONIBLE (0).
+  cantidadOriginal Int     @default(0) @map("cantidad_original")
 
   // Snapshot de los datos (no cambia aunque el producto/variante cambien)
   productoNombre String @map("producto_nombre") @db.VarChar(150)
@@ -743,11 +799,15 @@ model PedidoPendienteEnvio {
   id                Int       @id @default(autoincrement())
   pedidoId          Int       @unique @map("pedido_id")
   estado            String    @default("PENDIENTE") @db.VarChar(20)
-  // PENDIENTE → PROCESADO en éxito; → ERROR tras agotar reintentos;
-  // → EXPIRADO si pasó más de 24h sin procesarse.
+  // PENDIENTE → PROCESSING → PROCESADO; RETRY vuelve a ser elegible.
   intentos          Int       @default(0)
+  claimedBy         String?   @map("claimed_by") @db.VarChar(100)
+  leaseToken        String?   @map("lease_token") @db.VarChar(80)
+  leaseUntil        DateTime? @map("lease_until")
+  nextAttemptAt     DateTime  @default(now()) @map("next_attempt_at")
   ultimoError       String?   @db.Text @map("ultimo_error")
   ultimoIntentoAt   DateTime? @map("ultimo_intento_at")
+  ultimoErrorCode   String?   @map("ultimo_error_code") @db.VarChar(60)
   // IDPEDIDO en Firebird devuelto por GRABAR_PEDIDOS. Permite idempotencia
   // en reintentos: si el agente crashea entre el INSERT y el ack, al
   // reintentar usa este ID en lugar de generar uno nuevo.
@@ -759,11 +819,45 @@ model PedidoPendienteEnvio {
   pedido Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
 
   @@index([estado, createdAt])
+  // Restaurados (F9 ago 2026): estos índices los creó la migración 2210 pero
+  // el schema los había perdido. Sin ellos el poll-pedidos hace seq scan sobre
+  // pedidos_pendientes_envio cuando crece.
+  @@index([estado, nextAttemptAt, leaseUntil], map: "pedidos_pendientes_envio_claim_idx")
+  @@index([leaseToken], map: "pedidos_pendientes_envio_lease_token_idx")
   @@map("pedidos_pendientes_envio")
 }
 
 // Auditoría bidireccional: cada evento de sync (cambio procesado, error,
 // ack, heartbeat) deja un rastro para debugging desde panel admin.
+model SyncEventInbox {
+  id             Int       @id @default(autoincrement())
+  eventId        String    @unique @map("event_id") @db.VarChar(160)
+  tiendaId       Int       @map("tienda_id")
+  bandejaId      BigInt?   @map("bandeja_id")
+  entidad        String    @db.VarChar(40)
+  operacion      String    @db.VarChar(1)
+  localId        Int       @map("local_id")
+  estado         String    @default("PROCESANDO") @db.VarChar(20)
+  intentos       Int       @default(0)
+  nextAttemptAt  DateTime  @default(now()) @map("next_attempt_at")
+  ultimoErrorCode String?  @map("ultimo_error_code") @db.VarChar(60)
+  payload        Json
+  mensaje        String?   @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at")
+  processedAt    DateTime? @map("processed_at")
+
+  // Relación con Tienda (F9 ago 2026): la migración 2211 creó el FK en BD
+  // pero el schema nunca declaró la relación. Sin esto, Prisma cree que
+  // tiendaId es huérfano y borra el constraint en migrate dev.
+  tienda Tienda @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+
+  @@index([tiendaId, createdAt])
+  @@index([estado, createdAt])
+  // Restaurado (F9 ago 2026): la migración 2213 lo creó pero el schema lo perdió.
+  @@index([estado, nextAttemptAt], map: "sync_event_inbox_retry_idx")
+  @@map("sync_event_inbox")
+}
+
 model SyncEventLog {
   id          Int      @id @default(autoincrement())
   tiendaId    Int?     @map("tienda_id")

@@ -13,6 +13,7 @@ import { BodegaService } from './bodega.service';
 import { SurtidoService } from './surtido.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { MarcarSurtidoItemDto } from './dto/surtido.dto';
+import { TomarGrupoDto } from './dto/tomar-grupo.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { RolUsuario, EstadoPedido } from '@prisma/client';
@@ -60,8 +61,13 @@ export class BodegaController {
     const estados = estadosCsv
       ? (estadosCsv.split(',').map((s) => s.trim()) as EstadoPedido[])
       : undefined;
+    const tiendaSolicitada = tiendaId ? parseInt(tiendaId, 10) : undefined;
+    const tiendaEfectiva =
+      user.rol === RolUsuario.ADMIN
+        ? tiendaSolicitada ?? user.tiendaId
+        : user.tiendaId;
     return this.bodegaService.obtenerPedidosBodega(
-      tiendaId ? parseInt(tiendaId, 10) : user.tiendaId,
+      tiendaEfectiva,
       estado,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
@@ -84,7 +90,7 @@ export class BodegaController {
   @ApiOperation({
     summary:
       'Pedidos en cola con items compartidos con los del bodeguero autenticado. ' +
-      'Top 10, score = 10/precioCO + 4/producto + 1/minuto antigüedad.',
+      'Top 10, score = 10/zona compartida + 1/minuto antigüedad.',
   })
   @ApiResponse({
     status: 200,
@@ -92,6 +98,35 @@ export class BodegaController {
   })
   async surtirJuntos(@CurrentUser() user: any) {
     return this.bodegaService.obtenerSurtirJuntos(user.userId, user.tiendaId);
+  }
+
+  @Get('surtir-juntos/lote')
+  @ApiOperation({
+    summary:
+      'F11: batch de surtido del bodeguero. Todos los items de sus pedidos asignados ' +
+      'agrupados por zona (producto+color) para surtir varios a la vez sin navegar entre pedidos.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: '{ zonas, pedidos } — zonas para el picking agrupado, pedidos para confirmar cada uno.',
+  })
+  async surtirJuntosLote(@CurrentUser() user: any) {
+    return this.bodegaService.obtenerLoteSurtirJuntos(user.userId, user.tiendaId);
+  }
+
+  @Post('tomar-grupo')
+  @ApiOperation({
+    summary:
+      'F11: toma un grupo de pedidos similares ("surtir juntos") de una sola vez. ' +
+      'Valida el límite de pedidos simultáneos y que ninguno esté asignado a otro bodeguero.',
+  })
+  async tomarGrupo(@Body() dto: TomarGrupoDto, @CurrentUser() user: any) {
+    if (user.rol === RolUsuario.BODEGA_MONITOR) {
+      throw new BadRequestException(
+        'Tu rol es de monitor. No puedes tomar pedidos. Usa la tablet con un usuario BODEGA.',
+      );
+    }
+    return this.bodegaService.tomarGrupo(dto.ids, user);
   }
 
   @Get(':id')

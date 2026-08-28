@@ -14,7 +14,7 @@
 
 export interface ItemParaSimilitud {
   productoId: number;
-  precioCOId: number | null;
+  colorId: number | null;
 }
 
 export interface PedidoParaSimilitud {
@@ -33,23 +33,30 @@ export interface PedidoSimilarResultado {
 }
 
 /** Umbral mínimo de score para considerar un pedido "similar". */
-const UMBRAL_SCORE_MINIMO = 4;
+const UMBRAL_SCORE_MINIMO = 10;
 /** Top por pedido: el detalle de surtido muestra hasta 3 similares. */
 const TOP_POR_PEDIDO = 3;
 /** Top del listado general de la tienda. */
 export const TOP_LISTA = 10;
 
-const PESO_PRECIO_CO_COMPARTIDO = 10;
-const PESO_PRODUCTO_COMPARTIDO = 4;
+/**
+ * Peso por zona compartida. Una "zona" es la combinación producto+color:
+ * en la bodega, todas las tallas de un mismo producto y color viven juntas,
+ * así que un pedido que comparte una zona con otro puede surtirse en la
+ * misma pasada sin volver a recorrer la bodega.
+ */
+const PESO_ZONA_COMPARTIDA = 10;
 
 /**
  * Calcula la similitud entre un conjunto de "items de referencia" y N
- * pedidos candidatos. Devuelve los candidatos que comparten al menos un
- * item (por productoId o precioCOId) con score >= UMBRAL_SCORE_MINIMO,
- * ordenados por score descendente y recortados al TOP indicado.
+ * pedidos candidatos. Devuelve los candidatos que comparten al menos una
+ * zona (producto+color) con score >= UMBRAL_SCORE_MINIMO, ordenados por
+ * score descendente y recortados al TOP indicado.
  *
- * El "score" incluye un bono por antigüedad en cola (1 punto por minuto
- * desde fechaPedido) para que los pedidos más viejos suban en el ranking.
+ * El "score" suma PESO_ZONA_COMPARTIDA por cada zona DISTINTA compartida
+ * (un candidato con dos tallas del mismo producto+color suma una sola vez),
+ * más un bono de antigüedad en cola (1 punto por minuto desde fechaPedido)
+ * para que los pedidos más viejos suban en el ranking.
  */
 export function rankearSimilares(
   itemsReferencia: ItemParaSimilitud[],
@@ -58,9 +65,9 @@ export function rankearSimilares(
 ): PedidoSimilarResultado[] {
   if (itemsReferencia.length === 0) return [];
 
-  const productoIdsRef = new Set(itemsReferencia.map((i) => i.productoId));
-  const precioCOIdsRef = new Set(
-    itemsReferencia.map((i) => i.precioCOId).filter((v): v is number => v != null),
+  // Zonas de referencia: combinación productoId:colorId (colorId null → "sin color").
+  const zonasRef = new Set(
+    itemsReferencia.map((i) => zonaKey(i.productoId, i.colorId)),
   );
 
   const ahora = opts.ahora ?? new Date();
@@ -68,30 +75,30 @@ export function rankearSimilares(
 
   return candidatos
     .map((c) => {
-      let score = 0;
-      let itemsCompartidos = 0;
+      // Zonas DISTINTAS del candidato que también están en las de referencia.
+      const zonasCompartidas = new Set<string>();
       for (const it of c.items) {
-        if (it.precioCOId && precioCOIdsRef.has(it.precioCOId)) {
-          score += PESO_PRECIO_CO_COMPARTIDO;
-          itemsCompartidos++;
-        } else if (productoIdsRef.has(it.productoId)) {
-          score += PESO_PRODUCTO_COMPARTIDO;
-          itemsCompartidos++;
-        }
+        const key = zonaKey(it.productoId, it.colorId);
+        if (zonasRef.has(key)) zonasCompartidas.add(key);
       }
-      const minutosEnCola = Math.floor(
-        (ahora.getTime() - c.fechaPedido.getTime()) / 60000,
-      );
-      score += minutosEnCola; // bono antigüedad
+      const score =
+        zonasCompartidas.size * PESO_ZONA_COMPARTIDA +
+        Math.floor((ahora.getTime() - c.fechaPedido.getTime()) / 60000);
       return {
         id: c.id,
         numeroPedido: c.numeroPedido,
         score,
-        itemsCompartidos,
-        minutosEnCola,
+        itemsCompartidos: zonasCompartidas.size,
+        minutosEnCola: Math.floor(
+          (ahora.getTime() - c.fechaPedido.getTime()) / 60000,
+        ),
       };
     })
     .filter((r) => r.score >= UMBRAL_SCORE_MINIMO && r.itemsCompartidos > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, top);
+}
+
+function zonaKey(productoId: number, colorId: number | null): string {
+  return `${productoId}:${colorId ?? 'sin-color'}`;
 }

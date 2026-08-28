@@ -1,0 +1,139 @@
+-- ============================================================================
+-- Triggers de sync (versión conservadora: solo columnas del schema dump)
+-- ============================================================================
+-- Este script SOLO referencia columnas que EXISTEN en el schema dump
+-- /Users/fernandoibarra/Downloads/DATOSINV_METADATOS.sql. Si tu BD real
+-- tiene columnas adicionales (como TIENDAS.EMAIL), puedes agregarlas
+-- después con ALTER TRIGGER.
+--
+-- Ejecutar cada bloque por separado en el SQL Editor de IBExpert.
+-- ============================================================================
+
+-- ============================================================================
+-- 1. TRG_TIENDAS_SYNC (solo columnas garantizadas)
+-- ============================================================================
+-- Columnas usadas: IDTIENDA, NOMBRE, DIRECCION, CIUDAD, ACTIVO, TELEFONO.
+-- NO usa EMAIL (no existe en el schema dump).
+CREATE OR ALTER TRIGGER TRG_TIENDAS_SYNC FOR TIENDAS
+ACTIVE AFTER INSERT OR UPDATE OR DELETE POSITION 10
+AS
+BEGIN
+  IF (INSERTING) THEN
+  BEGIN
+    INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+    VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'TIENDAS', NEW.IDTIENDA, 'I');
+  END
+
+  IF (UPDATING) THEN
+  BEGIN
+    IF (
+         COALESCE(TRIM(OLD.NOMBRE), '') <> COALESCE(TRIM(NEW.NOMBRE), '')
+      OR COALESCE(TRIM(OLD.DIRECCION), '') <> COALESCE(TRIM(NEW.DIRECCION), '')
+      OR COALESCE(TRIM(OLD.CIUDAD), '') <> COALESCE(TRIM(NEW.CIUDAD), '')
+      OR COALESCE(TRIM(OLD.ACTIVO), '') <> COALESCE(TRIM(NEW.ACTIVO), '')
+      OR COALESCE(TRIM(OLD.TELEFONO), '') <> COALESCE(TRIM(NEW.TELEFONO), '')
+    ) THEN
+    BEGIN
+      INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+      VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'TIENDAS', NEW.IDTIENDA, 'U');
+    END
+  END
+
+  IF (DELETING) THEN
+  BEGIN
+    INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+    VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'TIENDAS', OLD.IDTIENDA, 'D');
+  END
+END;
+
+-- ============================================================================
+-- 2. TRG_PEDIDOS_SYNC
+-- ============================================================================
+-- Columnas: IDPEDIDO, SWCANCEL, FINALIZADA, TTOTAL, NOTAS, SERIEFAC, IDFACTURA.
+CREATE OR ALTER TRIGGER TRG_PEDIDOS_SYNC FOR PEDIDOS
+ACTIVE AFTER UPDATE POSITION 10
+AS
+BEGIN
+  IF (
+         COALESCE(OLD.SWCANCEL, FALSE) <> COALESCE(NEW.SWCANCEL, FALSE)
+      OR COALESCE(OLD.FINALIZADA, FALSE) <> COALESCE(NEW.FINALIZADA, FALSE)
+      OR COALESCE(OLD.TTOTAL, 0) <> COALESCE(NEW.TTOTAL, 0)
+      OR COALESCE(OLD.NOTAS, '') <> COALESCE(NEW.NOTAS, '')
+      OR COALESCE(OLD.SERIEFAC, '') <> COALESCE(NEW.SERIEFAC, '')
+      OR COALESCE(OLD.IDFACTURA, 0) <> COALESCE(NEW.IDFACTURA, 0)
+  ) THEN
+  BEGIN
+    INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+    VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'PEDIDOS', NEW.IDPEDIDO, 'U');
+  END
+END;
+
+-- ============================================================================
+-- 3. TRG_MOVPED_SYNC
+-- ============================================================================
+-- Columnas: IDMOVPED, CANTIDAD, PRECIO.
+CREATE OR ALTER TRIGGER TRG_MOVPED_SYNC FOR MOVPED
+ACTIVE AFTER INSERT OR UPDATE OR DELETE POSITION 10
+AS
+BEGIN
+  IF (INSERTING) THEN
+  BEGIN
+    INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+    VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'MOVPED', NEW.IDMOVPED, 'I');
+  END
+
+  IF (UPDATING) THEN
+  BEGIN
+    IF (
+         COALESCE(OLD.CANTIDAD, 0) <> COALESCE(NEW.CANTIDAD, 0)
+      OR COALESCE(OLD.PRECIO, 0) <> COALESCE(NEW.PRECIO, 0)
+    ) THEN
+    BEGIN
+      INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+      VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'MOVPED', NEW.IDMOVPED, 'U');
+    END
+  END
+
+  IF (DELETING) THEN
+  BEGIN
+    INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+    VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'MOVPED', OLD.IDMOVPED, 'D');
+  END
+END;
+
+-- ============================================================================
+-- 4. TRG_USUARIOS_SYNC
+-- ============================================================================
+-- Columnas: IDUSUARIO, NOMBRE, USUARIO, EMAIL, ACTIVO, AUTORIZA, SUPER.
+CREATE OR ALTER TRIGGER TRG_USUARIOS_SYNC FOR USUARIOS
+ACTIVE AFTER INSERT OR UPDATE OR DELETE POSITION 10
+AS
+BEGIN
+  IF (INSERTING) THEN
+  BEGIN
+    INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+    VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'USUARIOS', NEW.IDUSUARIO, 'I');
+  END
+
+  IF (UPDATING) THEN
+  BEGIN
+    IF (
+         COALESCE(TRIM(OLD.NOMBRE), '') <> COALESCE(TRIM(NEW.NOMBRE), '')
+      OR COALESCE(TRIM(OLD.USUARIO), '') <> COALESCE(TRIM(NEW.USUARIO), '')
+      OR COALESCE(TRIM(OLD.EMAIL), '') <> COALESCE(TRIM(NEW.EMAIL), '')
+      OR COALESCE(TRIM(OLD.ACTIVO), '') <> COALESCE(TRIM(NEW.ACTIVO), '')
+      OR COALESCE(TRIM(OLD.AUTORIZA), '') <> COALESCE(TRIM(NEW.AUTORIZA), '')
+      OR COALESCE(TRIM(OLD.SUPER), '') <> COALESCE(TRIM(NEW.SUPER), '')
+    ) THEN
+    BEGIN
+      INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+      VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'USUARIOS', NEW.IDUSUARIO, 'U');
+    END
+  END
+
+  IF (DELETING) THEN
+  BEGIN
+    INSERT INTO BANDEJA_SYNC (ID, TABLA, IDTABLA, OPERACION)
+    VALUES (NEXT VALUE FOR BANDEJA_SYNC_ID_GEN, 'USUARIOS', OLD.IDUSUARIO, 'D');
+  END
+END;

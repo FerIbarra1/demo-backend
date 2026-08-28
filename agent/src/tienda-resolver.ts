@@ -8,7 +8,7 @@ import type { UploadEvent } from './cloud-client';
  * IDTIENDA, este helper deduce el IDTIENDA de cada evento de BANDEJA_SYNC.
  *
  * Reglas (basadas en el schema real de DATOSINV.FDB):
- *   - PRECIOS, PRECIOSCO, PEDIDOS, MOVPED, VENDEDORES
+ *   - PRECIOS, PRECIOSCO, PEDIDOS, VENDEDORES
  *     → tienen columna IDTIENDA directa en el registro.
  *   - PRODUCTOS, CORRIDAS, CORRIDASREN, COLORES, LINEAS, SUBLINEAS
  *     → entidades GLOBALES. No tienen tienda. Devuelve null (se sincronizan
@@ -30,15 +30,32 @@ export class TiendaResolver {
    * Devuelve el IDTIENDA para un evento, o null si es global / no aplica.
    * Hace UNA query a Firebird (cheapest possible) si la entidad lo requiere.
    */
+  async resolverTodas(evento: UploadEvent): Promise<number[]> {
+    switch (evento.entidad) {
+      case 'CLIENTES':
+      case 'CLIENTESCXC': {
+        const tabla = evento.entidad === 'CLIENTES' ? 'CLITIEN' : 'CLITIENCXC';
+        const rows = await this.fb.query<{ IDTIENDA: number }>(
+          `SELECT IDTIENDA FROM ${tabla} WHERE IDCLIENTE = ?`,
+          [evento.localId],
+        );
+        return rows.map((row) => row.IDTIENDA);
+      }
+      default: {
+        const tiendaId = await this.resolver(evento);
+        return tiendaId == null ? [] : [tiendaId];
+      }
+    }
+  }
+
   async resolver(evento: UploadEvent): Promise<number | null> {
     switch (evento.entidad) {
       case 'PRECIOS':
       case 'PRECIOSCO':
       case 'PEDIDOS':
-      case 'MOVPED':
       case 'VENDEDORES':
         // La columna IDTIENDA viene en `datos` (el agente la carga al
-        // sondear BANDEJA_SYNC). Si no está, es un bug del agente.
+        // sondear BANDEJA_SYNC). Si no viene, es un bug del agente.
         return (evento.datos as any).IDTIENDA ?? null;
 
       case 'CLITIEN':

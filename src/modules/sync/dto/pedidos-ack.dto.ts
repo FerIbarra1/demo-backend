@@ -17,6 +17,16 @@ export class PedidoAckItemDto {
   @Min(0)
   pedidoId: number;
 
+  @ApiProperty({ example: 'agent-central-01' })
+  @IsString()
+  @MaxLength(100)
+  agentId: string;
+
+  @ApiProperty({ example: 'lease-token' })
+  @IsString()
+  @MaxLength(80)
+  leaseToken: string;
+
   @ApiProperty({ example: 987, required: false, description: 'IDPEDIDO devuelto por GRABAR_PEDIDOS' })
   @IsOptional()
   @IsInt()
@@ -41,6 +51,11 @@ export class PedidoAckItemDto {
 }
 
 export class PedidosAckDto {
+  @ApiProperty({ example: 5 })
+  @IsInt()
+  @Min(1)
+  tiendaId: number;
+
   @ApiProperty({ type: [PedidoAckItemDto] })
   @IsArray()
   @ValidateNested({ each: true })

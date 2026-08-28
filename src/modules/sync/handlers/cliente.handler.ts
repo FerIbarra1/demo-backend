@@ -37,11 +37,11 @@ export class ClienteHandler {
           return await this.procesarCliente(evento);
         case 'CLITIEN':
         case 'CLITIENCXC':
-          return { ok: true, mensaje: 'CLITIEN handled via Tienda.externalId' };
+          return await this.procesarClienteTienda(evento);
         case 'VENDEDORES':
           return await this.procesarVendedor(evento);
         default:
-          return { ok: true, mensaje: `Entidad ${evento.entidad} no aplica a ClienteHandler` };
+          return { ok: false, mensaje: `Entidad ${evento.entidad} sin handler de cliente` };
       }
     } catch (err) {
       this.logger.error(
@@ -89,7 +89,9 @@ export class ClienteHandler {
           // Solo actualizamos datos auxiliares. No tocamos password ni rol.
           nombre: existente.nombre || nombre,
           telefono: telefono ?? existente.telefono,
-          listaPrecioCodigo: listaPrecioCodigo ?? existente.listaPrecioCodigo,
+          listaPrecioCodigo: localTiendaId
+            ? undefined
+            : listaPrecioCodigo ?? existente.listaPrecioCodigo,
         },
       });
       usuarioId = existente.id;
@@ -110,6 +112,32 @@ export class ClienteHandler {
       usuarioId = nuevo.id;
     }
 
+    if (localTiendaId) {
+      const tienda = await this.prisma.tienda.findFirst({
+        where: { externalId: localTiendaId },
+        select: { id: true },
+      });
+      if (!tienda) {
+        return { ok: false, mensaje: `Tienda Firebird ${localTiendaId} no sincronizada` };
+      }
+      await this.prisma.usuarioTienda.upsert({
+        where: {
+          usuarioId_tiendaId: { usuarioId, tiendaId: tienda.id },
+        },
+        update: {
+          localClienteId: evento.localId,
+          listaPrecioCodigo,
+          activo: true,
+        },
+        create: {
+          usuarioId,
+          tiendaId: tienda.id,
+          localClienteId: evento.localId,
+          listaPrecioCodigo,
+        },
+      });
+    }
+
     // Mantener ExternalRef(USUARIO, systemId, CLIENTES/CLIENTESCXC, localTiendaId).
     await this.externalRefs.upsert({
       systemEntity: 'USUARIO',
@@ -120,6 +148,67 @@ export class ClienteHandler {
     });
 
     return { ok: true };
+  }
+
+  private async procesarClienteTienda(
+    evento: SyncEventoDto,
+  ): Promise<{ ok: boolean; mensaje?: string }> {
+    const d = evento.datos as {
+      IDCLIENTE?: number;
+      IDTIENDA?: number;
+      ACTIVO?: string | boolean;
+      LISPRE?: string;
+    };
+    const localClienteId = d.IDCLIENTE;
+    const localTiendaId = d.IDTIENDA ?? evento.localTiendaId;
+    if (!localClienteId || !localTiendaId) {
+      return { ok: false, mensaje: 'CLITIEN sin IDCLIENTE/IDTIENDA' };
+    }
+
+    const usuarioRef = await this.prisma.externalRef.findFirst({
+      where: {
+        localEntity: 'CLIENTES',
+        localId: localClienteId,
+        localTiendaId,
+      },
+      select: { systemId: true },
+    });
+    if (!usuarioRef) {
+      return { ok: false, mensaje: `Cliente ${localClienteId} aún no sincronizado` };
+    }
+
+    const tienda = await this.prisma.tienda.findFirst({
+      where: { externalId: localTiendaId },
+      select: { id: true },
+    });
+    if (!tienda) {
+      return { ok: false, mensaje: `Tienda Firebird ${localTiendaId} no sincronizada` };
+    }
+
+    await this.prisma.usuarioTienda.upsert({
+      where: {
+        usuarioId_tiendaId: { usuarioId: usuarioRef.systemId, tiendaId: tienda.id },
+      },
+      update: {
+        localClienteId,
+        listaPrecioCodigo: (d.LISPRE ?? '').trim() || undefined,
+        activo: this.isActive(d.ACTIVO),
+      },
+      create: {
+        usuarioId: usuarioRef.systemId,
+        tiendaId: tienda.id,
+        localClienteId,
+        listaPrecioCodigo: (d.LISPRE ?? '').trim() || null,
+        activo: this.isActive(d.ACTIVO),
+      },
+    });
+
+    return { ok: true };
+  }
+
+  private isActive(value: string | boolean | undefined): boolean {
+    if (typeof value === 'boolean') return value;
+    return !value || value.trim().toUpperCase().startsWith('S');
   }
 
   // -------------------- VENDEDORES --------------------

@@ -3,10 +3,12 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
+import { VentanillasService } from '../../ventanillas/ventanillas.service';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
 
@@ -21,18 +23,26 @@ import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
  */
 @Injectable()
 export class CajeroService {
+  private readonly logger = new Logger(CajeroService.name);
+
   constructor(
     private prisma: PrismaService,
     private realtime: RealtimeService,
     private pedidoState: PedidoStateService,
+    private ventanillasService: VentanillasService,
   ) {}
 
-  async obtenerColaVentanilla(tiendaId?: number, pagina = 1, limite = 20) {
+  async obtenerColaVentanilla(
+    tiendaId?: number,
+    pagina = 1,
+    limite = 20,
+    canal: 'KIOSKO' | 'WEB' | 'TODOS' = 'KIOSKO',
+  ) {
     const where: Prisma.PedidoWhereInput = {
       estado: EstadoPedido.PENDING_PAID,
-      canalOrigen: 'KIOSKO',
       cajeroAsignadoId: null,
     };
+    if (canal !== 'TODOS') where.canalOrigen = canal;
     if (tiendaId) where.tiendaId = tiendaId;
     const skip = (pagina - 1) * limite;
     const [pedidos, total] = await Promise.all([
@@ -56,7 +66,20 @@ export class CajeroService {
   }
 
   async tomarPedidoCajero(pedidoId: number, usuario: UserContext) {
-    return this.prisma.$transaction(async (tx) => {
+    return this.tomarPedidoCajeroInterno(pedidoId, usuario, true);
+  }
+
+  /**
+   * Lógica común de tomar un pedido para el cajero.
+   * @param emitirRealtime Si false, no emite `pedido.cajero-asignado`
+   *   (lo usa `llamarSiguiente` que emite su propio evento `pedido.llamado`).
+   */
+  private async tomarPedidoCajeroInterno(
+    pedidoId: number,
+    usuario: UserContext,
+    emitirRealtime: boolean,
+  ) {
+    const pedido = await this.prisma.$transaction(async (tx) => {
       const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
@@ -94,19 +117,23 @@ export class CajeroService {
         },
       });
 
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.cajero-asignado', {
-        id: pedidoId,
-        numeroPedido: pedidoActualizado.numeroPedido,
-        cajeroAsignadoId: usuario.userId,
-        cajeroAsignadoNombre: usuario.nombre,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.cajero-asignado', {
-        id: pedidoId,
-        cajeroAsignadoId: usuario.userId,
-      });
+      if (emitirRealtime) {
+        this.realtime.emitToTienda(pedido.tiendaId, 'pedido.cajero-asignado', {
+          id: pedidoId,
+          numeroPedido: pedidoActualizado.numeroPedido,
+          cajeroAsignadoId: usuario.userId,
+          cajeroAsignadoNombre: usuario.nombre,
+        });
+        this.realtime.emitToPedido(pedidoId, 'pedido.cajero-asignado', {
+          id: pedidoId,
+          cajeroAsignadoId: usuario.userId,
+        });
+      }
 
       return pedidoActualizado;
     });
+
+    return pedido;
   }
 
   async liberarPedidoCajero(pedidoId: number, usuario: UserContext) {
@@ -169,5 +196,79 @@ export class CajeroService {
       },
       orderBy: { cajeroAsignadoAt: 'asc' },
     });
+  }
+
+  /**
+   * F11 (ago 2026): "Llamar siguiente" — el cajero presiona el botón, toma el
+   * primer pedido KIOSKO en PENDING_PAID sin asignar (FIFO por fechaPedido)
+   * y se lo asigna a su ventanilla.
+   *
+   * Precondiciones:
+   *  - El cajero debe tener una ventanilla elegida. Si no, 400.
+   *  - Si no hay pedidos en cola, 404 (la cajera verá "No hay turnos").
+   *
+   * Realtime: emite `pedido.llamado` con el folio + número de ventanilla a
+   * `tienda-{id}` para que el TV muestre la alerta bancaria.
+   */
+  async llamarSiguiente(usuario: UserContext) {
+    if (!usuario.tiendaId) {
+      throw new BadRequestException('Tu usuario no tiene tienda asignada');
+    }
+
+    // 1) Verificar que el cajero tiene ventanilla.
+    const ventanilla = await this.ventanillasService.ventanillaDelCajero(
+      usuario.userId,
+      usuario.tiendaId,
+    );
+    if (!ventanilla) {
+      throw new BadRequestException(
+        'Debes elegir una ventanilla antes de llamar al siguiente turno',
+      );
+    }
+
+    // 2) Buscar el primer pedido KIOSKO sin asignar (FIFO).
+    const siguiente = await this.prisma.pedido.findFirst({
+      where: {
+        tiendaId: usuario.tiendaId,
+        estado: EstadoPedido.PENDING_PAID,
+        canalOrigen: 'KIOSKO',
+        cajeroAsignadoId: null,
+      },
+      orderBy: { fechaPedido: 'asc' },
+    });
+    if (!siguiente) {
+      throw new NotFoundException('No hay turnos siguientes en la cola');
+    }
+
+    // 3) Asignar al cajero (sin emitir `pedido.cajero-asignado` — la alerta
+    // bancaria la emitimos nosotros para no duplicar sonidos).
+    const pedido = await this.tomarPedidoCajeroInterno(siguiente.id, usuario, false);
+
+    // 4) Realtime: alerta bancaria para el TV + sonido.
+    this.realtime.emitToTienda(usuario.tiendaId, 'pedido.cajero-asignado', {
+      id: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      cajeroAsignadoId: usuario.userId,
+      cajeroAsignadoNombre: usuario.nombre,
+    });
+    this.realtime.emitToTienda(usuario.tiendaId, 'pedido.llamado', {
+      id: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      ventanillaId: ventanilla.id,
+      ventanillaNumero: ventanilla.numero,
+      cajeroId: usuario.userId,
+      cajeroNombre: usuario.nombre,
+    });
+
+    this.logger.log(
+      `Cajero ${usuario.userId} llamó turno ${pedido.numeroPedido} a ventanilla ${ventanilla.numero}`,
+    );
+
+    return {
+      pedidoId: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      ventanillaId: ventanilla.id,
+      ventanillaNumero: ventanilla.numero,
+    };
   }
 }

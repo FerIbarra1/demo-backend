@@ -13,6 +13,16 @@ import { Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class SyncEventoDto {
+  @ApiProperty({ example: 'BANDEJA:93847:PRECIOS:5' })
+  @IsString()
+  @MaxLength(160)
+  eventId: string;
+
+  @ApiProperty({ example: 93847 })
+  @IsInt()
+  @Min(0)
+  bandejaId: number;
+
   @ApiProperty({
     example: 'CATALOGO',
     description: 'Tipo de evento (afecta qué handler lo procesa)',

@@ -42,13 +42,7 @@ export class CatalogoService {
     // F9: detectar la lista de precios del cliente logueado.
     let columnaLista: 'lista1' | 'lista2' | 'lista3' | 'lista4' | 'lista5' | 'lista6' =
       'lista1';
-    if (usuarioId) {
-      const usuario = await this.prisma.usuario.findUnique({
-        where: { id: usuarioId },
-        select: { listaPrecioCodigo: true },
-      });
-      columnaLista = resolverColumnaLista(usuario?.listaPrecioCodigo);
-    }
+    columnaLista = await this.obtenerColumnaLista(usuarioId, tiendaId);
 
     const skip = (pagina - 1) * limite;
 
@@ -184,13 +178,27 @@ export class CatalogoService {
     };
   }
 
-  async obtenerProductoDetalle(productoId: number, tiendaId: number) {
+  async obtenerProductoDetalle(productoId: number, tiendaId: number, usuarioId?: number) {
+    const columnaLista = await this.obtenerColumnaLista(usuarioId, tiendaId);
     const producto = await this.prisma.producto.findUnique({
       where: { id: productoId },
       include: {
+        productosTienda: {
+          where: { tiendaId, visible: true },
+          select: { id: true },
+        },
         precios: {
           where: { tiendaId },
-          select: { precioBase: true, precioOferta: true },
+          select: {
+            precioBase: true,
+            precioOferta: true,
+            lista1: true,
+            lista2: true,
+            lista3: true,
+            lista4: true,
+            lista5: true,
+            lista6: true,
+          },
         },
         preciosCO: {
           where: { tiendaId },
@@ -203,29 +211,30 @@ export class CatalogoService {
       },
     });
 
-    if (!producto || !producto.activo) {
+    if (!producto || !producto.activo || producto.productosTienda.length === 0) {
       throw new NotFoundException('Producto no encontrado');
     }
 
     const precio = producto.precios[0];
-    const variantes = producto.preciosCO.map((pco) => ({
-      id: pco.id,
-      // precioCOId es el id de PrecioCO. Necesario para proponer
-      // sustituciones desde la pantalla de surtir.
-      precioCOId: pco.id,
-      corridaId: pco.corridaId,
-      corrida: pco.corrida.nombre,
-      tallaId: pco.tallaId,
-      talla: pco.talla.nombre,
-      colorId: pco.colorId,
-      color: pco.color.nombre,
-      colorHex: pco.color.hex,
-      sku: pco.sku,
-      precio: pco.precio,
-      // B2B: sin manejo de stock. La disponibilidad la confirma bodega al
-      // revisar el pedido. Ver nota en obtenerProductos.
-      stockDisponible: null,
-    }));
+    const precioBaseLista = precio ? Number(precio[columnaLista] ?? 0) : 0;
+    const precioBase = precioBaseLista > 0 ? precioBaseLista : Number(precio?.precioBase ?? 0);
+    const variantes = producto.preciosCO.map((pco) => {
+      const precioLista = Number(pco[columnaLista] ?? 0);
+      return {
+        id: pco.id,
+        precioCOId: pco.id,
+        corridaId: pco.corridaId,
+        corrida: pco.corrida.nombre,
+        tallaId: pco.tallaId,
+        talla: pco.talla.nombre,
+        colorId: pco.colorId,
+        color: pco.color.nombre,
+        colorHex: pco.color.hex,
+        sku: pco.sku,
+        precio: precioLista > 0 ? precioLista : Number(pco.precio),
+        stockDisponible: null,
+      };
+    });
 
     return {
       id: producto.id,
@@ -236,10 +245,28 @@ export class CatalogoService {
       imagenes: producto.imagenes,
       categoria: producto.categoria,
       subcategoria: producto.subcategoria,
-      precioBase: precio?.precioBase || 0,
+      precioBase,
       precioOferta: precio?.precioOferta,
       variantes,
     };
+  }
+
+  private async obtenerColumnaLista(usuarioId?: number, tiendaId?: number) {
+    if (!usuarioId) return 'lista1' as const;
+    const usuario = await this.prisma.usuario.findUnique({
+      where: { id: usuarioId },
+      select: {
+        listaPrecioCodigo: true,
+        tiendasCliente: tiendaId
+          ? {
+              where: { tiendaId, activo: true },
+              select: { listaPrecioCodigo: true },
+            }
+          : undefined,
+      },
+    });
+    const listaPorTienda = usuario?.tiendasCliente?.[0]?.listaPrecioCodigo;
+    return resolverColumnaLista(listaPorTienda ?? usuario?.listaPrecioCodigo);
   }
 
   async obtenerFiltrosDisponibles(tiendaId: number) {
@@ -273,16 +300,22 @@ export class CatalogoService {
    * Resuelve un set de precioCOIds a un objeto con datos mínimos para mostrar
    * en el carrito/checkout. Devuelve [] si la lista está vacía.
    */
-  async obtenerPreciosPorIds(ids: number[]) {
+  async obtenerPreciosPorIds(ids: number[], tiendaId?: number, usuarioId?: number) {
     if (ids.length === 0) return [];
+    const columnaLista = await this.obtenerColumnaLista(usuarioId, tiendaId);
     const precios = await this.prisma.precioCO.findMany({
-      where: { id: { in: ids } },
+      where: {
+        id: { in: ids },
+        ...(tiendaId ? { tiendaId } : {}),
+      },
       include: { producto: true, talla: true, color: true, corrida: true },
     });
-    return precios.map((p) => ({
+    return precios.map((p) => {
+      const precioLista = Number(p[columnaLista] ?? 0);
+      return {
       id: p.id,
       tiendaId: p.tiendaId,
-      precio: p.precio,
+      precio: precioLista > 0 ? precioLista : Number(p.precio),
       producto: {
         id: p.producto.id,
         codigo: p.producto.codigo,
@@ -295,7 +328,8 @@ export class CatalogoService {
         color: p.color.nombre,
         colorHex: p.color.hex,
       },
-    }));
+      };
+    });
   }
 
   /**

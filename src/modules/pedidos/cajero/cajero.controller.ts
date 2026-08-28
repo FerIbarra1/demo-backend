@@ -28,21 +28,35 @@ export class CajeroController {
   @Get('cola-ventanilla')
   @ApiOperation({
     summary:
-      'Cola de pedidos KIOSKO en PENDING_PAID sin asignar (monitor de ventanillas)',
+      'Cola de pedidos en PENDING_PAID sin asignar (monitor de ventanillas). ' +
+      'Por defecto sólo KIOSKO; pasar canal=TODOS para incluir WEB.',
   })
   @ApiQuery({ name: 'tiendaId', required: false, type: Number })
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
+  @ApiQuery({
+    name: 'canal',
+    required: false,
+    enum: ['KIOSKO', 'WEB', 'TODOS'],
+    description: 'Filtro por canal. Default: KIOSKO.',
+  })
   async obtenerColaVentanilla(
     @CurrentUser() user: any,
     @Query('tiendaId') tiendaId?: string,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
+    @Query('canal') canal?: string,
   ) {
+    const tiendaSolicitada = tiendaId ? parseInt(tiendaId, 10) : undefined;
+    const tiendaEfectiva =
+      user.rol === RolUsuario.ADMIN
+        ? tiendaSolicitada ?? user.tiendaId
+        : user.tiendaId;
     return this.cajeroService.obtenerColaVentanilla(
-      tiendaId ? parseInt(tiendaId, 10) : user.tiendaId,
+      tiendaEfectiva,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
+      (canal as 'KIOSKO' | 'WEB' | 'TODOS') ?? 'KIOSKO',
     );
   }
 
@@ -79,5 +93,22 @@ export class CajeroController {
   })
   async liberar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.cajeroService.liberarPedidoCajero(id, user);
+  }
+
+  /**
+   * F11 (ago 2026): la cajera presiona "Llamar siguiente" → toma el primer
+   * pedido de la cola sin asignar y lo asigna a su ventanilla. Si no tiene
+   * ventanilla asignada, error 400.
+   *
+   * Emite realtime `pedido.llamado` para que la TV muestre la alerta.
+   */
+  @Post('llamar-siguiente')
+  @ApiOperation({
+    summary:
+      'F11: llamar al siguiente turno de la cola. Asigna el pedido más antiguo ' +
+      'sin asignar a la ventanilla del cajero logueado.',
+  })
+  async llamarSiguiente(@CurrentUser() user: any) {
+    return this.cajeroService.llamarSiguiente(user);
   }
 }

@@ -305,6 +305,18 @@ export class SurtidoService {
             usuarioNombre: usuario.nombre,
           },
         });
+        await this.encolarEnvioAFirebird(tx, pedidoId);
+
+        // Realtime: igual que el caso con faltantes, para que el monitor de
+        // bodega libere el slot del bodeguero y el monitor de cajeros reciba
+        // el pedido en su cola al instante (sin esperar el polling 5s).
+        this.realtime.emitToTienda(pedido.tiendaId, 'monitor.invalidado', { pedidoId });
+        this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
+          id: pedidoId,
+          estadoAnterior: EstadoPedido.REVIEWING,
+          estadoNuevo: EstadoPedido.PENDING_PAID,
+        });
+
         this.logger.log(`Pedido ${pedidoId}: surtido completo → PENDING_PAID`);
         return {
           mensaje: 'Surtido completo confirmado',
@@ -339,6 +351,7 @@ export class SurtidoService {
           usuarioNombre: usuario.nombre,
         },
       });
+      await this.encolarEnvioAFirebird(tx, pedidoId);
 
       this.logger.log(
         `Pedido ${pedidoId}: surtido con ${cambios.length} cambio(s) → PENDING_PAID`,
@@ -527,10 +540,13 @@ export class SurtidoService {
       minutosEnCola: number;
     }>
   > {
-    // Items del pedido actual (productoId + precioCOId)
+    // Items del pedido actual (productoId + colorId de la zona)
     const itemsActuales = await this.prisma.itemPedido.findMany({
       where: { pedidoId: pedido.id, cancelada: false },
-      select: { productoId: true, precioCOId: true },
+      select: {
+        productoId: true,
+        precioCO: { select: { colorId: true } },
+      },
     });
     if (itemsActuales.length === 0) return [];
 
@@ -547,13 +563,31 @@ export class SurtidoService {
         fechaPedido: true,
         items: {
           where: { cancelada: false },
-          select: { productoId: true, precioCOId: true },
+          select: {
+            productoId: true,
+            precioCO: { select: { colorId: true } },
+          },
         },
       },
     });
     if (candidatos.length === 0) return [];
 
-    return rankearSimilares(itemsActuales, candidatos, { top: 3 });
+    return rankearSimilares(
+      itemsActuales.map((it) => ({
+        productoId: it.productoId,
+        colorId: it.precioCO?.colorId ?? null,
+      })),
+      candidatos.map((c) => ({
+        id: c.id,
+        numeroPedido: c.numeroPedido,
+        fechaPedido: c.fechaPedido,
+        items: c.items.map((it) => ({
+          productoId: it.productoId,
+          colorId: it.precioCO?.colorId ?? null,
+        })),
+      })),
+      { top: 3 },
+    );
   }
 
   private validarCoherencia(dto: MarcarSurtidoItemDto) {
@@ -572,5 +606,33 @@ export class SurtidoService {
         'Si el estado es NO_DISPONIBLE, la cantidad surtida debe ser exactamente 0',
       );
     }
+  }
+
+  /**
+   * Encola el pedido para descarga a Firebird. Se llama desde
+   * confirmarSurtido (ambos caminos) DENTRO de la transacción, cuando el
+   * pedido acaba de pasar a PENDING_PAID con sus cantidades finales.
+   *
+   * El agente lo baja vía poll-pedidos y GRABAR_PEDIDOS genera el folio
+   * local (VFP), que se guarda en externalFolio en el ACK (doble folio:
+   * la web mantiene su numeroPedido, VFP el suyo).
+   *
+   * externalIdPEDIDOS determinista (1B + pedidoId): aunque el SQLite del
+   * agente se pierda, GRABAR_PEDIDOS recibe siempre el mismo ID y la SP lo
+   * trata como UPDATE (idempotente).
+   */
+  private async encolarEnvioAFirebird(
+    tx: Prisma.TransactionClient,
+    pedidoId: number,
+  ): Promise<void> {
+    await tx.pedidoPendienteEnvio.create({
+      data: {
+        pedidoId,
+        estado: 'PENDIENTE',
+        // Offset 1B: los IDs Firebird típicos son <10M, así que 1B+id nube
+        // evita colisión con IDs locales reales.
+        externalIdPEDIDOS: 1_000_000_000 + pedidoId,
+      },
+    });
   }
 }

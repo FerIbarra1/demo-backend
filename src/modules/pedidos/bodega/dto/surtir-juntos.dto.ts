@@ -18,9 +18,27 @@ export class SurtirJuntosItemDto {
   cantidad: number;
 
   @ApiProperty({
+    description: 'ID del color de la zona compartida (null si el item no tiene color).',
+    nullable: true,
+  })
+  colorId: number | null;
+
+  @ApiProperty({
+    description: 'Nombre del color de la zona compartida.',
+    nullable: true,
+  })
+  colorNombre: string | null;
+
+  @ApiProperty({
+    description: 'Hex del color para el swatch visual.',
+    nullable: true,
+  })
+  colorHex: string | null;
+
+  @ApiProperty({
     description:
-      'IDs de pedidos del bodeguero (asignadoAId = me) que también pidieron este producto. ' +
-      'Permite al frontend agrupar visualmente: "compartido con PD-001 y PD-002".',
+      'IDs de pedidos del bodeguero (asignadoAId = me) que también pidieron esta zona ' +
+      '(mismo producto + color). Permite al frontend agrupar visualmente: "compartido con PD-001 y PD-002".',
     type: [Number],
   })
   pedidosCompartidosCon: number[];
@@ -76,4 +94,80 @@ export class SurtirJuntosResponseDto {
       'Vacío si el bodeguero no tiene pedidos asignados o si ninguno tiene productos compartidos.',
   })
   data: SurtirJuntosPedidoDto[];
+}
+
+// ==================== MODO LOTE (F11) ====================
+
+export class LoteItemDto {
+  @ApiProperty()
+  itemId: number;
+
+  @ApiProperty()
+  pedidoId: number;
+
+  @ApiProperty()
+  numeroPedido: string;
+
+  @ApiProperty()
+  tallaNombre: string;
+
+  @ApiProperty()
+  corridaNombre: string;
+
+  @ApiProperty()
+  cantidad: number;
+
+  @ApiProperty()
+  cantidadSurtida: number;
+
+  @ApiProperty()
+  estadoSurtido: string;
+
+  @ApiProperty({ nullable: true })
+  motivoSurtido: string | null;
+}
+
+export class ZonaLoteDto {
+  @ApiProperty()
+  productoId: number;
+
+  @ApiProperty()
+  productoNombre: string;
+
+  @ApiProperty({ nullable: true })
+  colorId: number | null;
+
+  @ApiProperty({ nullable: true })
+  colorNombre: string | null;
+
+  @ApiProperty({ nullable: true })
+  colorHex: string | null;
+
+  @ApiProperty({ type: [LoteItemDto] })
+  items: LoteItemDto[];
+}
+
+export class PedidoLoteResumenDto {
+  @ApiProperty()
+  id: number;
+
+  @ApiProperty()
+  numeroPedido: string;
+
+  @ApiProperty()
+  clienteNombre: string;
+
+  @ApiProperty()
+  estado: string;
+
+  @ApiProperty()
+  total: number;
+}
+
+export class LoteSurtirJuntosDto {
+  @ApiProperty({ type: [ZonaLoteDto] })
+  zonas: ZonaLoteDto[];
+
+  @ApiProperty({ type: [PedidoLoteResumenDto] })
+  pedidos: PedidoLoteResumenDto[];
 }

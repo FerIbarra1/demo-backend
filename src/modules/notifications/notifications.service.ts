@@ -4,6 +4,7 @@ import { Pedido, TipoNotificacion } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 import { mailTemplates, mailSubjects } from '../mail/mail.templates';
+import { generarQrDataUrl } from '../pedidos/core/qr.util';
 
 /**
  * Servicio orquestador de notificaciones al cliente.
@@ -243,6 +244,76 @@ export class NotificationsService {
       subject: mailSubjects.REVISION_PROPUESTA(pedido.numeroPedido),
       template,
       tipoNotificacion: TipoNotificacion.REVISION_PROPUESTA,
+      pedidoId: pedido.id,
+    });
+  }
+
+  /**
+   * Email "listo para pagar" con el QR del folio VFP. Se dispara cuando el
+   * agente confirma el ACK (externalFolio ya existe), no en confirmarSurtido.
+   * Reutiliza el template PedidoAprobado (dice "aprobado y listo para pagar").
+   * Fire-and-forget: no lanza errores al caller.
+   */
+  async enviarListoParaPagar(pedido: Pedido, externalFolio: string) {
+    if (!pedido.clienteEmail) {
+      this.logger.warn(
+        `Pedido ${pedido.id} sin clienteEmail — no se envía email listo para pagar`,
+      );
+      return;
+    }
+
+    const [items, tienda] = await Promise.all([
+      this.prisma.itemPedido.findMany({
+        where: { pedidoId: pedido.id, cancelada: false },
+        orderBy: { id: 'asc' },
+        include: { producto: { select: { imagenPrincipal: true } } },
+      }),
+      this.prisma.tienda.findUnique({ where: { id: pedido.tiendaId } }),
+    ]);
+
+    const logoUrl = this.config.get<string>('app.mail.logoUrl') ?? '';
+    const frontendUrl = this.config.get<string>('app.mail.frontendUrl') ?? '';
+    const pedidoUrl = `${frontendUrl}/pedidos/${pedido.id}`;
+
+    const qrDataUrl = await generarQrDataUrl(externalFolio);
+
+    const pedidoData = {
+      pedidoId: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      externalFolio,
+      qrDataUrl,
+      clienteNombre: pedido.clienteNombre,
+      estado: pedido.estado,
+      total: pedido.total,
+      fechaPedido: pedido.fechaPedido,
+      paqueteria: pedido.shippingPaqueteria ?? null,
+      direccionEnvio: pedido.shippingDireccion ?? null,
+      tiendaNombre: tienda?.nombre,
+      tiendaTelefono: tienda?.telefono ?? undefined,
+      items: items.map((it) => ({
+        productoNombre: it.productoNombre,
+        tallaNombre: it.tallaNombre,
+        colorNombre: it.colorNombre,
+        cantidad: it.cantidad,
+        precioUnitario: it.precioUnitario,
+        subtotal: it.subtotal,
+        imagenUrl: it.producto?.imagenPrincipal ?? null,
+      })),
+    };
+
+    const template = mailTemplates.PedidoAprobado({
+      pedido: pedidoData,
+      pedidoUrl,
+      qrDataUrl,
+      logoUrl,
+      frontendUrl,
+    });
+
+    await this.mail.sendEmail({
+      to: pedido.clienteEmail,
+      subject: mailSubjects.REVISION_APROBADA(externalFolio),
+      template,
+      tipoNotificacion: TipoNotificacion.REVISION_APROBADA,
       pedidoId: pedido.id,
     });
   }

@@ -3,7 +3,6 @@
   "cloud": {
     "baseUrl": "https://api.playerytees.com",
     "agentKey": "PEGA-AQUI-EL-VALOR-DE-AGENT_API_KEY-DEL-PANEL-ADMIN",
-    "sucursalIds": [1, 2, 3, 4, 5],
     "timeoutMs": 30000
   },
   "firebird": {
@@ -15,6 +14,7 @@
     "charset": "ISO8859_1",
     "poolSize": 4
   },
+  "$comentario": "Las tiendas se descubren automáticamente desde Firebird (TIENDAS.ACTIVO='S'). El IDTIENDA local es el externalId en la nube; el backend las crea/relaciona vía el trigger TRG_TIENDAS_SYNC o manualmente.",
   "sync": {
     "pollIntervalMs": 5000,
     "backoffMinMs": 5000,
@@ -28,5 +28,11 @@
   "service": {
     "name": "playerytees-sync-agent",
     "description": "Sincronizacion bidireccional Firebird &lt;-&gt; PlayeryTees Cloud"
+  },
+  "pedidos": {
+    "$comment": "Valores al bajar pedidos a Firebird. Ajusta por instalacion.",
+    "vendedorId": 1,
+    "usuarioId": 1,
+    "lista": "1"
   }
 }

@@ -74,7 +74,10 @@ async function limpiarBaseDeDatos() {
   await prisma.corrida.deleteMany({});
   await prisma.color.deleteMany({});
   // kiosko tiene FK activado_por_id → usuarios. Hay que borrarlo ANTES.
-  await prisma.kiosko.deleteMany({});
+  // F11 (ago 2026): tabla kioskos no existe todavía en la BD (modelo en
+  // schema.prisma sin migración que la cree). Comento el deleteMany para
+  // no romper el seed; re-activar cuando se cree la migración de kioskos.
+  // await prisma.kiosko.deleteMany({});
   await prisma.usuario.deleteMany({});
   await prisma.tienda.deleteMany({});
 
@@ -95,7 +98,8 @@ async function limpiarBaseDeDatos() {
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_revisiones_items_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_mensajes_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "notificaciones_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "kioskos_id_seq" RESTART WITH 1`;
+  // F11 (ago 2026): kioskos_id_seq comentado — tabla kioskos no existe aún.
+  // await prisma.$executeRaw`ALTER SEQUENCE "kioskos_id_seq" RESTART WITH 1`;
 
   console.log('  ✓ Base de datos limpiada\n');
 }
@@ -229,6 +233,20 @@ async function main() {
     },
   });
 
+  // Cajero MONITOR: TV de ventanillas de la tienda Mexicali.
+  // Rol CAJERO_MONITOR. Login redirige a /cajero-monitor.
+  await prisma.usuario.create({
+    data: {
+      email: 'cajero.tv.mexicali@puntotextil.com',
+      password: passwordHash,
+      nombre: 'TV',
+      apellido: 'Cajas Mexicali',
+      rol: RolUsuario.CAJERO_MONITOR,
+      tiendaId: tiendaMexicali.id,
+      activo: true,
+    },
+  });
+
   const clienteDemo = await prisma.usuario.create({
     data: {
       email: 'cliente@puntotextil.com',
@@ -260,20 +278,48 @@ async function main() {
   console.log(`  ✓ Cajero: ${usuarioCajero.email} / 123456 (${tiendaMexicali.nombre})`);
   console.log(`  ✓ Mostrador: ${usuarioMostrador.email} / 123456 (${tiendaMexicali.nombre})`);
   console.log(`  ✓ Cliente: ${clienteDemo.email} / 123456\n`);
+  console.log(`  ✓ TV Monitor Bodega (Mexicali): monitor.mexicali@puntotextil.com / 123456`);
+  console.log(`  ✓ TV Monitor Bodega (Monterrey): monitor.mty@puntotextil.com / 123456`);
+  console.log(`  ✓ TV Monitor Cajas (Mexicali): cajero.tv.mexicali@puntotextil.com / 123456\n`);
+
+  // ========== CREAR VENTANILLAS (F11 ago 2026) ==========
+  console.log('🪟 Creando ventanillas...');
+  // Mexicali: 3 ventanillas. La 1 ya está asignada al cajero demo.
+  const vMex1 = await prisma.ventanilla.create({
+    data: { tiendaId: tiendaMexicali.id, numero: 1, cajeroId: usuarioCajero.id, activa: true },
+  });
+  await prisma.ventanilla.create({
+    data: { tiendaId: tiendaMexicali.id, numero: 2, cajeroId: null, activa: true },
+  });
+  await prisma.ventanilla.create({
+    data: { tiendaId: tiendaMexicali.id, numero: 3, cajeroId: null, activa: true },
+  });
+  // Monterrey: 2 ventanillas libres.
+  await prisma.ventanilla.create({
+    data: { tiendaId: tiendaMonterrey.id, numero: 1, cajeroId: null, activa: true },
+  });
+  await prisma.ventanilla.create({
+    data: { tiendaId: tiendaMonterrey.id, numero: 2, cajeroId: null, activa: true },
+  });
+  console.log(`  ✓ ${tiendaMexicali.nombre}: 3 ventanillas (1 ocupada por ${usuarioCajero.nombre})`);
+  console.log(`  ✓ ${tiendaMonterrey.nombre}: 2 ventanillas libres\n`);
+  void vMex1;
 
   // ========== CREAR KIOSKO DEMO ==========
-  console.log('📱 Creando kiosko demo...');
-  await prisma.kiosko.upsert({
-    where: { tiendaId_nombre: { tiendaId: tiendaMexicali.id, nombre: 'Kiosko Entrada' } },
-    update: {},
-    create: {
-      tiendaId: tiendaMexicali.id,
-      nombre: 'Kiosko Entrada',
-      estado: 'ACTIVO',
-      activadoPorId: admin.id,
-    },
-  });
-  console.log(`  ✓ Kiosko: "Kiosko Entrada" en ${tiendaMexicali.nombre}\n`);
+  // F11 (ago 2026): comentado porque la tabla kioskos no existe aún en la
+  // BD (modelo en schema.prisma sin migración). Re-activar cuando se cree.
+  // console.log('📱 Creando kiosko demo...');
+  // await prisma.kiosko.upsert({
+  //   where: { tiendaId_nombre: { tiendaId: tiendaMexicali.id, nombre: 'Kiosko Entrada' } },
+  //   update: {},
+  //   create: {
+  //     tiendaId: tiendaMexicali.id,
+  //     nombre: 'Kiosko Entrada',
+  //     estado: 'ACTIVO',
+  //     activadoPorId: admin.id,
+  //   },
+  // });
+  // console.log(`  ✓ Kiosko: "Kiosko Entrada" en ${tiendaMexicali.nombre}\n`);
 
   // ========== CREAR CORRIDAS Y TALLAS ==========
   console.log('📏 Creando corridas y tallas...');

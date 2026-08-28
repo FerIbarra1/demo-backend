@@ -1,7 +1,9 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { PedidosModule } from '../pedidos/pedidos.module';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { SyncAgentController } from './sync-agent.controller';
+import { SyncAdminController } from './sync-admin.controller';
 import { SyncAgentService } from './sync-agent.service';
 import { ExternalRefService } from './external-ref.service';
 import { CatalogHandler } from './handlers/catalog.handler';
@@ -33,8 +35,8 @@ import { PedidoDescargaHandler } from './handlers/pedido-descarga.handler';
  *     realtime y email).
  */
 @Module({
-  imports: [PrismaModule, forwardRef(() => PedidosModule)],
-  controllers: [SyncAgentController],
+  imports: [PrismaModule, forwardRef(() => PedidosModule), NotificationsModule],
+  controllers: [SyncAgentController, SyncAdminController],
   providers: [
     SyncAgentService,
     ExternalRefService,

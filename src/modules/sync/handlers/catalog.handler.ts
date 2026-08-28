@@ -46,8 +46,12 @@ export class CatalogHandler {
           return await this.procesarPrecio(evento);
         case 'PRECIOSCO':
           return await this.procesarPrecioCO(evento);
+        case 'TIENDAS':
+          return await this.procesarTienda(evento);
         default:
-          return { ok: true, mensaje: `Entidad ${evento.entidad} ignorada (sin handler)` };
+          // Entidades sin handler (p.ej. CONFTIENDAS) se marcan como
+          // procesadas para que el checkpoint global nunca se bloquee.
+          return { ok: true, mensaje: `Entidad ${evento.entidad} sin handler: ignorada` };
       }
     } catch (err) {
       this.logger.error(
@@ -425,6 +429,66 @@ export class CatalogHandler {
       localEntity: 'PRECIOSCO',
       localId: evento.localId,
       localTiendaId,
+    });
+
+    return { ok: true };
+  }
+
+  // -------------------- TIENDAS --------------------
+
+  private async procesarTienda(
+    evento: SyncEventoDto,
+  ): Promise<{ ok: boolean; mensaje?: string }> {
+    const d = evento.datos as {
+      NOMBRE?: string;
+      DIRECCION?: string;
+      CIUDAD?: string;
+      TELEFONO?: string;
+      EMAIL?: string;
+      ACTIVO?: string;
+    };
+    const externalId = evento.localId;
+    if (!externalId) return { ok: false, mensaje: 'TIENDAS sin IDTIENDA' };
+
+    const nombre = (d.NOMBRE ?? '').trim();
+    const activa = (d.ACTIVO ?? 'S').trim().toUpperCase().startsWith('S');
+
+    if (evento.operacion === 'D') {
+      // Soft-delete (preserva pedidos históricos).
+      await this.prisma.tienda.updateMany({
+        where: { externalId },
+        data: { activa: false },
+      });
+      return { ok: true };
+    }
+
+    const tienda = await this.prisma.tienda.upsert({
+      where: { externalId },
+      update: {
+        ...(nombre ? { nombre } : {}),
+        ...(d.DIRECCION ? { direccion: d.DIRECCION.trim() } : {}),
+        ...(d.CIUDAD ? { ciudad: d.CIUDAD.trim() } : {}),
+        ...(d.TELEFONO ? { telefono: d.TELEFONO.trim() } : {}),
+        ...(d.EMAIL ? { email: d.EMAIL.trim() } : {}),
+        activa,
+      },
+      create: {
+        externalId,
+        nombre: nombre || `Tienda ${externalId}`,
+        direccion: (d.DIRECCION ?? '').trim() || 'Sin dirección',
+        ciudad: (d.CIUDAD ?? '').trim() || 'Sin ciudad',
+        estado: '',
+        telefono: (d.TELEFONO ?? '').trim() || null,
+        email: (d.EMAIL ?? '').trim() || null,
+        activa,
+      },
+    });
+
+    await this.externalRefs.upsert({
+      systemEntity: 'TIENDA',
+      systemId: tienda.id,
+      localEntity: 'TIENDAS',
+      localId: evento.localId,
     });
 
     return { ok: true };

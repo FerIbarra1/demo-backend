@@ -28,14 +28,6 @@ async function main() {
   const log = createLogger(cfg);
   log.info({ name: cfg.service.name }, 'agente arrancando');
 
-  // Validación: agent.config.json tiene tiendaMap.
-  if (!(cfg as any).firebird?.tiendaMap && !(cfg as any).firebird?.localTiendaIds) {
-    log.warn(
-      {},
-      'Falta firebird.tiendaMap o firebird.localTiendaIds en agent.config.json — los pedidos nueva web no se podrán bajar',
-    );
-  }
-
   const firebird = new FirebirdClient(cfg.firebird);
   const cloud = new CloudClient(cfg.cloud, log);
   const store = new LocalStore(cfg);
@@ -52,10 +44,19 @@ async function main() {
     process.exit(1);
   }
 
-  // Validar conectividad con la nube (1 heartbeat).
+  // Validar conectividad con la nube (1 heartbeat) con la primera tienda
+  // activa de Firebird.
   try {
-    await cloud.heartbeat(cfg.cloud.sucursalIds[0], '1.0.0', process.env.COMPUTERNAME);
-    log.info({ tienda: cfg.cloud.sucursalIds[0] }, 'nube: heartbeat OK');
+    const rows = await firebird.query<{ IDTIENDA: number }>(
+      `SELECT FIRST 1 IDTIENDA FROM TIENDAS WHERE ACTIVO = 'S' ORDER BY IDTIENDA`,
+    );
+    const tiendaId = rows[0]?.IDTIENDA;
+    if (tiendaId == null) {
+      log.warn({}, 'no hay tiendas activas en Firebird — heartbeat inicial omitido');
+    } else {
+      await cloud.heartbeat(tiendaId, '1.0.0', process.env.COMPUTERNAME);
+      log.info({ tiendaId }, 'nube: heartbeat OK');
+    }
   } catch (err) {
     log.warn({ err: (err as Error).message }, 'nube: heartbeat fallo inicial, continuamos');
   }

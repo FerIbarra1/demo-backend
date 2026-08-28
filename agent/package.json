@@ -5,6 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:ts",
+    "test": "npm run build:ts && node --test dist/checkpoint-store.spec.js dist/down-processor.spec.js dist/up-processor.spec.js dist/cloud-client.spec.js",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "install-service": "node dist/install/install-windows-service.js",

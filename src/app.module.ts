@@ -15,6 +15,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { KioskoModule } from './modules/kiosko/kiosko.module';
 import { MostradorModule } from './modules/mostrador/mostrador.module';
 import { SyncModule } from './modules/sync/sync.module';
+import { VentanillasModule } from './modules/ventanillas/ventanillas.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
@@ -37,6 +38,9 @@ import { Reflector } from '@nestjs/core';
     RealtimeModule,
     KioskoModule,
     MostradorModule,
+    // F11 (ago 2026): gestión de ventanillas físicas del módulo de cajeros.
+    // Se importa desde PedidosModule para que CajeroService pueda usar
+    // VentanillasService — no se registra aquí para evitar duplicados.
     // F9 (ago 2026): endpoints para el agente de sincronización con Firebird.
     // Va después de PedidosModule porque PedidoPagoHandler reusa AdminService.
     SyncModule,

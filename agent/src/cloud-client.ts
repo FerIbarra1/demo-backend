@@ -10,6 +10,8 @@ import { Logger } from './logger-types';
  */
 export class CloudClient {
   private http: AxiosInstance;
+  private readonly agentId =
+    process.env.AGENT_ID ?? process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? 'playerytees-agent';
 
   constructor(private cfg: CloudConfig, private log: Logger) {
     this.http = axios.create({
@@ -23,15 +25,29 @@ export class CloudClient {
     });
   }
 
+  getAgentId(): string {
+    return this.agentId;
+  }
+
   /**
    * GET /api/sync/agent/poll-pedidos?sucursalId=X&limit=Y
    * Devuelve la cola de pedidos pendientes para la tienda indicada.
    */
-  async pollPedidos(sucursalIdNube: number, limit = 20): Promise<PedidoCloud[]> {
-    const res = await this.call<{ tiendaId: number; pedidos: PedidoCloud[] }>('GET', '/api/sync/agent/poll-pedidos', {
-      params: { limit },
-      headers: { 'X-Sucursal-Id': String(sucursalIdNube) },
-    });
+  async pollPedidos(
+    sucursalIdNube: number,
+    limit = 20,
+  ): Promise<PedidoCloud[]> {
+    const res = await this.call<{ tiendaId: number; pedidos: PedidoCloud[] }>(
+      'GET',
+      '/api/sync/agent/poll-pedidos',
+      {
+        params: { limit },
+        headers: {
+          'X-Sucursal-Id': String(sucursalIdNube),
+          'X-Agent-Id': this.agentId,
+        },
+      },
+    );
     return res.data.pedidos ?? [];
   }
 
@@ -41,7 +57,14 @@ export class CloudClient {
    * checkpoint sólo si la respuesta es 2xx y todos los eventos OK.
    */
   async upload(batch: UploadBatch): Promise<UploadResponse> {
-    const res = await this.call<UploadResponse>('POST', '/api/sync/agent/upload', { data: batch });
+    const res = await this.call<UploadResponse>(
+      'POST',
+      '/api/sync/agent/upload',
+      {
+        data: batch,
+        headers: { 'X-Sucursal-Id': String(batch.tiendaId) },
+      },
+    );
     return res.data;
   }
 
@@ -49,11 +72,17 @@ export class CloudClient {
    * POST /api/sync/agent/pedidos-ack
    * Confirma cuáles pedidos se subieron OK a Firebird y cuáles fallaron.
    */
-  async pedidosAck(acks: AckItem[]): Promise<{ actualizados: number; errores: number }> {
+  async pedidosAck(
+    tiendaIdNube: number,
+    acks: AckItem[],
+  ): Promise<{ actualizados: number; errores: number }> {
     const res = await this.call<{ actualizados: number; errores: number }>(
       'POST',
       '/api/sync/agent/pedidos-ack',
-      { data: { acks } },
+      {
+        data: { tiendaId: tiendaIdNube, acks },
+        headers: { 'X-Sucursal-Id': String(tiendaIdNube) },
+      },
     );
     return res.data;
   }
@@ -121,6 +150,9 @@ export class TransientError extends Error {
 
 export interface PedidoCloud {
   pedidoId: number;
+  tiendaId: number;
+  leaseToken: string;
+  leaseUntil: string;
   externalIdPEDIDOS: number | null;
   numeroPedido: string;
   fechaPedido: string;
@@ -149,6 +181,9 @@ export interface PedidoItemCloud {
   corridaNombre: string;
   colorNombre: string;
   localPrecioCOId: number | null;
+  localProductoId: number | null;
+  localCorridaId: number | null;
+  localColorId: number | null;
   skip: boolean;
 }
 
@@ -159,6 +194,8 @@ export interface UploadBatch {
 }
 
 export interface UploadEvent {
+  eventId: string;
+  bandejaId: number;
   tipo: 'CATALOGO' | 'CLIENTE' | 'PEDIDO' | 'PAGO';
   operacion: 'I' | 'U' | 'D';
   entidad: string; // PRODUCTOS, PRECIOS, PRECIOSCO, CLIENTES, PEDIDOS, etc.
@@ -175,6 +212,8 @@ export interface UploadResponse {
 
 export interface AckItem {
   pedidoId: number;
+  agentId: string;
+  leaseToken: string;
   externalIdPEDIDOS?: number;
   externalFolio?: string;
   exito: boolean;

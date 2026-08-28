@@ -3,6 +3,7 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
@@ -51,6 +52,9 @@ export class ClienteService {
         include: { items: true },
       });
       if (existente) {
+        if (existente.usuarioId !== usuario.userId) {
+          throw new BadRequestException('La clave de idempotencia ya está en uso');
+        }
         this.logger.log(`Idempotency hit para key ${idempotencyKey} → pedido ${existente.id}`);
         return { ...existente, mensaje: 'Pedido (idempotente)' };
       }
@@ -70,6 +74,20 @@ export class ClienteService {
     });
     if (!tienda) {
       throw new BadRequestException('La tienda seleccionada no está disponible');
+    }
+
+    if (usuario.rol === 'CLIENTE') {
+      const pertenece =
+        usuario.tiendaId === tiendaId ||
+        (await this.prisma.usuarioTienda.findFirst({
+          where: { usuarioId: usuario.userId, tiendaId, activo: true },
+          select: { id: true },
+        }));
+      if (!pertenece) {
+        throw new BadRequestException(
+          'El usuario no tiene acceso a la tienda seleccionada',
+        );
+      }
     }
 
     // KIOSKO: si el frontend manda X-Kiosko-Id, validamos contra BD y
@@ -160,6 +178,10 @@ export class ClienteService {
         productoId: pco.productoId,
         precioCOId: pco.id,
         cantidad: item.cantidad,
+        // C4: snapshot de la cantidad original al crear el pedido. El handler
+        // de MOVPED compara contra este valor para distinguir surtido COMPLETO
+        // vs PARCIAL cuando el bodeguero ajusta cantidades en VFP.
+        cantidadOriginal: item.cantidad,
         precioUnitario: pco.precio,
         subtotal: itemSubtotal,
         productoNombre: pco.producto.nombre,
@@ -172,50 +194,70 @@ export class ClienteService {
       };
     });
 
-    const numeroPedido = await this.state.generarNumeroPedido();
-
-    const pedido = await this.prisma.pedido.create({
-      data: {
-        numeroPedido,
-        usuarioId: usuario.userId,
-        tiendaId,
-        estado: EstadoPedido.PENDING_REVIEW,
-        canalOrigen: canalOrigenFinal,
-        kioskoId: kioskoIdFinal,
-        modoEntrega: modoEntregaFinal,
-        ...envioFields,
-        subtotal,
-        total: subtotal,
-        clienteNombre: dto.clienteNombre,
-        clienteEmail: dto.clienteEmail,
-        clienteTelefono: dto.clienteTelefono,
-        notas: dto.notas,
-        idempotencyKey,
-        items: { create: itemsData },
-        historial: {
-          create: {
-            estadoNuevo: EstadoPedido.PENDING_REVIEW,
-            observacion: kioskoIdFinal
-              ? `Pedido creado desde kiosko ${kioskoIdFinal}`
-              : 'Pedido creado por cliente',
+    let pedido: any = null;
+    for (let intento = 0; intento < 3 && !pedido; intento++) {
+      const numeroPedido = await this.state.generarNumeroPedido();
+      try {
+        // El pedido vive SOLO en la nube hasta que bodega confirma el surtido
+        // (confirmarSurtido → PENDING_PAID crea la entrada en pedidos_pendientes_envio).
+        // Así Firebird sólo recibe pedidos con cantidades finales y no hace falta
+        // re-sincronizar ajustes (trigger MOVPED eliminado).
+        pedido = await this.prisma.pedido.create({
+          data: {
+            numeroPedido,
             usuarioId: usuario.userId,
-            usuarioNombre: usuario.nombre,
+            tiendaId,
+            estado: EstadoPedido.PENDING_REVIEW,
+            canalOrigen: canalOrigenFinal,
+            kioskoId: kioskoIdFinal,
+            modoEntrega: modoEntregaFinal,
+            ...envioFields,
+            subtotal,
+            total: subtotal,
+            clienteNombre: dto.clienteNombre,
+            clienteEmail: dto.clienteEmail,
+            clienteTelefono: dto.clienteTelefono,
+            notas: dto.notas,
+            idempotencyKey,
+            items: { create: itemsData },
+            historial: {
+              create: {
+                estadoNuevo: EstadoPedido.PENDING_REVIEW,
+                observacion: kioskoIdFinal
+                  ? `Pedido creado desde kiosko ${kioskoIdFinal}`
+                  : 'Pedido creado por cliente',
+                usuarioId: usuario.userId,
+                usuarioNombre: usuario.nombre,
+              },
+            },
           },
-        },
-        // F9 (ago 2026): encolar pedido para sincronización con Firebird.
-        // El agente local (en el servidor central de Firebird) lo sondea
-        // y lo baja via GRABAR_PEDIDOS + GRABAR_MOVPED.
-        pendienteEnvio: {
-          create: { estado: 'PENDIENTE' },
-        },
-      },
-      include: {
-        items: true,
-        tienda: true,
-        kiosko: { select: { id: true, nombre: true } },
-        pendienteEnvio: true,
-      },
-    });
+          include: {
+            items: true,
+            tienda: true,
+            kiosko: { select: { id: true, nombre: true } },
+            pendienteEnvio: true,
+          },
+        });
+      } catch (err) {
+        if ((err as { code?: string }).code !== 'P2002') throw err;
+        if (idempotencyKey) {
+          const concurrente = await this.prisma.pedido.findUnique({
+            where: { idempotencyKey },
+            include: { items: true },
+          });
+          if (concurrente) {
+            if (concurrente.usuarioId !== usuario.userId) {
+              throw new BadRequestException('La clave de idempotencia ya está en uso');
+            }
+            pedido = concurrente;
+          }
+        }
+      }
+    }
+
+    if (!pedido) {
+      throw new ConflictException('No se pudo generar un número único de pedido');
+    }
 
     this.logger.log(
       `Pedido ${pedido.numeroPedido} creado (PENDING_REVIEW, canal=${pedido.canalOrigen}, kioskoId=${pedido.kioskoId ?? '-'})`,
@@ -250,9 +292,13 @@ export class ClienteService {
               colorNombre: true,
               cantidad: true,
               precioUnitario: true,
+              precioCOId: true,
+              original: true,
+              cancelada: true,
+              sustitucionPropuestaPrecioCOId: true,
             },
           },
-          tienda: { select: { nombre: true } },
+          tienda: { select: { id: true, nombre: true } },
           kiosko: { select: { id: true, nombre: true } },
         },
         orderBy: { fechaPedido: 'desc' },

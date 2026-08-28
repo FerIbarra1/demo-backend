@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Heading, Hr, Section, Text } from '@react-email/components';
 import { EmailLayout } from './Layout';
 import { ItemList, ItemTotal } from './ItemList';
-import { PedidoEmailData } from '../mail.templates';
+import { PedidoEmailData, folioVisible } from '../mail.templates';
 import { estadoPedidoLabel } from '../estado-labels';
 
 export interface PedidoEmailShellProps {
@@ -116,7 +116,7 @@ export const PedidoEmailShell = ({
     >
       <Text style={sectionTitle}>Resumen del pedido</Text>
       <Text style={labelValue}>
-        <strong>Número:</strong> {pedido.numeroPedido}
+        <strong>Número:</strong> {folioVisible(pedido)}
       </Text>
       <Text style={labelValue}>
         <strong>Estado:</strong> {estadoPedidoLabel(pedido.estado)}

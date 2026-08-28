@@ -17,8 +17,6 @@ import { AuthError, TransientError } from './cloud-client';
  *   5. Si la nube está caída → backoff y reintento.
  */
 
-const AGENT_LOCAL_USER_ID = 1; // usuario del agente en Firebird (configurar según instalación)
-
 export class DownProcessor {
   constructor(
     private cfg: AgentConfig,
@@ -31,28 +29,43 @@ export class DownProcessor {
   async runOnce(): Promise<{ descargados: number; errores: number }> {
     let totalDescargados = 0;
     let totalErrores = 0;
+
+    await this.flushAckOutbox();
+
+    // Descubrir las tiendas ACTIVAS desde Firebird (TIENDAS.ACTIVO='S').
+    // El IDTIENDA local ES el externalId en la nube, así que no hay mapeo.
+    const tiendasLocales = await this.fb.query<{ IDTIENDA: number }>(
+      `SELECT IDTIENDA FROM TIENDAS WHERE ACTIVO = 'S'`,
+    );
+    if (tiendasLocales.length === 0) {
+      this.log.warn({}, 'down: no hay tiendas activas en Firebird');
+      return { descargados: 0, errores: 0 };
+    }
+
     const acksPorTienda = new Map<number, AckItem[]>();
 
-    for (const tiendaIdNube of this.cfg.cloud.sucursalIds) {
+    for (const { IDTIENDA } of tiendasLocales) {
+      const tiendaId = IDTIENDA; // == externalId en la nube
+
       // 1. Heartbeat (best-effort).
       try {
-        await this.cloud.heartbeat(tiendaIdNube, this.cfg.service.description ? '1.0.0' : '1.0.0', process.env.COMPUTERNAME);
+        await this.cloud.heartbeat(tiendaId, this.cfg.service.description ? '1.0.0' : '1.0.0', process.env.COMPUTERNAME);
       } catch (err) {
         if (err instanceof AuthError) {
           this.log.fatal({ err: err.message }, 'down: auth rejected — abortando');
           throw err;
         }
         // Transient: continuar con poll, no es fatal.
-        this.log.warn({ tiendaIdNube, err: (err as Error).message }, 'down: heartbeat fallo, continuando');
+        this.log.warn({ tiendaId, err: (err as Error).message }, 'down: heartbeat fallo, continuando');
       }
 
       // 2. Poll pedidos pendientes.
       let pedidos: PedidoCloud[] = [];
       try {
-        pedidos = await this.cloud.pollPedidos(tiendaIdNube, 20);
+        pedidos = await this.cloud.pollPedidos(tiendaId, 20);
       } catch (err) {
         if (err instanceof AuthError) throw err;
-        this.log.warn({ tiendaIdNube, err: (err as Error).message }, 'down: poll fallo');
+        this.log.warn({ tiendaId, err: (err as Error).message }, 'down: poll fallo');
         await this.sleep(this.cfg.sync.backoffMinMs);
         continue;
       }
@@ -63,44 +76,41 @@ export class DownProcessor {
       const acks: AckItem[] = [];
       for (const pedido of pedidos) {
         try {
-          await this.procesarPedido(tiendaIdNube, pedido);
-          // Si procesarPedido no lanza, el ack es éxito. Pero precisamos
-          // el externalIdPEDIDOS; el helper interno lo guarda en el store.
-          const cp = this.store.getCheckpoint(tiendaIdNube);
+          const resultado = await this.procesarPedido(tiendaId, pedido);
           acks.push({
             pedidoId: pedido.pedidoId,
-            externalIdPEDIDOS: cp?.pedidoExternalId ?? undefined,
-            externalFolio: undefined,
+            agentId: this.cloud.getAgentId(),
+            leaseToken: pedido.leaseToken,
+            externalIdPEDIDOS: resultado.externalIdPEDIDOS,
+            externalFolio: resultado.externalFolio,
             exito: true,
           });
           totalDescargados++;
         } catch (err) {
           const msg = (err as Error).message;
           this.log.error(
-            { tiendaIdNube, pedidoId: pedido.pedidoId, err: msg },
+            { tiendaId, pedidoId: pedido.pedidoId, err: msg },
             'down: error al bajar pedido',
           );
-          acks.push({ pedidoId: pedido.pedidoId, exito: false, error: msg });
+          acks.push({
+            pedidoId: pedido.pedidoId,
+            agentId: this.cloud.getAgentId(),
+            leaseToken: pedido.leaseToken,
+            exito: false,
+            error: msg,
+          });
           totalErrores++;
         }
       }
 
-      acksPorTienda.set(tiendaIdNube, acks);
+      acksPorTienda.set(tiendaId, acks);
     }
 
-    // 4. POST /pedidos-ack en batch por tienda.
-    for (const [tiendaIdNube, acks] of acksPorTienda.entries()) {
-      try {
-        const res = await this.cloud.pedidosAck(acks);
-        this.log.info(
-          { tiendaIdNube, actualizados: res.actualizados, err: res.errores },
-          'down: ack enviado',
-        );
-      } catch (err) {
-        if (err instanceof AuthError) throw err;
-        this.log.warn({ tiendaIdNube, err: (err as Error).message }, 'down: ack fallo');
-      }
+    // 4. Encolar y enviar ACKs por tienda.
+    for (const [tiendaId, acks] of acksPorTienda.entries()) {
+      this.store.enqueueAck(tiendaId, { acks });
     }
+    await this.flushAckOutbox();
 
     return { descargados: totalDescargados, errores: totalErrores };
   }
@@ -109,26 +119,42 @@ export class DownProcessor {
    * Procesa un pedido dentro de una transacción Firebird.
    * Si tiene externalIdPEDIDOS previo (reintento), lo pasa a GRABAR_PEDIDOS
    * para que sea idempotente.
+   *
+   * `tiendaId` es el IDTIENDA local de Firebird, que coincide con el
+   * externalId en la nube (clave natural compartida).
    */
-  private async procesarPedido(tiendaIdNube: number, pedido: PedidoCloud): Promise<void> {
-    // Necesitamos el IDTIENDA local (Firebird). Lo deduce del
-    // externalIdNube -> externalIdLocal mediante Tienda (en PG).
-    // El agente ya tiene la lista de sucursalIds = IDs nube; debemos mapear
-    // a IDTIENDA local. Para mantenerlo simple, asumimos que la
-    // configuración incluye `localTiendaIds` mapeado 1:1. Esto se puede
-    // mejorar leyendo de la nube via endpoint, pero por simplicidad:
-    const localTiendaId = this.localTiendaIdFor(tiendaIdNube);
-    if (!localTiendaId) {
-      throw new Error(`No hay mapeo local para tiendaIdNube=${tiendaIdNube}`);
+  private async procesarPedido(
+    tiendaId: number,
+    pedido: PedidoCloud,
+  ): Promise<{ externalIdPEDIDOS: number; externalFolio: string }> {
+    const localTiendaId = tiendaId;
+
+    // Parámetros de negocio configurables (antes hardcodeados =1/'1').
+    const localVendedorId = this.cfg.pedidos?.vendedorId ?? 1;
+    const localUsuarioId = this.cfg.pedidos?.usuarioId ?? 1;
+    const lista = this.cfg.pedidos?.lista ?? '1';
+
+    // Idempotencia: si este pedido ya se insertó en Firebird en un
+    // intento previo (el agente crasheó entre el INSERT y el ack), la
+    // copia local `pedido_delivery` guarda el IDPEDIDO generado. Pasarlo
+    // a GRABAR_PEDIDOS hace un UPDATE en lugar de un INSERT nuevo, lo que
+    // evita pedidos duplicados en Firebird.
+    //
+    // C2 (ago 2026): el backend ahora pre-asigna `pedido.externalIdPEDIDOS`
+    // (= 1B + pedido.id nube) al crear el pedido. Esto sobrevive aunque el
+    // SQLite local se borre, garantizando que GRABAR_PEDIDOS reciba siempre
+    // el mismo ID en reintentos y la SP lo trate como UPDATE idempotente.
+    const entregaPrevia = this.store.getPedidoDelivery(tiendaId, pedido.pedidoId);
+    const externalId =
+      entregaPrevia?.externalIdPEDIDOS ?? pedido.externalIdPEDIDOS ?? 0;
+    if (externalId === 0) {
+      this.log.warn(
+        { pedidoId: pedido.pedidoId, tiendaId },
+        'down: pedido sin externalIdPEDIDOS inicial (C2), riesgo de duplicación en Firebird',
+      );
     }
 
-    const localVendedorId = 1; // ajustar según la tienda
-
-    // Idempotencia: si la nube ya tiene un externalIdPEDIDOS guardado
-    // (de un intento previo), úsalo. Si no, deja que Firebird genere.
-    const externalId = pedido.externalIdPEDIDOS ?? 0;
-
-    await this.fb.transaction(async (tx) => {
+    const resultado = await this.fb.transaction(async (tx) => {
       const r1 = await tx.callScalar<{
         PEDIDO_ID: number;
         PEDIDO_FOLIO: string;
@@ -151,8 +177,8 @@ export class DownProcessor {
           localVendedorId,
           (pedido.notas ?? '').slice(0, 2000),
           pedido.total,
-          '1', // LISTA (1 = lista 1 por defecto; ajustar si hay mapeo)
-          AGENT_LOCAL_USER_ID,
+          lista,
+          localUsuarioId,
         ],
       );
 
@@ -178,9 +204,9 @@ export class DownProcessor {
             0, // IDMOVPED = nuevo
             pedidoIdLocal,
             item.productoCodigo.slice(0, 16), // CODIGO CHAR(16)
-            item.localPrecioCOId, // IDPRODUCTO (el agente recibe el ID local via ExternalRef)
-            0, // IDCORRIDA (resolver via ExternalRef; simplificado a 0)
-            0, // IDCOLOR
+            item.localProductoId,
+            item.localCorridaId,
+            item.localColorId,
             item.talla.slice(0, 5),
             item.cantidad,
             item.precioUnitario,
@@ -191,12 +217,9 @@ export class DownProcessor {
         }
       }
 
-      // Guardar externalIdPEDIDOS en el store local para idempotencia en reintentos.
-      this.store.setPedidoExternalId(tiendaIdNube, pedido.pedidoId, pedidoIdLocal);
-
       this.log.info(
         {
-          tiendaIdNube,
+          tiendaId,
           pedidoId: pedido.pedidoId,
           externalIdPEDIDOS: pedidoIdLocal,
           folio: folioLocal,
@@ -204,21 +227,53 @@ export class DownProcessor {
         },
         'down: pedido bajado a Firebird',
       );
+
+      return { externalIdPEDIDOS: pedidoIdLocal, externalFolio: folioLocal };
     });
+
+    this.store.setPedidoDelivery(
+      tiendaId,
+      pedido.pedidoId,
+      resultado.externalIdPEDIDOS,
+      resultado.externalFolio,
+    );
+    return resultado;
   }
 
-  /**
-   * Mapeo tiendaIdNube -> IDTIENDA local Firebird.
-   * Por simplicidad se mantiene una correspondencia 1:1 que el operador
-   * configura en agent.config.json como `localTiendaIds`. Si no está,
-   * abortamos con mensaje claro.
-   */
-  private localTiendaIdFor(tiendaIdNube: number): number | null {
-    const list = (this.cfg as any).firebird?.localTiendaIds as number[] | undefined;
-    const mapping = (this.cfg as any).firebird?.tiendaMap as Record<number, number> | undefined;
-    if (mapping && mapping[tiendaIdNube] != null) return mapping[tiendaIdNube];
-    if (list && list[tiendaIdNube] != null) return list[tiendaIdNube];
-    return null;
+  private async flushAckOutbox(): Promise<void> {
+    const pending = this.store.dueAcks(20);
+    if (pending.length === 0) return;
+
+    const byStore = new Map<number, typeof pending>();
+    for (const ack of pending) {
+      const list = byStore.get(ack.tiendaId) ?? [];
+      list.push(ack);
+      byStore.set(ack.tiendaId, list);
+    }
+
+    for (const [tiendaIdNube, entries] of byStore) {
+      const acks = entries.flatMap((entry) => entry.payload.acks as AckItem[]);
+      try {
+        const res = await this.cloud.pedidosAck(tiendaIdNube, acks);
+        if (res.errores === 0) {
+          this.store.deleteAcks(entries.map((entry) => entry.id));
+        } else {
+          this.store.scheduleAckRetry(
+            entries.map((entry) => entry.id),
+            this.cfg.sync.backoffMinMs / 1000,
+            `${res.errores} ACKs rechazados`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof AuthError) throw err;
+        this.store.scheduleAckRetry(
+          entries.map((entry) => entry.id),
+          this.cfg.sync.backoffMinMs / 1000,
+          (err as Error).message,
+        );
+        this.log.warn({ tiendaIdNube, err: (err as Error).message }, 'down: ack outbox fallo');
+      }
+    }
   }
 
   private sleep(ms: number): Promise<void> {

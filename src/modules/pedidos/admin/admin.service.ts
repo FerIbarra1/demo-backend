@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
@@ -114,10 +115,21 @@ export class AdminService {
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
+    if (pedido.estado === EstadoPedido.PAID) {
+      return pedido;
+    }
+    // El agente externo (Firebird) inyecta userId=0 vía ApiKeyGuard. Puede
+    // marcar pagado un pedido desde cualquier estado no-terminal: en VFP el
+    // cobro ya ocurrió, no tiene sentido rechazar por el estado de la nube.
+    // El admin humano conserva el gate estricto de PENDING_PAID.
+    const esAgente = usuario.userId === 0;
     if (pedido.estado !== EstadoPedido.PENDING_PAID) {
-      throw new BadRequestException(
-        `Sólo se marca como pagado un pedido en PENDING_PAID (actual: ${pedido.estado})`,
-      );
+      const terminales: EstadoPedido[] = [EstadoPedido.CANCELLED, EstadoPedido.COMPLETED];
+      if (!esAgente || terminales.includes(pedido.estado)) {
+        throw new BadRequestException(
+          `Sólo se marca como pagado un pedido en PENDING_PAID (actual: ${pedido.estado})`,
+        );
+      }
     }
 
     if (usuario.tiendaId && pedido.tiendaId !== usuario.tiendaId) {
@@ -129,20 +141,41 @@ export class AdminService {
       throw new BadRequestException('fechaPago inválido');
     }
 
+    // El estado real del pedido (PENDING_PAID para admin humano; cualquier
+    // no-terminal para el agente). Se usa como guarda del updateMany para
+    // evitar una race condition entre la lectura y la escritura.
+    const estadoAnterior = pedido.estado;
+
     return this.prisma.$transaction(async (tx) => {
-      const pedidoActualizado = await tx.pedido.update({
-        where: { id: pedidoId },
+      const result = await tx.pedido.updateMany({
+        // C3: la guarda de "ya está PAID" ahora vive dentro del WHERE del
+        // update (race-safe atómico). Si el pedido ya está PAID, updateMany
+        // no aplica y caemos al branch de result.count !== 1 → retorno
+        // idempotente. Mantenemos `estado: estadoAnterior` para el caso del
+        // agente (cualquier estado no-terminal) o del admin (PENDING_PAID).
+        // El `not: PAID` cubre la condición de "ya pagado".
+        where: { id: pedidoId, estado: { not: EstadoPedido.PAID } },
         data: {
           estado: EstadoPedido.PAID,
           fechaPago,
           cajeroAsignadoId: null,
         },
       });
+      if (result.count !== 1) {
+        const actual = await tx.pedido.findUnique({
+          where: { id: pedidoId },
+          select: { estado: true },
+        });
+        if (actual?.estado === EstadoPedido.PAID) return actual;
+        throw new ConflictException('El estado del pedido cambió durante el pago');
+      }
+      const pedidoActualizado = await tx.pedido.findUnique({ where: { id: pedidoId } });
+      if (!pedidoActualizado) throw new NotFoundException('Pedido no encontrado');
 
       await tx.historialPedido.create({
         data: {
           pedidoId,
-          estadoAnterior: EstadoPedido.PENDING_PAID,
+          estadoAnterior,
           estadoNuevo: EstadoPedido.PAID,
           observacion:
             body?.referencia
