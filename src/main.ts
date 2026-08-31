@@ -17,6 +17,15 @@ async function bootstrap() {
   if (!jwtSecret) {
     throw new Error('JWT_SECRET es obligatorio y debe ser un valor seguro en producción');
   }
+  // Fase 3: enforce de fortaleza del secreto en producción. Un JWT_SECRET
+  // corto (ej. "secret-key") permite a un atacante forjar tokens de cualquier
+  // rol (ADMIN). En dev se permite débil para no bloquear el arranque local;
+  // en producción fallamos el startup ante un secreto inseguro.
+  if (process.env.NODE_ENV === 'production' && jwtSecret.length < 32) {
+    throw new Error(
+      'JWT_SECRET debe tener al menos 32 caracteres en producción. Genera uno con: openssl rand -base64 48',
+    );
+  }
 
   // Configuración de seguridad
   app.use(helmet());

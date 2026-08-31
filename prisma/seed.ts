@@ -57,7 +57,8 @@ const PRODUCTOS_CONFIG = [
 async function limpiarBaseDeDatos() {
   console.log('🗑️  Eliminando datos existentes...');
 
-  // Borrar en orden para respetar foreign keys
+  // Borrar en orden para respetar foreign keys.
+  // Primero las tablas que referencian a usuarios/tiendas/productos.
   await prisma.notificacion.deleteMany({});
   await prisma.pedidoMensaje.deleteMany({});
   await prisma.pedidoRevisionItem.deleteMany({});
@@ -69,10 +70,18 @@ async function limpiarBaseDeDatos() {
   await prisma.precioCO.deleteMany({});
   await prisma.precio.deleteMany({});
   await prisma.productoTienda.deleteMany({});
+  await prisma.productoImagen.deleteMany({});
   await prisma.producto.deleteMany({});
   await prisma.talla.deleteMany({});
   await prisma.corrida.deleteMany({});
   await prisma.color.deleteMany({});
+  // Tablas que referencian a usuarios (FK) — borrar antes de usuarios.
+  await prisma.ventanilla.deleteMany({});
+  await prisma.refreshToken.deleteMany({});
+  await prisma.passwordResetToken.deleteMany({});
+  await prisma.usuarioTienda.deleteMany({});
+  await prisma.externalRef.deleteMany({});
+  await prisma.favorito.deleteMany({});
   // kiosko tiene FK activado_por_id → usuarios. Hay que borrarlo ANTES.
   // F11 (ago 2026): tabla kioskos no existe todavía en la BD (modelo en
   // schema.prisma sin migración que la cree). Comento el deleteMany para
@@ -98,6 +107,13 @@ async function limpiarBaseDeDatos() {
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_revisiones_items_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_mensajes_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "notificaciones_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "ventanillas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "productos_imagenes_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "refresh_tokens_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "password_reset_tokens_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "usuarios_tiendas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "external_refs_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "favoritos_id_seq" RESTART WITH 1`;
   // F11 (ago 2026): kioskos_id_seq comentado — tabla kioskos no existe aún.
   // await prisma.$executeRaw`ALTER SEQUENCE "kioskos_id_seq" RESTART WITH 1`;
 
