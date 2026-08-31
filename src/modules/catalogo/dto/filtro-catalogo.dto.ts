@@ -1,6 +1,6 @@
-import { IsOptional, IsNumber, IsString, IsBoolean } from 'class-validator';
+import { IsOptional, IsNumber, IsString } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { Transform, Type } from 'class-transformer';
+import { Type } from 'class-transformer';
 
 export class FiltroCatalogoDto {
   @ApiPropertyOptional({ description: 'ID de la tienda (requerido para clientes)' })
@@ -30,12 +30,6 @@ export class FiltroCatalogoDto {
   @IsOptional()
   @IsString()
   busqueda?: string;
-
-  @ApiPropertyOptional({ default: true })
-  @IsOptional()
-  @Transform(({ value }) => value === 'true' || value === true)
-  @IsBoolean()
-  soloDisponibles?: boolean = true;
 
   @ApiPropertyOptional({ default: 1 })
   @IsOptional()

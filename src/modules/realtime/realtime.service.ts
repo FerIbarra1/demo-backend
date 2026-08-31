@@ -9,7 +9,6 @@ import { RealtimeGateway } from './realtime.gateway';
  *   emitToTienda(tiendaId, evento, payload)
  *   emitToPedido(pedidoId, evento, payload)
  *   emitToUser(userId, evento, payload)
- *   emitToAllAdmins(evento, payload)
  *
  * Si el gateway aún no está listo (ej. durante el bootstrap), se loguea
  * warning y se omite — el polling cubre el gap.
@@ -42,9 +41,5 @@ export class RealtimeService {
 
   emitToUser(userId: number, evento: string, payload: unknown) {
     this.safeEmit(`user-${userId}`, evento, payload);
-  }
-
-  emitToAllAdmins(evento: string, payload: unknown) {
-    this.safeEmit('admin:all', evento, payload);
   }
 }

@@ -193,62 +193,6 @@ export class NotificationsService {
   }
 
   /**
-   * Variante para cuando la propuesta del bodeguero trae un mensaje
-   * destacado que queremos resaltar en el email.
-   */
-  async enviarPropuesta(pedido: Pedido, mensajeBodeguero?: string) {
-    if (!pedido.clienteEmail) return;
-    const [items, tienda] = await Promise.all([
-      this.prisma.itemPedido.findMany({
-        where: { pedidoId: pedido.id, cancelada: false },
-        orderBy: { id: 'asc' },
-        include: {
-          producto: { select: { imagenPrincipal: true } },
-        },
-      }),
-      this.prisma.tienda.findUnique({ where: { id: pedido.tiendaId } }),
-    ]);
-    const logoUrl = this.config.get<string>('app.mail.logoUrl') ?? '';
-    const frontendUrl = this.config.get<string>('app.mail.frontendUrl') ?? '';
-    const pedidoUrl = `${frontendUrl}/pedidos/${pedido.id}`;
-
-    const pedidoData = {
-      pedidoId: pedido.id,
-      numeroPedido: pedido.numeroPedido,
-      clienteNombre: pedido.clienteNombre,
-      estado: pedido.estado,
-      total: pedido.total,
-      fechaPedido: pedido.fechaPedido,
-      tiendaNombre: tienda?.nombre,
-      items: items.map((it) => ({
-        productoNombre: it.productoNombre,
-        tallaNombre: it.tallaNombre,
-        colorNombre: it.colorNombre,
-        cantidad: it.cantidad,
-        precioUnitario: it.precioUnitario,
-        subtotal: it.subtotal,
-        imagenUrl: it.producto?.imagenPrincipal ?? null,
-      })),
-    };
-
-    const template = mailTemplates.RevisionPropuesta({
-      pedido: pedidoData,
-      pedidoUrl,
-      mensajeBodeguero,
-      logoUrl,
-      frontendUrl,
-    });
-
-    await this.mail.sendEmail({
-      to: pedido.clienteEmail!,
-      subject: mailSubjects.REVISION_PROPUESTA(pedido.numeroPedido),
-      template,
-      tipoNotificacion: TipoNotificacion.REVISION_PROPUESTA,
-      pedidoId: pedido.id,
-    });
-  }
-
-  /**
    * Email "listo para pagar" con el QR del folio VFP. Se dispara cuando el
    * agente confirma el ACK (externalFolio ya existe), no en confirmarSurtido.
    * Reutiliza el template PedidoAprobado (dice "aprobado y listo para pagar").

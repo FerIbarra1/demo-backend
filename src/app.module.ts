@@ -16,6 +16,8 @@ import { KioskoModule } from './modules/kiosko/kiosko.module';
 import { MostradorModule } from './modules/mostrador/mostrador.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { VentanillasModule } from './modules/ventanillas/ventanillas.module';
+import { ImagenesModule } from './modules/imagenes/imagenes.module';
+import { UsuariosModule } from './modules/usuarios/usuarios.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
@@ -38,6 +40,10 @@ import { Reflector } from '@nestjs/core';
     RealtimeModule,
     KioskoModule,
     MostradorModule,
+    // Imágenes de productos (panel ADMIN): subida a S3 + gestión.
+    ImagenesModule,
+    // Gestión de usuarios (panel ADMIN): empleados + clientes.
+    UsuariosModule,
     // F11 (ago 2026): gestión de ventanillas físicas del módulo de cajeros.
     // Se importa desde PedidosModule para que CajeroService pueda usar
     // VentanillasService — no se registra aquí para evitar duplicados.

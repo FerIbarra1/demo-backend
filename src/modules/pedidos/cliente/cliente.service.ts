@@ -76,19 +76,10 @@ export class ClienteService {
       throw new BadRequestException('La tienda seleccionada no está disponible');
     }
 
-    if (usuario.rol === 'CLIENTE') {
-      const pertenece =
-        usuario.tiendaId === tiendaId ||
-        (await this.prisma.usuarioTienda.findFirst({
-          where: { usuarioId: usuario.userId, tiendaId, activo: true },
-          select: { id: true },
-        }));
-      if (!pertenece) {
-        throw new BadRequestException(
-          'El usuario no tiene acceso a la tienda seleccionada',
-        );
-      }
-    }
+    // Un cliente web/kiosko puede pedir en CUALQUIER tienda activa: no
+    // pertenece a una tienda concreta. La membresía `usuarioTienda` (poblada
+    // por Firebird) solo resuelve la lista de precios del cliente, no gatea
+    // pedidos. La tienda del pedido es la que el cliente eligió (X-Tienda-Id).
 
     // KIOSKO: si el frontend manda X-Kiosko-Id, validamos contra BD y
     // forzamos canalOrigen=KIOSKO. Defensa en profundidad: un kiosko no

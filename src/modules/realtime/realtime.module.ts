@@ -23,7 +23,8 @@ import { RealtimeService } from './realtime.service';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET') || 'default-secret',
+        // Mismo valor validado que main.ts (app.jwtSecret). Sin fallback.
+        secret: config.get<string>('app.jwtSecret'),
         signOptions: { expiresIn: '1h' },
       }),
     }),

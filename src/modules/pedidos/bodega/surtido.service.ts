@@ -5,13 +5,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { EstadoPedido, EstadoSurtido, Prisma, TipoNotificacion } from '@prisma/client';
+import { EstadoPedido, EstadoSurtido, EstadoRevision, Prisma, TipoNotificacion } from '@prisma/client';
 import { UserContext } from '../../../types/pedido.types';
 import { MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { rankearSimilares } from '../core/similitud.util';
+import { MAX_PEDIDOS_POR_BODEGUERO } from '../core/pedido-limits';
 
 /**
  * Servicio de surtido en bodega.
@@ -27,13 +28,6 @@ import { rankearSimilares } from '../core/similitud.util';
  *      Si hay items con faltante o sustitución propuesta → se genera revisión al
  *      cliente automáticamente y se notifica vía NotificationsService
  */
-
-/**
- * F6 (jul 2026): exportado para que el monitor de bodega pueda mostrar
- * hasta 4 slots por bodeguero. Cambiar este valor requiere también ajustar
- * el DTO y el render de la tarjeta del bodeguero en el frontend.
- */
-export const MAX_PEDIDOS_POR_BODEGUERO = 4;
 
 @Injectable()
 export class SurtidoService {
@@ -81,7 +75,7 @@ export class SurtidoService {
         usuario: { select: { id: true, nombre: true, email: true, telefono: true } },
         asignadoA: { select: { id: true, nombre: true, apellido: true } },
         revisiones: {
-          where: { estadoRevision: 'PENDIENTE' },
+          where: { estadoRevision: EstadoRevision.PENDIENTE },
           include: { items: true },
         },
       },
@@ -135,16 +129,14 @@ export class SurtidoService {
     itemId: number,
     dto: MarcarSurtidoItemDto,
     usuario: UserContext,
-    esAdmin: boolean,
   ) {
     // Validar coherencia estado/cantidad
     this.validarCoherencia(dto);
 
     // access + asignación (admin pasa automáticamente)
-    const pedido = await this.access.cargarYValidar(pedidoId, usuario, {
+    await this.access.cargarYValidar(pedidoId, usuario, {
       requiereAsignacionBodega: true,
     });
-    void pedido; // sólo lo necesitamos para validar; el update usa pedidoId directo
 
     const pedidoActual = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
@@ -188,8 +180,6 @@ export class SurtidoService {
         'Si se propone una sustitución (nuevoPrecioCOId), el estado no puede ser PENDIENTE.',
       );
     }
-
-    void esAdmin; // access service ya gestionó la autorización
 
     const actualizado = await this.prisma.itemPedido.update({
       where: { id: itemId },

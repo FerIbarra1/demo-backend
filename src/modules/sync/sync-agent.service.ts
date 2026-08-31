@@ -71,6 +71,7 @@ export class SyncAgentService {
     procesados: number;
     errores: number;
     checkpointAvanzado: boolean;
+    deadLetters: number;
   }> {
     // dto.tiendaId es el externalId (IDTIENDA de Firebird). Resolvemos el
     // id interno de la tienda nube para checkpoint/inbox.
@@ -79,12 +80,15 @@ export class SyncAgentService {
 
     let procesados = 0;
     let errores = 0;
+    let deadLetters = 0;
 
     for (const evento of dto.eventos) {
       const existente = await this.prisma.syncEventInbox.findUnique({
         where: { eventId: evento.eventId },
         select: { estado: true, mensaje: true, nextAttemptAt: true, intentos: true },
       });
+
+      // En backoff (ERROR/RETRY con nextAttemptAt futuro): no reprocesar aún.
       if (
         existente &&
         existente.estado !== 'PROCESADO' &&
@@ -97,14 +101,17 @@ export class SyncAgentService {
         procesados++;
         continue;
       }
-      if (existente?.estado === 'PROCESANDO') {
-        errores++;
-        continue;
-      }
 
-      if (existente?.estado === 'ERROR') {
+      // Un PROCESANDO con nextAttemptAt vencido quedó huérfano (crash entre
+      // create y update). Se reclama como ERROR para reprocesarlo. Un
+      // PROCESANDO recién creado en este batch tiene nextAttemptAt ≈ now
+      // (no vencido) y no entra aquí.
+      const esProcesandoStale =
+        existente?.estado === 'PROCESANDO' && existente.nextAttemptAt <= new Date();
+
+      if (existente?.estado === 'ERROR' || esProcesandoStale) {
         const reclamado = await this.prisma.syncEventInbox.updateMany({
-          where: { eventId: evento.eventId, estado: 'ERROR' },
+          where: { eventId: evento.eventId, estado: { in: ['ERROR', 'PROCESANDO'] } },
           data: { estado: 'PROCESANDO', mensaje: null },
         });
         if (reclamado.count !== 1) {
@@ -144,6 +151,7 @@ export class SyncAgentService {
       const intento = (existente?.intentos ?? 0) + 1;
       const reintentosMaximos = 5;
       const puedeReintentar = !resultado.ok && intento < reintentosMaximos;
+      const esDeadLetter = !resultado.ok && !puedeReintentar;
       await this.prisma.syncEventInbox.update({
         where: { eventId: evento.eventId },
         data: {
@@ -174,12 +182,18 @@ export class SyncAgentService {
 
       if (resultado.ok) {
         procesados++;
+      } else if (esDeadLetter) {
+        // DEAD_LETTER es terminal: no bloquear el checkpoint de la tienda.
+        // Se cuenta aparte para que el batch avance y el agente no quede
+        // wedged esperando un evento que nunca se va a recuperar.
+        deadLetters++;
       } else {
         errores++;
       }
     }
 
-    // Avanzar checkpoint sólo si no hubo errores.
+    // Avanzar checkpoint al último bandejaId procesado con éxito. Un
+    // DEAD_LETTER terminal no bloquea el avance (se reporta aparte).
     const checkpointAvanzado = errores === 0;
     if (checkpointAvanzado) {
       await this.upsertCheckpoint(tiendaId, {
@@ -192,7 +206,7 @@ export class SyncAgentService {
       });
     }
 
-    return { procesados, errores, checkpointAvanzado };
+    return { procesados, errores, checkpointAvanzado, deadLetters };
   }
 
   async reprogramarEvento(eventId: string): Promise<{ eventId: string; estado: string }> {
@@ -371,6 +385,7 @@ export class SyncAgentService {
               });
             }
           }
+          actualizados++;
         } else {
           const nextAttemptAt = new Date(Date.now() + 30_000);
           await this.prisma.pedidoPendienteEnvio.update({
@@ -389,7 +404,6 @@ export class SyncAgentService {
           });
           errores++;
         }
-        actualizados++;
       } catch (err) {
         this.logger.error(`Error en ack pedido ${ack.pedidoId}: ${(err as Error).message}`);
         errores++;
@@ -488,13 +502,20 @@ export class SyncAgentService {
 
   /**
    * Job de mantenimiento: marca como EXPIRADO los pedidos pendientes
-   * con más de `hoursWithoutProcess` horas sin progreso. Llamar desde
-   * un cron externo o invocarlo manualmente para testing.
+   * con más de `hoursWithoutProcess` horas sin progreso. Incluye RETRY
+   * (que antes quedaba atascado para siempre) y PROCESSING con lease
+   * vencido. Llamar desde un cron externo o invocarlo manualmente.
    */
   async expirarPedidosViejos(hoursWithoutProcess = 24): Promise<number> {
     const cutoff = new Date(Date.now() - hoursWithoutProcess * 60 * 60 * 1000);
     const result = await this.prisma.pedidoPendienteEnvio.updateMany({
-      where: { estado: 'PENDIENTE', createdAt: { lt: cutoff } },
+      where: {
+        OR: [
+          { estado: 'PENDIENTE', createdAt: { lt: cutoff } },
+          { estado: 'RETRY', createdAt: { lt: cutoff } },
+          { estado: 'PROCESSING', leaseUntil: { lt: cutoff } },
+        ],
+      },
       data: { estado: 'EXPIRADO' },
     });
     return result.count;

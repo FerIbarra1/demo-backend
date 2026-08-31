@@ -158,6 +158,11 @@ model Usuario {
   // desde Firebird (CLIENTES.LISPRE '1'..'6'). El catálogo lo usa para
   // elegir qué columna de Precio.listaX mostrar al cliente logueado.
   listaPrecioCodigo String? @map("lista_precio_codigo") @db.VarChar(2)
+  // Soft delete: marca el usuario como eliminado sin borrar la fila, para
+  // conservar pedidos/historial. `activo=false` = desactivado (reactivable);
+  // `deletedAt != null` = eliminado (no aparece en listados). Los clientes
+  // nunca se eliminan (solo se desactivan).
+  deletedAt       DateTime?  @map("deleted_at")
   createdAt       DateTime   @default(now()) @map("created_at")
   updatedAt       DateTime   @updatedAt @map("updated_at")
 
@@ -176,6 +181,7 @@ model Usuario {
   kioskosActivados    Kiosko[]             @relation("KioskoActivador")
   kioskosDesactivados Kiosko[]             @relation("KioskoDesactivador")
   passwordResetTokens PasswordResetToken[]
+  refreshTokens       RefreshToken[]
   // F11 (ago 2026): ventanilla física donde trabaja el cajero (1:1 nullable).
   // Se setea vía POST /cajero/ventanilla/elegir.
   ventanilla          Ventanilla?
@@ -249,8 +255,32 @@ model Producto {
   preciosCO       PrecioCO[]
   itemsPedido     ItemPedido[]
   favoritos       Favorito[]
+  imagenesProducto ProductoImagen[]
 
   @@map("productos")
+}
+
+// ==================== IMÁGENES DE PRODUCTO ====================
+// Las imágenes se gestionan desde el panel ADMIN (S3). Los productos
+// vienen de Firebird y NO se editan; aquí solo se asocian imágenes.
+// Hasta 4 imágenes por (producto, color). colorId null = imagen general
+// del producto (sin variante de color).
+model ProductoImagen {
+  id          Int      @id @default(autoincrement())
+  productoId  Int      @map("producto_id")
+  colorId     Int?     @map("color_id")
+  url         String   @db.VarChar(500)
+  orden       Int      @default(0)
+  esPrincipal Boolean  @default(false) @map("es_principal")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  producto Producto @relation(fields: [productoId], references: [id], onDelete: Cascade)
+  color    Color?   @relation(fields: [colorId], references: [id], onDelete: SetNull)
+
+  @@index([productoId, colorId])
+  @@index([productoId, esPrincipal])
+  @@map("productos_imagenes")
 }
 
 model ProductoTienda {
@@ -309,6 +339,7 @@ model Color {
 
   // Relaciones
   preciosCO PrecioCO[]
+  imagenesProducto ProductoImagen[]
 
   @@map("colores")
 }
@@ -745,6 +776,32 @@ model PasswordResetToken {
   @@index([usuarioId])
   @@index([expiresAt])
   @@map("password_reset_tokens")
+}
+
+// ==================== REFRESH TOKENS (F12 ago 2026) ====================
+// Rotación + revocación de refresh tokens. Cada refresh emite un token nuevo
+// y revoca el anterior; logout revoca todos los del usuario. El token se
+// guarda como hash SHA256 (si la BD se filtra, los tokens en claro no están
+// expuestos). El `familyId` agrupa la cadena de rotaciones de una sesión:
+// si un token de una familia se reutiliza tras ser rotado, se revoca toda
+// la familia (detección de robo).
+model RefreshToken {
+  id        Int       @id @default(autoincrement())
+  usuarioId Int       @map("usuario_id")
+  tokenHash String    @unique @map("token_hash") @db.VarChar(64)
+  familyId  String    @map("family_id") @db.VarChar(36)
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  replacedBy Int?     @map("replaced_by")
+  ipOrigen  String?   @map("ip_origen") @db.VarChar(45)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
 
 // ==================== SINCRONIZACIÓN BIDIRECCIONAL (F9 ago 2026) ====================

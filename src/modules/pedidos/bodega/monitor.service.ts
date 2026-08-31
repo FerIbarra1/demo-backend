@@ -1,12 +1,13 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { EstadoPedido, RolUsuario, CanalOrigen, Prisma } from '@prisma/client';
+import { EstadoPedido, RolUsuario, CanalOrigen } from '@prisma/client';
 import {
   MonitorResponseDto,
   MonitorPedidoDto,
   MonitorBodegueroDto,
 } from './dto/monitor.dto';
-import { MAX_PEDIDOS_POR_BODEGUERO } from './surtido.service';
+import { MAX_PEDIDOS_POR_BODEGUERO } from '../core/pedido-limits';
+import { asignadoANombre } from '../core/pedido-mapper';
 
 /**
  * Umbrales de antigüedad (en minutos) para asignar nivel de urgencia.
@@ -199,9 +200,7 @@ export class MonitorService {
       const umbrales = p.canalOrigen === CanalOrigen.KIOSKO ? UMBRALES_TIENDA : UMBRALES_WEB;
       const nivelUrgencia = this.calcularUrgencia(minutos, umbrales);
 
-      const nombreAsignado = p.asignadoA
-        ? `${p.asignadoA.nombre} ${p.asignadoA.apellido ?? ''}`.trim()
-        : null;
+      const nombreAsignado = asignadoANombre(p.asignadoA);
 
       const nombreCajeroAsignado = p.cajeroAsignado
         ? `${p.cajeroAsignado.nombre} ${p.cajeroAsignado.apellido ?? ''}`.trim()
@@ -414,154 +413,6 @@ export class MonitorService {
     }
 
     return { scores };
-  }
-
-  /**
-   * Monitor de ventanillas (jun 2026): snapshot por VENTANILLA (1, 2, 3…)
-   * de la tienda, con sus pedidos KIOSKO en PENDING_PAID asignados y la cola
-   * sin asignar ("Turnos siguientes").
-   *
-   * F11 (ago 2026): cada ventanilla tiene un número físico (1..N) definido
-   * por el admin. La snapshot agrupa pedidos por la FK `cajeroAsignadoId`
-   * que matchea con el `cajeroId` de la ventanilla. Si la ventanilla no tiene
-   * cajero asignado (libre), aparece igual con `cajeroId: null` y
-   * `pedidosAsignados: 0`.
-   *
-   * El TV consume este endpoint cada 5s y muestra ventanillas + cola.
-   */
-  async obtenerMonitorCajero(tiendaId: number) {
-    if (!tiendaId) {
-      throw new BadRequestException(
-        'El usuario no tiene una tienda asignada. Contacta al administrador.',
-      );
-    }
-
-    const tienda = await this.prisma.tienda.findUnique({
-      where: { id: tiendaId },
-      select: { id: true, nombre: true },
-    });
-    if (!tienda) {
-      throw new BadRequestException(`Tienda ${tiendaId} no encontrada`);
-    }
-
-    const ahora = new Date();
-
-    // 1) Todas las ventanillas activas de la tienda (incluidas las libres).
-    const ventanillasRaw = await this.prisma.ventanilla.findMany({
-      where: { tiendaId, activa: true },
-      include: {
-        cajero: {
-          select: {
-            id: true,
-            nombre: true,
-            apellido: true,
-            lastLogin: true,
-          },
-        },
-      },
-      orderBy: { numero: 'asc' },
-    });
-
-    const ventanaLogueoMs = 12 * 60 * 60 * 1000;
-    const limiteLogueo = new Date(ahora.getTime() - ventanaLogueoMs);
-
-    const ventanillas = await Promise.all(
-      ventanillasRaw.map(async (v) => {
-        // Sólo se listan los pedidos del cajero si está "activo" (logueado en
-        // las últimas 12h). Si está libre o inactivo, la sección aparece vacía.
-        const cajeroActivo =
-          v.cajero !== null && v.cajero.lastLogin !== null && v.cajero.lastLogin >= limiteLogueo;
-        const pedidosRaw = cajeroActivo
-          ? await this.prisma.pedido.findMany({
-              where: {
-                estado: EstadoPedido.PENDING_PAID,
-                cajeroAsignadoId: v.cajeroId,
-                canalOrigen: CanalOrigen.KIOSKO,
-              },
-              select: {
-                id: true,
-                numeroPedido: true,
-                cajeroAsignadoAt: true,
-                fechaPedido: true,
-              },
-              orderBy: { cajeroAsignadoAt: 'asc' },
-            })
-          : [];
-
-        const detallePedidos = pedidosRaw.map((p) => {
-          const minutosAsignado = p.cajeroAsignadoAt
-            ? this.minutosEntre(p.cajeroAsignadoAt, ahora)
-            : null;
-          const minutos = minutosAsignado ?? this.minutosEntre(p.fechaPedido, ahora);
-          return {
-            id: p.id,
-            numeroPedido: p.numeroPedido,
-            cajeroAsignadoAt: p.cajeroAsignadoAt ? p.cajeroAsignadoAt.toISOString() : null,
-            minutosEnCola: minutos,
-            nivelUrgencia: this.calcularUrgencia(minutos, UMBRALES_TIENDA) as 0 | 1 | 2 | 3,
-            cajeroAsignadoNombre: v.cajero
-              ? `${v.cajero.nombre}${v.cajero.apellido ? ' ' + v.cajero.apellido : ''}`
-              : null,
-          };
-        });
-
-        return {
-          ventanillaId: v.id,
-          numero: v.numero,
-          cajeroId: v.cajeroId,
-          cajeroNombre: v.cajero
-            ? `${v.cajero.nombre}${v.cajero.apellido ? ' ' + v.cajero.apellido : ''}`
-            : null,
-          cajeroActivo,
-          pedidosAsignados: pedidosRaw.length,
-          detallePedidos,
-        };
-      }),
-    );
-
-    // 2) Cola sin asignar (PENDING_PAID + canalOrigen KIOSKO + cajeroAsignadoId null)
-    const colaRaw = await this.prisma.pedido.findMany({
-      where: {
-        tiendaId,
-        estado: EstadoPedido.PENDING_PAID,
-        canalOrigen: CanalOrigen.KIOSKO,
-        cajeroAsignadoId: null,
-      },
-      select: {
-        id: true,
-        numeroPedido: true,
-        fechaPedido: true,
-      },
-      orderBy: { fechaPedido: 'asc' },
-    });
-
-    const colaSinAsignar = colaRaw.map((p) => {
-      const minutos = this.minutosEntre(p.fechaPedido, ahora);
-      return {
-        id: p.id,
-        numeroPedido: p.numeroPedido,
-        cajeroAsignadoAt: null,
-        minutosEnCola: minutos,
-        nivelUrgencia: this.calcularUrgencia(minutos, UMBRALES_TIENDA) as 0 | 1 | 2 | 3,
-        cajeroAsignadoNombre: null,
-      };
-    });
-
-    const totalEnCaja = ventanillas.reduce((acc, v) => acc + v.pedidosAsignados, 0);
-
-    return {
-      timestamp: ahora.toISOString(),
-      tiendaId: tienda.id,
-      tiendaNombre: tienda.nombre,
-      ventanillas,
-      contadores: {
-        cajerosLogueados: ventanillas.length,
-        colaSinAsignar: colaSinAsignar.length,
-        totalEnCaja,
-        alertasCriticas: colaSinAsignar.filter((p) => p.minutosEnCola >= 10).length,
-      },
-      colaSinAsignar,
-    };
   }
 
   // ---------- helpers ----------

@@ -9,7 +9,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -21,6 +21,7 @@ import { RolUsuario, TipoNotificacion, Usuario } from '@prisma/client';
 import { AuthResponse, JwtPayload, KioskTokenPayload } from '../../types/user.types';
 import { MailService } from '../mail/mail.service';
 import { mailTemplates, mailSubjects } from '../mail/mail.templates';
+import { CuentaDesactivadaException } from './exceptions/cuenta-desactivada.exception';
 
 @Injectable()
 export class AuthService {
@@ -98,7 +99,12 @@ export class AuthService {
     });
 
     if (!usuario) throw new UnauthorizedException('Credenciales inválidas');
-    if (!usuario.activo) throw new UnauthorizedException('Usuario inactivo');
+    if (!usuario.activo) {
+      // Mensaje neutro por seguridad: no confirma si el email existe ni el
+      // estado exacto de la cuenta. El frontend detecta `codigo` para mostrar
+      // una alerta clara de "contacta a soporte".
+      throw new CuentaDesactivadaException();
+    }
 
     const isPasswordValid = await bcrypt.compare(dto.password, usuario.password);
     if (!isPasswordValid) throw new UnauthorizedException('Credenciales inválidas');
@@ -135,19 +141,56 @@ export class AuthService {
     return this.generateTokens(usuario);
   }
 
-  async refreshToken(dto: RefreshTokenDto): Promise<AuthResponse> {
+  async refreshToken(dto: RefreshTokenDto, ipOrigen?: string): Promise<AuthResponse> {
+    const refreshToken = dto.refreshToken;
+    if (!refreshToken) {
+      throw new UnauthorizedException('Token de refresco inválido');
+    }
+    let payload: JwtPayload;
     try {
-      const payload = this.jwtService.verify<JwtPayload>(dto.refreshToken, {
-        secret: this.configService.get<string>('JWT_SECRET'),
+      payload = this.jwtService.verify<JwtPayload>(refreshToken, {
+        secret: this.configService.get<string>('app.jwtSecret'),
       });
-
-      const usuario = await this.prisma.usuario.findUnique({ where: { id: payload.sub } });
-      if (!usuario || !usuario.activo) throw new UnauthorizedException('Token inválido');
-
-      return this.generateTokens(usuario);
     } catch {
       throw new UnauthorizedException('Token de refresco inválido');
     }
+
+    if (!payload.jti) {
+      // Token legado sin jti (emitido antes de F12): no es revocable. Lo
+      // rechazamos para forzar re-login y migrar a la nueva cadena.
+      throw new UnauthorizedException('Token de refresco inválido');
+    }
+
+    const tokenHash = this.hashToken(refreshToken);
+    const registro = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash },
+    });
+
+    // Token no existe en BD (revocado, expirado o forjado).
+    if (!registro) throw new UnauthorizedException('Token de refresco inválido');
+    if (registro.revokedAt) {
+      // Reutilización de un token ya rotado → posible robo. Revocamos toda
+      // la familia para invalidar cualquier token derivado.
+      await this.revocarFamilia(registro.familyId);
+      throw new UnauthorizedException('Token de refresco inválido');
+    }
+    if (registro.expiresAt.getTime() < Date.now()) {
+      throw new UnauthorizedException('Token de refresco inválido');
+    }
+
+    const usuario = await this.prisma.usuario.findUnique({ where: { id: payload.sub } });
+    if (!usuario || !usuario.activo) throw new UnauthorizedException('Token inválido');
+
+    // Rotación: emitir un par nuevo y revocar el token usado.
+    const nuevo = await this.generateTokens(usuario, {
+      familyId: registro.familyId,
+      ipOrigen,
+    });
+    await this.prisma.refreshToken.update({
+      where: { id: registro.id },
+      data: { revokedAt: new Date(), replacedBy: nuevo.refreshTokenId },
+    });
+    return nuevo;
   }
 
   /**
@@ -181,7 +224,7 @@ export class AuthService {
     let payload: KioskTokenPayload;
     try {
       payload = this.jwtService.verify<KioskTokenPayload>(dto.kioskToken, {
-        secret: this.configService.get<string>('JWT_SECRET'),
+        secret: this.configService.get<string>('app.jwtSecret'),
       });
     } catch {
       throw new UnauthorizedException('Kiosk token inválido o expirado');
@@ -226,6 +269,12 @@ export class AuthService {
   }
 
   async logout(userId: number, _token: string): Promise<{ message: string }> {
+    // Revocar todos los refresh tokens activos del usuario (cierre de sesión
+    // en todos los dispositivos). El access token expira solo en 1h.
+    await this.prisma.refreshToken.updateMany({
+      where: { usuarioId: userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
     this.logger.log(`Logout: usuario ${userId}`);
     return { message: 'Sesión cerrada exitosamente' };
   }
@@ -265,19 +314,46 @@ export class AuthService {
     return { message: 'Contraseña actualizada exitosamente' };
   }
 
-  private generateTokens(usuario: Usuario): AuthResponse {
+  private async generateTokens(
+    usuario: Usuario,
+    opts?: { familyId?: string; ipOrigen?: string },
+  ): Promise<AuthResponse> {
+    const expiresIn = this.configService.get<string>('app.jwtExpiresIn') || '1h';
+    const refreshExpiresIn = this.configService.get<string>('app.jwtRefreshExpiresIn') || '7d';
+    const refreshExpiresMs = this.segundosDeExpiración(refreshExpiresIn) * 1000;
+
+    // Generar un refresh token con jti único y persistirlo en BD (hash).
+    const jti = randomUUID();
+    const refreshToken = this.jwtService.sign(
+      { sub: usuario.id, email: usuario.email, rol: usuario.rol, tiendaId: usuario.tiendaId ?? undefined, jti },
+      { expiresIn: refreshExpiresIn as any },
+    );
+    const familyId = opts?.familyId ?? randomUUID();
+    const creado = await this.prisma.refreshToken.create({
+      data: {
+        usuarioId: usuario.id,
+        tokenHash: this.hashToken(refreshToken),
+        familyId,
+        expiresAt: new Date(Date.now() + refreshExpiresMs),
+        ipOrigen: opts?.ipOrigen ?? null,
+      },
+    });
+
     const payload: JwtPayload = {
       sub: usuario.id,
       email: usuario.email,
       rol: usuario.rol,
       tiendaId: usuario.tiendaId ?? undefined,
     };
-    const expiresIn = this.configService.get<string>('JWT_EXPIRES_IN') || '1h';
-    const refreshExpiresIn = this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '7d';
     return {
       accessToken: this.jwtService.sign(payload, { expiresIn: expiresIn as any }),
-      refreshToken: this.jwtService.sign(payload, { expiresIn: refreshExpiresIn as any }),
-      expiresIn: 3600,
+      refreshToken,
+      // El frontend necesita el id del refresh token para poder revocarlo
+      // explícitamente (logout) y para saber qué token rotar.
+      refreshTokenId: creado.id,
+      // Segundos de validez del access token, derivados de la misma config
+      // que se usa para firmar (evita divergencia con el valor real).
+      expiresIn: this.segundosDeExpiración(expiresIn),
       user: {
         id: usuario.id,
         email: usuario.email,
@@ -288,6 +364,19 @@ export class AuthService {
         telefono: usuario.telefono ?? undefined,
       },
     };
+  }
+
+  /** SHA256 del token en claro. Se guarda el hash, no el token. */
+  private hashToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  /** Revoca todos los tokens de una familia (detección de reutilización/robo). */
+  private async revocarFamilia(familyId: string): Promise<void> {
+    await this.prisma.refreshToken.updateMany({
+      where: { familyId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
   }
 
   /**
@@ -447,5 +536,22 @@ export class AuthService {
     );
 
     return { message };
+  }
+
+  /**
+   * Convierte una expiración tipo '1h' / '7d' / '3600' a segundos, para
+   * devolver al cliente el valor real de validez del access token.
+   */
+  private segundosDeExpiración(exp: string): number {
+    const m = exp.trim().match(/^(\d+)([smhd])?$/);
+    if (!m) return 3600;
+    const n = parseInt(m[1], 10);
+    switch (m[2]) {
+      case 's': return n;
+      case 'm': return n * 60;
+      case 'h': return n * 3600;
+      case 'd': return n * 86400;
+      default: return n;
+    }
   }
 }

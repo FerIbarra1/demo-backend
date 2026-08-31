@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import compression from 'compression';
+import cookieParser from 'cookie-parser';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AppModule } from './app.module';
@@ -20,10 +21,14 @@ async function bootstrap() {
   // Configuración de seguridad
   app.use(helmet());
   app.use(compression());
+  // Parsear cookies (necesario para leer el refresh token httpOnly).
+  app.use(cookieParser());
 
-  // CORS
+  // CORS. En producción se usan los orígenes de config (app.corsOrigins,
+  // derivados de FRONTEND_URL o CORS_ORIGINS). En dev se permite cualquier origen.
+  const corsOrigins = configService.get<string[]>('app.corsOrigins') ?? [];
   app.enableCors({
-    origin: process.env.NODE_ENV === 'production' ? ['https://demo-frontend-pi.vercel.app'] : true,
+    origin: process.env.NODE_ENV === 'production' ? corsOrigins : true,
     credentials: true,
   });
 
@@ -47,23 +52,26 @@ async function bootstrap() {
     }),
   );
 
-  // Swagger Documentation
-  const config = new DocumentBuilder()
-    .setTitle('Tienda de Camisetas API')
-    .setDescription('API para gestión de pedidos de camisetas')
-    .setVersion('1.0.0')
-    .addBearerAuth()
-    .build();
+  // Swagger Documentation — sólo en desarrollo. En producción no se expone
+  // para no filtrar el contrato de la API (endpoints, DTOs, esquemas).
+  if (process.env.NODE_ENV !== 'production') {
+    const config = new DocumentBuilder()
+      .setTitle('Tienda de Camisetas API')
+      .setDescription('API para gestión de pedidos de camisetas')
+      .setVersion('1.0.0')
+      .addBearerAuth()
+      .build();
 
-  const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document, {
-    swaggerOptions: {
-      persistAuthorization: true,
-    },
-  });
+    const document = SwaggerModule.createDocument(app, config);
+    SwaggerModule.setup('api/docs', app, document, {
+      swaggerOptions: {
+        persistAuthorization: true,
+      },
+    });
+  }
 
   // Puerto
-  const port = configService.get('PORT') || 3000;
+  const port = configService.get<number>('app.port') || 3000;
 
   await app.listen(port);
 

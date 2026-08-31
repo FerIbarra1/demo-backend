@@ -71,6 +71,10 @@ export class CatalogoService {
         include: {
           producto: {
             include: {
+              imagenesProducto: {
+                select: { id: true, url: true, colorId: true, esPrincipal: true },
+                orderBy: { orden: 'asc' },
+              },
               precios: {
                 where: { tiendaId },
                 select: {
@@ -151,6 +155,15 @@ export class CatalogoService {
           stockDisponible: null,
         };
       });
+      // Imágenes agrupadas por color (colorId null = generales).
+      const imagenesPorColor: Record<number | 'general', string[]> = {
+        general: [],
+      };
+      for (const img of producto.imagenesProducto) {
+        const k = img.colorId ?? 'general';
+        if (!imagenesPorColor[k]) imagenesPorColor[k] = [];
+        imagenesPorColor[k].push(img.url);
+      }
       return {
         id: producto.id,
         codigo: producto.codigo,
@@ -158,6 +171,7 @@ export class CatalogoService {
         descripcion: producto.descripcion,
         imagenPrincipal: producto.imagenPrincipal,
         imagenes: producto.imagenes,
+        imagenesPorColor,
         categoria: producto.categoria,
         subcategoria: producto.subcategoria,
         precioBase,
@@ -186,6 +200,10 @@ export class CatalogoService {
         productosTienda: {
           where: { tiendaId, visible: true },
           select: { id: true },
+        },
+        imagenesProducto: {
+          select: { id: true, url: true, colorId: true, esPrincipal: true },
+          orderBy: { orden: 'asc' },
         },
         precios: {
           where: { tiendaId },
@@ -236,6 +254,15 @@ export class CatalogoService {
       };
     });
 
+    const imagenesPorColor: Record<number | 'general', string[]> = {
+      general: [],
+    };
+    for (const img of producto.imagenesProducto) {
+      const k = img.colorId ?? 'general';
+      if (!imagenesPorColor[k]) imagenesPorColor[k] = [];
+      imagenesPorColor[k].push(img.url);
+    }
+
     return {
       id: producto.id,
       codigo: producto.codigo,
@@ -243,6 +270,7 @@ export class CatalogoService {
       descripcion: producto.descripcion,
       imagenPrincipal: producto.imagenPrincipal,
       imagenes: producto.imagenes,
+      imagenesPorColor,
       categoria: producto.categoria,
       subcategoria: producto.subcategoria,
       precioBase,

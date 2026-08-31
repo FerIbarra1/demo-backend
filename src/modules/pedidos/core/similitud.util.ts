@@ -12,6 +12,8 @@
  * testearla sin levantar la BD.
  */
 
+import { zonaKey } from './zona.util';
+
 export interface ItemParaSimilitud {
   productoId: number;
   colorId: number | null;
@@ -97,8 +99,4 @@ export function rankearSimilares(
     .filter((r) => r.score >= UMBRAL_SCORE_MINIMO && r.itemsCompartidos > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, top);
-}
-
-function zonaKey(productoId: number, colorId: number | null): string {
-  return `${productoId}:${colorId ?? 'sin-color'}`;
 }

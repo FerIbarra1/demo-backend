@@ -5,6 +5,7 @@ import {
   Delete,
   Param,
   ParseIntPipe,
+  Headers,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -22,15 +23,21 @@ export class FavoritosController {
   /**
    * Lista los productos favoritos del cliente autenticado.
    * Ordenados por fecha de marcado (más reciente primero).
-   * El detalle de precios/variantes se filtra por la tienda del cliente
-   * (header X-Tienda-Id o la del JWT).
+   * El detalle de precios/variantes se filtra por la tienda activa del
+   * cliente (header X-Tienda-Id, que el frontend envía en cada request).
+   * No hay riesgo IDOR: los favoritos están scoped al usuarioId autenticado;
+   * el tiendaId sólo filtra precios, no expone datos de otros clientes.
    */
   @Get()
   @ApiOperation({ summary: 'Mis favoritos' })
-  async listar(@CurrentUser() user: any) {
+  async listar(
+    @CurrentUser() user: any,
+    @Headers('x-tienda-id') tiendaIdHeader?: string,
+  ) {
+    const tiendaId = tiendaIdHeader ? parseInt(tiendaIdHeader, 10) : undefined;
     return this.favoritosService.listar(
       user.userId,
-      user.tiendaId ?? user.tiendaIdHeader,
+      Number.isFinite(tiendaId) ? tiendaId : user.tiendaId,
     );
   }
 

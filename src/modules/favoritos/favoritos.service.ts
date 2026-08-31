@@ -128,15 +128,6 @@ export class FavoritosService {
     });
   }
 
-  /** Devuelve sólo los IDs de productos favoritos (para resolver "esFavorito" en el catálogo). */
-  async listarIds(usuarioId: number): Promise<Set<number>> {
-    const rows = await this.prisma.favorito.findMany({
-      where: { usuarioId },
-      select: { productoId: true },
-    });
-    return new Set(rows.map((r) => r.productoId));
-  }
-
   /** Marca un producto como favorito (idempotente). */
   async agregar(usuarioId: number, productoId: number) {
     const producto = await this.prisma.producto.findUnique({

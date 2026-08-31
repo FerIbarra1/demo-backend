@@ -85,12 +85,41 @@ export class PedidoDescargaHandler {
 
       return tx.pedidoPendienteEnvio.findMany({
         where: { id: { in: claimed } },
-        include: {
+        select: {
+          id: true,
+          pedidoId: true,
+          intentos: true,
+          leaseToken: true,
+          leaseUntil: true,
+          externalIdPEDIDOS: true,
           pedido: {
-            include: {
+            select: {
+              id: true,
+              numeroPedido: true,
+              fechaPedido: true,
+              estado: true,
+              clienteNombre: true,
+              clienteEmail: true,
+              clienteTelefono: true,
+              shippingDireccion: true,
+              shippingColonia: true,
+              shippingCodigoPostal: true,
+              shippingPaqueteria: true,
+              notas: true,
+              subtotal: true,
+              total: true,
+              modoEntrega: true,
               items: {
                 where: { cancelada: false },
-                include: {
+                select: {
+                  id: true,
+                  productoCodigo: true,
+                  cantidad: true,
+                  precioUnitario: true,
+                  subtotal: true,
+                  tallaNombre: true,
+                  corridaNombre: true,
+                  colorNombre: true,
                   precioCO: {
                     select: {
                       id: true,
@@ -120,37 +149,37 @@ export class PedidoDescargaHandler {
     // Necesitamos el externalId de la tienda para resolver PrecioCO local.
     const localTiendaId = tienda.externalId;
 
+    // Resolver TODAS las referencias locales del lote en bloque (4 queries
+    // por lote, una por entidad) en lugar de 4 por item (N+1).
+    const precioCOIds = new Set<number>();
+    const productoIds = new Set<number>();
+    const corridaIds = new Set<number>();
+    const colorIds = new Set<number>();
+    for (const p of pendientes) {
+      for (const it of p.pedido.items) {
+        const pco = it.precioCO;
+        if (!pco) continue;
+        precioCOIds.add(pco.id);
+        productoIds.add(pco.productoId);
+        corridaIds.add(pco.corridaId);
+        colorIds.add(pco.colorId);
+      }
+    }
+    const [localPrecioCO, localProducto, localCorrida, localColor] = await Promise.all([
+      this.externalRefs.resolveLocalIds('PRECIOCO', 'PRECIOSCO', Array.from(precioCOIds), localTiendaId),
+      this.externalRefs.resolveLocalIds('PRODUCTO', 'PRODUCTOS', Array.from(productoIds), null),
+      this.externalRefs.resolveLocalIds('CORRIDA', 'CORRIDAS', Array.from(corridaIds), null),
+      this.externalRefs.resolveLocalIds('COLOR', 'COLORES', Array.from(colorIds), null),
+    ]);
+
     const result = await Promise.all(
       pendientes.map(async (p) => {
-        const items = await Promise.all(
-          p.pedido.items.map(async (it) => {
-            const pco = it.precioCO;
-            const [localPrecioCOId, localProductoId, localCorridaId, localColorId] =
-              pco
-                ? await Promise.all([
-                    this.externalRefs.findLocalId(
-                      'PRECIOCO',
-                      pco.id,
-                      'PRECIOSCO',
-                      localTiendaId,
-                    ),
-                    this.externalRefs.findLocalId(
-                      'PRODUCTO',
-                      pco.productoId,
-                      'PRODUCTOS',
-                    ),
-                    this.externalRefs.findLocalId(
-                      'CORRIDA',
-                      pco.corridaId,
-                      'CORRIDAS',
-                    ),
-                    this.externalRefs.findLocalId(
-                      'COLOR',
-                      pco.colorId,
-                      'COLORES',
-                    ),
-                  ])
-                : [null, null, null, null];
+        const items = p.pedido.items.map((it) => {
+          const pco = it.precioCO;
+          const localPrecioCOId = pco ? (localPrecioCO.get(pco.id) ?? null) : null;
+          const localProductoId = pco ? (localProducto.get(pco.productoId) ?? null) : null;
+          const localCorridaId = pco ? (localCorrida.get(pco.corridaId) ?? null) : null;
+          const localColorId = pco ? (localColor.get(pco.colorId) ?? null) : null;
 
             const skip = [
               localPrecioCOId,
@@ -174,8 +203,7 @@ export class PedidoDescargaHandler {
               localColorId,
               skip,
             };
-          }),
-        );
+        });
 
         // Skip si el pedido fue cancelado entre el claim y el armado del
         // payload (ventana pequeña pero posible). La entrada de cola queda
@@ -201,21 +229,36 @@ export class PedidoDescargaHandler {
         }
 
         if (items.some((item) => item.skip)) {
+          // Tope de reintentos: si el pedido lleva demasiados intentos sin
+          // poder resolver las referencias locales, se marca ERROR terminal
+          // (no RETRY infinito) para que no quede atascado para siempre.
+          const reintentosMaximos = 5;
+          const agotado = (p.intentos ?? 0) >= reintentosMaximos;
           await this.prisma.pedidoPendienteEnvio.updateMany({
             where: {
               id: p.id,
               estado: 'PROCESSING',
               leaseToken: p.leaseToken,
             },
-            data: {
-              estado: 'RETRY',
-              nextAttemptAt: new Date(Date.now() + 60_000),
-              claimedBy: null,
-              leaseToken: null,
-              leaseUntil: null,
-              ultimoErrorCode: 'MISSING_EXTERNAL_REFERENCE',
-              ultimoError: 'Falta referencia local para una variante del pedido',
-            },
+            data: agotado
+              ? {
+                  estado: 'ERROR',
+                  nextAttemptAt: new Date(),
+                  claimedBy: null,
+                  leaseToken: null,
+                  leaseUntil: null,
+                  ultimoErrorCode: 'MISSING_EXTERNAL_REFERENCE',
+                  ultimoError: 'Falta referencia local para una variante del pedido (reintentos agotados)',
+                }
+              : {
+                  estado: 'RETRY',
+                  nextAttemptAt: new Date(Date.now() + 60_000),
+                  claimedBy: null,
+                  leaseToken: null,
+                  leaseUntil: null,
+                  ultimoErrorCode: 'MISSING_EXTERNAL_REFERENCE',
+                  ultimoError: 'Falta referencia local para una variante del pedido',
+                },
           });
           return null;
         }

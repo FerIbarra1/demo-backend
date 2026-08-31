@@ -9,12 +9,12 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoAccessService } from './pedido-access.service';
+import { asignadoANombre } from './pedido-mapper';
 import { CambiarEstadoDto } from '../admin/dto/cambiar-estado.dto';
 import { UserContext } from '../../../types/pedido.types';
 import {
   EstadoPedido,
   TipoNotificacion,
-  Prisma,
 } from '@prisma/client';
 
 /**
@@ -32,6 +32,10 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
   [EstadoPedido.REVIEWING]: [
     EstadoPedido.WAITING_CUSTOMER_APPROVAL,
     EstadoPedido.APPROVED,
+    // REVIEWING → PENDING_PAID: lo dispara SurtidoService.confirmarSurtido
+    // cuando la bodega cierra el surtido (con o sin faltantes). El pedido
+    // queda listo para pago; la transición y los cambios de items son atómicos.
+    EstadoPedido.PENDING_PAID,
     EstadoPedido.CANCELLED,
   ],
   [EstadoPedido.WAITING_CUSTOMER_APPROVAL]: [EstadoPedido.APPROVED, EstadoPedido.CANCELLED],
@@ -172,6 +176,88 @@ export class PedidoStateService {
   }
 
   /**
+   * Transición de estado disparada por un sistema externo (agente Firebird),
+   * sin guards de rol humano. Reutiliza la máquina de estados (TRANSICIONES)
+   * + historial + realtime + notificación, para que ninguna vía de cambio de
+   * estado duplique o salte la validación de transiciones.
+   *
+   * No valida acceso (el caller ya lo hizo o es un sistema de confianza).
+   */
+  async cambiarEstadoPorSistema(
+    pedidoId: number,
+    nuevoEstado: EstadoPedido,
+    opts: { observacion?: string; usuarioNombre?: string } = {},
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
+      if (!pedido) throw new NotFoundException('Pedido no encontrado');
+
+      const estadoAnterior = pedido.estado;
+      if (estadoAnterior === nuevoEstado) return pedido;
+
+      const permitidas = TRANSICIONES[estadoAnterior];
+      if (!permitidas.includes(nuevoEstado)) {
+        throw new BadRequestException(
+          `Transición no permitida: ${estadoAnterior} → ${nuevoEstado}`,
+        );
+      }
+
+      const result = await tx.pedido.updateMany({
+        where: { id: pedidoId, estado: estadoAnterior },
+        data: { estado: nuevoEstado },
+      });
+      if (result.count !== 1) {
+        throw new ConflictException(
+          'El pedido cambió mientras se procesaba. Actualiza la pantalla e inténtalo de nuevo.',
+        );
+      }
+      const pedidoActualizado = await tx.pedido.findUnique({ where: { id: pedidoId } });
+      if (!pedidoActualizado) throw new NotFoundException('Pedido no encontrado');
+
+      await tx.historialPedido.create({
+        data: {
+          pedidoId,
+          estadoAnterior,
+          estadoNuevo: nuevoEstado,
+          observacion: opts.observacion || `Cambio de estado por ${opts.usuarioNombre ?? 'sistema'}`,
+          usuarioId: null,
+          usuarioNombre: opts.usuarioNombre ?? 'SISTEMA',
+        },
+      });
+
+      this.logger.log(
+        `Pedido ${pedidoId}: ${estadoAnterior} → ${nuevoEstado} (por ${opts.usuarioNombre ?? 'sistema'})`,
+      );
+
+      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
+        id: pedidoId,
+        estadoAnterior,
+        estadoNuevo: nuevoEstado,
+        asignadoAId: pedidoActualizado.asignadoAId,
+      });
+      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
+        id: pedidoId,
+        estadoAnterior,
+        estadoNuevo: nuevoEstado,
+      });
+
+      const notifTipo = this.notifTipoParaEstado(nuevoEstado);
+      if (notifTipo) {
+        const pedidoCompleto = await tx.pedido.findUnique({ where: { id: pedidoId } });
+        if (pedidoCompleto) {
+          setImmediate(() => {
+            this.notifications.enviar(pedidoCompleto, notifTipo).catch((err) =>
+              this.logger.error(`Error enviando notificación ${notifTipo}: ${err.message}`),
+            );
+          });
+        }
+      }
+
+      return pedidoActualizado;
+    });
+  }
+
+  /**
    * Genera el siguiente número de pedido con el formato `PD-YYYY-NNNNNN`.
    * Se calcula a partir del último pedido del año en curso (no usa secuencia
    * de BD para mantenerlo portable entre migraciones).
@@ -230,10 +316,7 @@ export class PedidoStateService {
       ...it,
       productoImagen: it.producto?.imagenPrincipal ?? null,
     })) as any;
-    const asignado = (pedido as any).asignadoA;
-    (pedido as any).asignadoANombre = asignado
-      ? `${asignado.nombre ?? ''} ${asignado.apellido ?? ''}`.trim() || null
-      : null;
+    (pedido as any).asignadoANombre = asignadoANombre((pedido as any).asignadoA);
     return pedido;
   }
 

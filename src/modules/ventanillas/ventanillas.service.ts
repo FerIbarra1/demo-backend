@@ -132,6 +132,12 @@ export class VentanillasService {
    * Cajero elige una ventanilla. Libera la que tuviera antes (si era de su
    * tienda) y le asigna la nueva. Si elige la misma que ya tenía, no hace nada.
    * Emite `ventanilla.asignada` al room `tienda-{id}`.
+   *
+   * La liberación + asignación se hacen en una transacción para que no queden
+   * a medias (si el segundo update falla, el cajero no pierde su ventanilla).
+   * La asignación usa updateMany con guarda atómica (cajeroId null o self)
+   * para cerrar la race check-then-act entre dos cajeros que eligen la misma
+   * ventanilla a la vez.
    */
   async elegir(usuarioId: number, tiendaId: number, ventanillaId: number) {
     const usuario = await this.prisma.usuario.findUnique({ where: { id: usuarioId } });
@@ -149,46 +155,60 @@ export class VentanillasService {
     if (!v.activa) {
       throw new BadRequestException(`La ventanilla ${v.numero} está inactiva`);
     }
-    if (v.cajeroId !== null && v.cajeroId !== usuarioId) {
-      throw new ConflictException(
-        `La ventanilla ${v.numero} está ocupada por otro cajero`,
-      );
-    }
 
-    // Liberar ventanilla anterior del usuario (si era de esta tienda).
-    const anterior = await this.prisma.ventanilla.findFirst({
-      where: { tiendaId, cajeroId: usuarioId, NOT: { id: ventanillaId } },
-    });
-    if (anterior) {
-      await this.prisma.ventanilla.update({
-        where: { id: anterior.id },
-        data: { cajeroId: null },
+    const actualizada = await this.prisma.$transaction(async (tx) => {
+      // Liberar ventanilla anterior del usuario (si era de esta tienda).
+      const anterior = await tx.ventanilla.findFirst({
+        where: { tiendaId, cajeroId: usuarioId, NOT: { id: ventanillaId } },
       });
-      this.realtime.emitToTienda(tiendaId, 'ventanilla.liberada', {
-        ventanillaId: anterior.id,
-        numero: anterior.numero,
+      if (anterior) {
+        await tx.ventanilla.update({
+          where: { id: anterior.id },
+          data: { cajeroId: null },
+        });
+      }
+
+      // Si ya era la misma, no-op (idempotente).
+      if (v.cajeroId === usuarioId) {
+        return v;
+      }
+
+      // Asignación con guarda atómica: sólo si la ventanilla está libre o ya
+      // es del usuario. Si otro cajero la tomó entre la lectura y aquí, count=0.
+      const asignado = await tx.ventanilla.updateMany({
+        where: {
+          id: ventanillaId,
+          OR: [{ cajeroId: null }, { cajeroId: usuarioId }],
+        },
+        data: { cajeroId: usuarioId },
+      });
+      if (asignado.count !== 1) {
+        throw new ConflictException(
+          `La ventanilla ${v.numero} está ocupada por otro cajero`,
+        );
+      }
+
+      return tx.ventanilla.findUnique({
+        where: { id: ventanillaId },
+        include: {
+          cajero: { select: { id: true, nombre: true, apellido: true } },
+        },
+      });
+    });
+
+    if (!actualizada) {
+      throw new NotFoundException(`Ventanilla ${ventanillaId} no existe en tienda ${tiendaId}`);
+    }
+
+    // Emitir realtime fuera de la transacción (no bloquear el commit).
+    if (v.cajeroId !== usuarioId) {
+      this.realtime.emitToTienda(tiendaId, 'ventanilla.asignada', {
+        ventanillaId: actualizada.id,
+        numero: actualizada.numero,
+        cajeroId: usuario.id,
+        cajeroNombre: `${usuario.nombre}${usuario.apellido ? ' ' + usuario.apellido : ''}`,
       });
     }
-
-    // Si ya era la misma, no-op (idempotente).
-    if (v.cajeroId === usuarioId) {
-      return v;
-    }
-
-    const actualizada = await this.prisma.ventanilla.update({
-      where: { id: ventanillaId },
-      data: { cajeroId: usuarioId },
-      include: {
-        cajero: { select: { id: true, nombre: true, apellido: true } },
-      },
-    });
-
-    this.realtime.emitToTienda(tiendaId, 'ventanilla.asignada', {
-      ventanillaId: actualizada.id,
-      numero: actualizada.numero,
-      cajeroId: usuario.id,
-      cajeroNombre: `${usuario.nombre}${usuario.apellido ? ' ' + usuario.apellido : ''}`,
-    });
 
     this.logger.log(
       `Cajero ${usuarioId} eligió ventanilla ${actualizada.numero} (${actualizada.id}) en tienda ${tiendaId}`,

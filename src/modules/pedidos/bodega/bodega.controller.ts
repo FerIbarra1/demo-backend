@@ -190,8 +190,7 @@ export class BodegaController {
     @Body() dto: MarcarSurtidoItemDto,
     @CurrentUser() user: any,
   ) {
-    const esAdmin = user.rol === RolUsuario.ADMIN;
-    return this.surtidoService.marcarItem(pedidoId, itemId, dto, user, esAdmin);
+    return this.surtidoService.marcarItem(pedidoId, itemId, dto, user);
   }
 
   @Post(':id/confirmar-surtido')

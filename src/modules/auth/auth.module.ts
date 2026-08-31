@@ -13,8 +13,10 @@ import { MailModule } from '../mail/mail.module';
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => {
-        const secret = configService.get<string>('JWT_SECRET') || 'default-secret';
-        const expiresIn = configService.get<string>('JWT_EXPIRES_IN') || '1h';
+        // Mismo valor validado que main.ts (app.jwtSecret). Sin fallback:
+        // si falta, el arranque aborta en main.ts.
+        const secret = configService.get<string>('app.jwtSecret');
+        const expiresIn = configService.get<string>('app.jwtExpiresIn') || '1h';
         return {
           secret,
           signOptions: { expiresIn: expiresIn as any },

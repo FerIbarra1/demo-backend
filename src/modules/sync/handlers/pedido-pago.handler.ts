@@ -3,6 +3,7 @@ import { forwardRef, Inject } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ExternalRefService } from '../external-ref.service';
 import { AdminService } from '../../pedidos/admin/admin.service';
+import { PedidoStateService } from '../../pedidos/core/pedido-state.service';
 import type { SyncEventoDto } from '../dto/upload-batch.dto';
 import { EstadoPedido } from '@prisma/client';
 import type { UserContext } from '../../../types/pedido.types';
@@ -41,6 +42,7 @@ export class PedidoPagoHandler {
     private externalRefs: ExternalRefService,
     @Inject(forwardRef(() => AdminService))
     private adminService: AdminService,
+    private pedidoState: PedidoStateService,
   ) {}
 
   async procesar(
@@ -110,25 +112,14 @@ export class PedidoPagoHandler {
     if (!pedido) return;
     if (pedido.estado === EstadoPedido.CANCELLED) return;
 
-    // Transición directa con historial explícito. Esto evita acoplar al
-    // PedidoStateService (cuyos guards de rol no contemplan AGENT).
-    await this.prisma.$transaction(async (tx) => {
-      const result = await tx.pedido.updateMany({
-        where: { id: pedidoIdNube, estado: pedido.estado },
-        data: { estado: EstadoPedido.CANCELLED },
-      });
-      if (result.count !== 1) return;
-
-      await tx.historialPedido.create({
-        data: {
-          pedidoId: pedidoIdNube,
-          estadoAnterior: pedido.estado,
-          estadoNuevo: EstadoPedido.CANCELLED,
-          observacion: 'Cancelado en Firebird (sincronizado por agente)',
-          usuarioId: null,
-          usuarioNombre: 'AGENT_EXTERNAL',
-        },
-      });
+    // Delega en la máquina de estados (PedidoStateService) para que la
+    // transición valide TRANSICIONES y ejecute historial + realtime +
+    // notificación. Si Firebird intenta cancelar un pedido en un estado
+    // terminal (p.ej. COMPLETED), la máquina lo rechaza con 400 en vez de
+    // permitir una transición inválida.
+    await this.pedidoState.cambiarEstadoPorSistema(pedidoIdNube, EstadoPedido.CANCELLED, {
+      observacion: 'Cancelado en Firebird (sincronizado por agente)',
+      usuarioNombre: 'AGENT_EXTERNAL',
     });
   }
 }

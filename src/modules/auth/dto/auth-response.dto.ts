@@ -27,6 +27,9 @@ export class AuthResponseDto {
   @ApiProperty()
   refreshToken: string;
 
+  @ApiProperty({ description: 'Id del refresh token persistido en BD (para revocación explícita)' })
+  refreshTokenId: number;
+
   @ApiProperty()
   expiresIn: number;
 

@@ -1,5 +1,7 @@
-import { Controller, Post, Body, Get, UseGuards, HttpCode, HttpStatus, BadRequestException, Req } from '@nestjs/common';
+import { Controller, Post, Body, Get, UseGuards, HttpCode, HttpStatus, BadRequestException, Req, Res } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { Response, Request } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -21,39 +23,82 @@ import { Roles } from '../../common/decorators/roles.decorator';
 export class AuthController {
   constructor(private authService: AuthService) {}
 
+  /** Nombre de la cookie httpOnly que guarda el refresh token. */
+  private readonly REFRESH_COOKIE = 'refresh_token';
+
+  /**
+   * Setea el refresh token en una cookie httpOnly+Secure. El frontend nunca
+   * lo ve ni lo persiste en localStorage (cierra el vector XSS). El access
+   * token sigue viajando en el body/header (lo necesita axios).
+   */
+  private setRefreshCookie(res: Response, refreshToken: string): void {
+    const secure = process.env.NODE_ENV === 'production';
+    res.cookie(this.REFRESH_COOKIE, refreshToken, {
+      httpOnly: true,
+      secure,
+      sameSite: 'lax',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7d, igual que el refresh JWT
+    });
+  }
+
+  private clearRefreshCookie(res: Response): void {
+    res.clearCookie(this.REFRESH_COOKIE, { path: '/' });
+  }
+
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Registrar nuevo usuario' })
-  async register(@Body() dto: RegisterDto): Promise<AuthResponseDto> {
-    return this.authService.register(dto);
+  async register(@Body() dto: RegisterDto, @Res({ passthrough: true }) res: Response): Promise<AuthResponseDto> {
+    const result = await this.authService.register(dto);
+    this.setRefreshCookie(res, result.refreshToken);
+    return result;
   }
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Iniciar sesión' })
-  async login(@Body() dto: LoginDto): Promise<AuthResponseDto> {
-    return this.authService.login(dto);
+  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response): Promise<AuthResponseDto> {
+    const result = await this.authService.login(dto);
+    this.setRefreshCookie(res, result.refreshToken);
+    return result;
   }
 
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refrescar token de acceso' })
-  async refreshToken(@Body() dto: RefreshTokenDto): Promise<AuthResponseDto> {
-    return this.authService.refreshToken(dto);
+  async refreshToken(
+    @Body() dto: RefreshTokenDto,
+    @Req() req: any,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponseDto> {
+    const ip = (req?.ip as string | undefined) ?? req?.socket?.remoteAddress;
+    // El refresh token viaja en la cookie httpOnly (no en el body). Si el
+    // cliente lo manda en el body (legado), lo aceptamos como fallback.
+    const refreshToken = req?.cookies?.[this.REFRESH_COOKIE] ?? dto.refreshToken;
+    const result = await this.authService.refreshToken({ refreshToken }, ip);
+    this.setRefreshCookie(res, result.refreshToken);
+    return result;
   }
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('kiosk-login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
       'Intercambia un kiosk token por sesión completa (usado tras escanear QR)',
   })
-  async kioskLogin(@Body() dto: KioskLoginDto): Promise<AuthResponseDto> {
-    return this.authService.loginByKioskToken(dto);
+  async kioskLogin(@Body() dto: KioskLoginDto, @Res({ passthrough: true }) res: Response): Promise<AuthResponseDto> {
+    const result = await this.authService.loginByKioskToken(dto);
+    this.setRefreshCookie(res, result.refreshToken);
+    return result;
   }
 
   @Get('kiosk-token')
@@ -70,8 +115,22 @@ export class AuthController {
   })
   async getKioskToken(
     @CurrentUser('userId') userId: number,
-    @CurrentUser('tiendaId') tiendaId: number | null,
+    @CurrentUser('tiendaId') jwtTiendaId: number | null,
+    @Req() req: Request,
   ) {
+    // La tienda activa del cliente viaja en el header X-Tienda-Id (el interceptor
+    // axios del frontend la manda con la tienda que el cliente tiene seleccionada
+    // en el navbar). El JWT puede traer tiendaId null si el cliente se logueó sin
+    // elegir tienda, así que damos prioridad al header. Esto mantiene el QR atado
+    // a la tienda que el cliente está viendo.
+    const header = req.headers['x-tienda-id'];
+    const headerValue = Array.isArray(header) ? header[0] : header;
+    const headerTiendaId = Number(headerValue);
+    const tiendaId =
+      Number.isInteger(headerTiendaId) && headerTiendaId > 0
+        ? headerTiendaId
+        : jwtTiendaId;
+
     if (!tiendaId) {
       throw new BadRequestException(
         'Necesitas tener una tienda seleccionada para generar el código QR. Elige una tienda en el catálogo primero.',
@@ -95,7 +154,9 @@ export class AuthController {
   async logout(
     @CurrentUser('userId') userId: number,
     @CurrentUser('token') token: string,
+    @Res({ passthrough: true }) res: Response,
   ) {
+    this.clearRefreshCookie(res);
     return this.authService.logout(userId, token);
   }
 
@@ -178,6 +239,7 @@ export class AuthController {
   // =====================================================
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -190,6 +252,7 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

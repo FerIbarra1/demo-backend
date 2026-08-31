@@ -35,11 +35,3 @@ export class MarcarSurtidoItemDto {
   @IsInt()
   nuevoPrecioCOId?: number;
 }
-
-export class ConfirmarSurtidoDto {
-  @ApiPropertyOptional({
-    description: 'Si true y hay faltantes, abre propuesta al cliente automáticamente',
-  })
-  @IsOptional()
-  abrirPropuesta?: boolean;
-}

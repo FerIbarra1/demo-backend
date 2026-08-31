@@ -1,6 +1,6 @@
 import { Controller, Get, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
-import { MonitorService } from '../bodega/monitor.service';
+import { CajeroMonitorService } from './cajero-monitor.service';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -10,7 +10,7 @@ import { RolUsuario } from '@prisma/client';
 @Controller('cajero/pedidos/monitor')
 @Roles(RolUsuario.CAJERO_MONITOR, RolUsuario.ADMIN)
 export class CajeroMonitorController {
-  constructor(private readonly monitorService: MonitorService) {}
+  constructor(private readonly monitorService: CajeroMonitorService) {}
 
   /**
    * Snapshot del monitor de ventanillas: cajeros logueados (= ventanillas

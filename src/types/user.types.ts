@@ -5,6 +5,8 @@ export interface JwtPayload {
   email: string;
   rol: RolUsuario;
   tiendaId?: number;
+  /** Identificador único del refresh token (jti). Se persiste en BD para rotación/revocación. */
+  jti?: string;
 }
 
 export interface KioskTokenPayload {
@@ -13,21 +15,12 @@ export interface KioskTokenPayload {
   tiendaId: number;
 }
 
-export interface AuthenticatedUser {
-  userId: number;
-  email: string;
-  rol: RolUsuario;
-  tiendaId?: number;
-  nombre: string;
-}
-
-export interface TokenResponse {
+export interface AuthResponse {
   accessToken: string;
   refreshToken: string;
+  /** Id del refresh token persistido en BD (para revocación explícita). */
+  refreshTokenId: number;
   expiresIn: number;
-}
-
-export interface AuthResponse extends TokenResponse {
   user: {
     id: number;
     email: string;

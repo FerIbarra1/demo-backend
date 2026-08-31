@@ -23,31 +23,16 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     return super.canActivate(context);
   }
 
-  handleRequest(err: any, user: any, info: any, context: ExecutionContext) {
+  handleRequest(err: any, user: any, _info: any, _context: ExecutionContext) {
     if (err || !user) {
       throw err || new UnauthorizedException('Token inválido o expirado');
     }
 
-    // Si llega la tienda por header, la propagamos al request.user para
-    // que esté disponible en el service. NO exigimos tienda en cada
-    // request autenticada: la selección de tienda es por sesión y se
-    // valida en los servicios que la requieren (ej. crearPedido).
-    const request = context.switchToHttp().getRequest();
-    const tiendaHeader = request.headers['x-tienda-id'];
-
-    if (tiendaHeader) {
-      const parsed = parseInt(tiendaHeader, 10);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        user.tiendaIdHeader = parsed;
-        // Mantenemos compatibilidad: si user.tiendaId no está set, lo
-        // reflejamos desde el header (legacy code que lee user.tiendaId
-        // todavía funciona).
-        if (!user.tiendaId) {
-          user.tiendaId = parsed;
-        }
-      }
-    }
-
+    // La tienda efectiva del usuario viene SOLO del JWT/BD (JwtStrategy).
+    // NO se refleja el header X-Tienda-Id en user.tiendaId: confiar en un
+    // header client-side para autorización permitiría IDOR cross-tienda.
+    // La selección de tienda del cliente se lee explícitamente en
+    // cliente.controller.ts y se valida contra usuarioTienda en crearPedido.
     return user;
   }
 }

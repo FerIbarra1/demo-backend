@@ -10,7 +10,7 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { VentanillasService } from '../../ventanillas/ventanillas.service';
 import { UserContext } from '../../../types/pedido.types';
-import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
+import { EstadoPedido, Prisma, RolUsuario, CanalOrigen } from '@prisma/client';
 
 /**
  * Servicio del dominio CAJERO.
@@ -83,7 +83,7 @@ export class CajeroService {
       const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
-      if (pedido.canalOrigen !== 'KIOSKO') {
+      if (pedido.canalOrigen !== CanalOrigen.KIOSKO) {
         throw new BadRequestException('Sólo pedidos del kiosko entran al monitor de ventanillas');
       }
       if (pedido.estado !== EstadoPedido.PENDING_PAID) {
@@ -231,7 +231,7 @@ export class CajeroService {
       where: {
         tiendaId: usuario.tiendaId,
         estado: EstadoPedido.PENDING_PAID,
-        canalOrigen: 'KIOSKO',
+        canalOrigen: CanalOrigen.KIOSKO,
         cajeroAsignadoId: null,
       },
       orderBy: { fechaPedido: 'asc' },

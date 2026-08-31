@@ -78,14 +78,6 @@ export class CatalogHandler {
     const codigo = (d.CODIGO ?? '').trim();
     if (!codigo) return { ok: false, mensaje: 'PRODUCTOS sin CODIGO' };
 
-    // Mapear IDLINEA/IDSUBLINEA locales a system IDs (si existen)
-    const lineaSystemId = d.IDLINEA
-      ? await this.externalRefs.findSystemId('LINEAS', d.IDLINEA)
-      : null;
-    const sublineaSystemId = d.IDSUBLINEA
-      ? await this.externalRefs.findSystemId('SUBLINEAS', d.IDSUBLINEA)
-      : null;
-
     const activo = (d.ACTIVO ?? 'S').trim().startsWith('S');
 
     if (evento.operacion === 'D') {
@@ -227,17 +219,15 @@ export class CatalogHandler {
     const nombre = (d.DESCRIP ?? '').trim();
     if (!nombre) return { ok: false, mensaje: 'LINEAS sin DESCRIP' };
 
-    // LINEAS no tiene modelo dedicado en el schema actual. Se persiste
-    // como ExternalRef para resolver mappeo (IDLINEA Firebird → algún
-    // equivalente en PG cuando se necesite). Por ahora solo guardamos
-    // el mapeo.
-    return { ok: true, mensaje: 'LINEAS: mapeo registrado (sin modelo PG)' };
+    // LINEAS no tiene modelo dedicado en el schema actual y no se persiste
+    // ningún mapeo. Se marca como procesado para no bloquear el checkpoint.
+    return { ok: true, mensaje: 'LINEAS: sin modelo PG, ignorado' };
   }
 
   private async procesarSublinea(
     evento: SyncEventoDto,
   ): Promise<{ ok: boolean; mensaje?: string }> {
-    return { ok: true, mensaje: 'SUBLINEAS: mapeo registrado (sin modelo PG)' };
+    return { ok: true, mensaje: 'SUBLINEAS: sin modelo PG, ignorado' };
   }
 
   // -------------------- PRECIOS (producto × tienda, 6 listas) --------------------

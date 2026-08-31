@@ -12,7 +12,9 @@ import { PedidoAccessService } from '../core/pedido-access.service';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
 import { rankearSimilares, TOP_LISTA } from '../core/similitud.util';
-import { MAX_PEDIDOS_POR_BODEGUERO } from './surtido.service';
+import { MAX_PEDIDOS_POR_BODEGUERO } from '../core/pedido-limits';
+import { zonaKey } from '../core/zona.util';
+import { asignadoANombre } from '../core/pedido-mapper';
 import type {
   SurtirJuntosPedidoDto,
   LoteSurtirJuntosDto,
@@ -77,15 +79,10 @@ export class BodegaService {
       }),
       this.prisma.pedido.count({ where }),
     ]);
-    const data = pedidos.map((p: any) => {
-      const a = p.asignadoA;
-      return {
-        ...p,
-        asignadoANombre: a
-          ? `${a.nombre ?? ''} ${a.apellido ?? ''}`.trim() || null
-          : null,
-      };
-    });
+    const data = pedidos.map((p: any) => ({
+      ...p,
+      asignadoANombre: asignadoANombre(p.asignadoA),
+    }));
     return {
       data,
       meta: { total, pagina, limite, totalPaginas: Math.ceil(total / limite) },
@@ -324,6 +321,7 @@ export class BodegaService {
     const itemsReferencia = await this.prisma.itemPedido.findMany({
       where: { pedidoId: { in: pedidosDelBodeguero.map((p) => p.id) }, cancelada: false },
       select: {
+        pedidoId: true,
         productoId: true,
         precioCO: { select: { colorId: true } },
       },
@@ -410,24 +408,17 @@ export class BodegaService {
 
     // Mapa zona (productoId:colorId) → con qué pedidos del bodeguero la comparten.
     // zonaCompartidaConBodeguero.get(zonaKey) = Set<pedidoIdDelBodeguero>
+    // Se construye en memoria desde itemsReferencia (ya cargado en bloque),
+    // evitando una query por pedido del bodeguero (N+1).
     const zonaCompartidaConBodeguero = new Map<string, Set<number>>();
-    for (const p of pedidosDelBodeguero) {
-      const items = await this.prisma.itemPedido.findMany({
-        where: { pedidoId: p.id, cancelada: false },
-        select: {
-          productoId: true,
-          precioCO: { select: { colorId: true } },
-        },
-      });
-      for (const it of items) {
-        const key = zonaKey(it.productoId, it.precioCO?.colorId ?? null);
-        let s = zonaCompartidaConBodeguero.get(key);
-        if (!s) {
-          s = new Set();
-          zonaCompartidaConBodeguero.set(key, s);
-        }
-        s.add(p.id);
+    for (const it of itemsReferencia) {
+      const key = zonaKey(it.productoId, it.precioCO?.colorId ?? null);
+      let s = zonaCompartidaConBodeguero.get(key);
+      if (!s) {
+        s = new Set();
+        zonaCompartidaConBodeguero.set(key, s);
       }
+      s.add(it.pedidoId);
     }
 
     const ahora = new Date();
@@ -678,13 +669,4 @@ export class BodegaService {
 
     return tomados;
   }
-}
-
-function zonaKey(
-  productoId: number,
-  colorId: number | null,
-  colorNombre?: string | null,
-): string {
-  if (colorId != null) return `${productoId}:${colorId}`;
-  return `${productoId}:${colorNombre ?? 'sin-color'}`;
 }

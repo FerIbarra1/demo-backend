@@ -71,10 +71,6 @@ export interface PropuestaParseada {
   textoLibre: string;
 }
 
-export function esPropuesta(contenido: string): boolean {
-  return contenido.includes(PROPUESTA_PREFIX) && contenido.includes(PROPUESTA_SUFFIX);
-}
-
 /**
  * Extrae el JSON de la propuesta del contenido del mensaje. Si el parseo
  * falla (versión desconocida, JSON malformado), devuelve `null` para que

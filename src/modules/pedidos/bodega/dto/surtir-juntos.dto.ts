@@ -86,16 +86,6 @@ export class SurtirJuntosPedidoDto {
   items: SurtirJuntosItemDto[];
 }
 
-export class SurtirJuntosResponseDto {
-  @ApiProperty({
-    type: [SurtirJuntosPedidoDto],
-    description:
-      'Top 10 pedidos en cola con productos compartidos con los pedidos que el bodeguero tiene asignados. ' +
-      'Vacío si el bodeguero no tiene pedidos asignados o si ninguno tiene productos compartidos.',
-  })
-  data: SurtirJuntosPedidoDto[];
-}
-
 // ==================== MODO LOTE (F11) ====================
 
 export class LoteItemDto {

@@ -81,6 +81,12 @@ export class RealtimeGateway
         this.logger.warn(
           `Realtime: no se pudo conectar a Redis (${msg}). Se usa adapter en memoria (single-instance).`,
         );
+        // Cerrar cualquier cliente Redis que haya quedado conectado a medias
+        // (p.ej. pubClient conectado pero subClient/adapter falló) para no
+        // dejar conexiones huérfanas.
+        await Promise.allSettled([this.pubClient?.quit(), this.subClient?.quit()]);
+        this.pubClient = undefined;
+        this.subClient = undefined;
       }
     } else {
       this.logger.warn('Realtime: REDIS_URL no configurado. Adapter en memoria.');
@@ -106,12 +112,10 @@ export class RealtimeGateway
         rol: payload.rol,
         nombre: (client.handshake.auth?.nombre as string) ?? '',
       };
-      // Tienda: priorizar el del JWT (autoritativo), fallback al handshake.auth.
-      // Cualquier rol con tienda (BODEGA, CAJERO, BODEGA_MONITOR, CAJERO_MONITOR,
-      // CLIENTE con tienda) se une al room tienda-{id} para recibir pedido.creado.
-      const tiendaIdFromJwt = (payload as JwtPayload & { tiendaId?: number }).tiendaId;
-      const tiendaIdFromHandshake = client.handshake.auth?.tiendaId as number | undefined;
-      const tiendaId = tiendaIdFromJwt ?? tiendaIdFromHandshake;
+      // Tienda: SOLO la del JWT (autoritativa, firmada). No se confía en
+      // handshake.auth.tiendaId: un cliente podría unirse al room de otra
+      // tienda y recibir eventos operativos (pedido.llamado, ventanilla.*).
+      const tiendaId = (payload as JwtPayload & { tiendaId?: number }).tiendaId;
       if (tiendaId) data.tiendaId = tiendaId;
       client.data = data;
 

@@ -3,7 +3,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { RolUsuario, Prisma } from '@prisma/client';
+import { RolUsuario, Prisma, EstadoPedido } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 
 /**
@@ -14,7 +14,6 @@ export interface PedidoAccessUser {
   userId: number;
   rol: RolUsuario;
   tiendaId?: number;
-  tiendaIdHeader?: number;
 }
 
 export interface PedidoAccessOptions {
@@ -110,7 +109,10 @@ export class PedidoAccessService {
     }
 
     // BODEGA / CAJERO / BODEGA_MONITOR: el pedido debe pertenecer a su tienda.
-    const tiendaEfectiva = user.tiendaIdHeader ?? user.tiendaId;
+    // La tienda se toma SOLO del JWT/BD (user.tiendaId), nunca de un header
+    // client-side (X-Tienda-Id) — confiar en el header permitiría IDOR
+    // cross-tienda (un operador de tienda A operando pedidos de tienda B).
+    const tiendaEfectiva = user.tiendaId;
     if (!tiendaEfectiva) {
       throw new ForbiddenException(
         'Tu usuario no tiene tienda asignada. Contacta al administrador.',
@@ -138,5 +140,51 @@ export class PedidoAccessService {
         );
       }
     }
+  }
+
+  /**
+   * Busca un pedido por folio (VFP externalFolio o numeroPedido interno) y
+   * valida que el usuario tenga derecho a verlo. Lanza 404 si no existe y
+   * 403 si el pedido es de otra tienda.
+   */
+  async buscarPorFolio(
+    folio: string,
+    user: PedidoAccessUser,
+  ): Promise<{
+    id: number;
+    numeroPedido: string;
+    externalFolio: string | null;
+    estado: EstadoPedido;
+  }> {
+    const f = (folio ?? '').trim();
+    if (!f) {
+      throw new NotFoundException('Folio requerido');
+    }
+
+    const pedido = await this.prisma.pedido.findFirst({
+      where: {
+        OR: [
+          { numeroPedido: { equals: f, mode: 'insensitive' } },
+          { pendienteEnvio: { externalFolio: { equals: f, mode: 'insensitive' } } },
+        ],
+      },
+      include: {
+        pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
+      },
+    });
+
+    if (!pedido) {
+      throw new NotFoundException('Pedido no encontrado');
+    }
+
+    // Valida tienda (y rol). Lanza 403 si el pedido es de otra tienda.
+    this.validar(pedido, user);
+
+    return {
+      id: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      externalFolio: pedido.pendienteEnvio?.externalFolio ?? null,
+      estado: pedido.estado,
+    };
   }
 }

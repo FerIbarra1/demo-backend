@@ -82,7 +82,10 @@ export class ExternalRefService {
         where: { id: existente.id },
         data: { localId: args.localId, syncedAt: new Date() },
       });
-    } else {
+      return;
+    }
+
+    try {
       await this.prisma.externalRef.create({
         data: {
           systemEntity: args.systemEntity,
@@ -92,6 +95,28 @@ export class ExternalRefService {
           localTiendaId,
         },
       });
+    } catch (err) {
+      // P2002 = otro hilo creó la fila entre el findFirst y el create
+      // (race). Reintentamos como update sobre la fila existente.
+      if ((err as { code?: string }).code === 'P2002') {
+        const concurrente = await this.prisma.externalRef.findFirst({
+          where: {
+            systemEntity: args.systemEntity,
+            systemId: args.systemId,
+            localEntity: args.localEntity,
+            localTiendaId,
+          },
+          select: { id: true },
+        });
+        if (concurrente) {
+          await this.prisma.externalRef.update({
+            where: { id: concurrente.id },
+            data: { localId: args.localId, syncedAt: new Date() },
+          });
+          return;
+        }
+      }
+      throw err;
     }
   }
 
@@ -104,13 +129,29 @@ export class ExternalRefService {
     precioCOIdsNube: number[],
     localTiendaId: number,
   ): Promise<Map<number, number>> {
-    if (precioCOIdsNube.length === 0) return new Map();
+    return this.resolveLocalIds('PRECIOCO', 'PRECIOSCO', precioCOIdsNube, localTiendaId);
+  }
+
+  /**
+   * Resuelve en bloque un set de systemIds de la nube a sus localIds de
+   * Firebird, para una entidad dada. Una sola query por entidad en lugar
+   * de una por id (evita N+1 en el poll de pedidos).
+   *
+   * @param localTiendaId null para entidades globales (PRODUCTO, CORRIDA, COLOR).
+   */
+  async resolveLocalIds(
+    systemEntity: string,
+    localEntity: string,
+    systemIdsNube: number[],
+    localTiendaId: number | null,
+  ): Promise<Map<number, number>> {
+    if (systemIdsNube.length === 0) return new Map();
     const refs = await this.prisma.externalRef.findMany({
       where: {
-        systemEntity: 'PRECIOCO',
-        systemId: { in: precioCOIdsNube },
-        localEntity: 'PRECIOSCO',
-        localTiendaId,
+        systemEntity,
+        systemId: { in: systemIdsNube },
+        localEntity,
+        localTiendaId: localTiendaId ?? null,
       },
       select: { systemId: true, localId: true },
     });

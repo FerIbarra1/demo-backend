@@ -9,6 +9,7 @@ import { MonitorService } from './bodega/monitor.service';
 import { CajeroController } from './cajero/cajero.controller';
 import { CajeroService } from './cajero/cajero.service';
 import { CajeroMonitorController } from './cajero/cajero-monitor.controller';
+import { CajeroMonitorService } from './cajero/cajero-monitor.service';
 import { AdminController } from './admin/admin.controller';
 import { AdminService } from './admin/admin.service';
 import { MessagesController } from './messages/messages.controller';
@@ -62,6 +63,7 @@ import { VentanillasModule } from '../ventanillas/ventanillas.module';
     SurtidoService,
     MonitorService,
     CajeroService,
+    CajeroMonitorService,
     AdminService,
     MessagesService,
     PedidoAccessService,
