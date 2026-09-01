@@ -310,7 +310,13 @@ export class ClienteService {
       include: {
         items: {
           include: {
-            producto: { select: { imagenPrincipal: true } },
+            producto: {
+              select: {
+                imagenPrincipal: true,
+                imagenesProducto: { select: { url: true, colorId: true } },
+              },
+            },
+            precioCO: { select: { colorId: true } },
           },
         },
         tienda: true,
@@ -324,11 +330,18 @@ export class ClienteService {
       // 404 (no 403) para no filtrar existencia del pedido a clientes ajenos.
       throw new NotFoundException('Pedido no encontrado');
     }
-    // Adjuntar productoImagen a cada item del pedido (imagen del producto original).
-    pedido.items = pedido.items.map((it: any) => ({
-      ...it,
-      productoImagen: it.producto?.imagenPrincipal ?? null,
-    })) as any;
+    // Adjuntar productoImagen a cada item del pedido: la imagen del color de
+    // la variante (si el producto tiene imágenes asociadas a ese color);
+    // fallback a la imagen principal del producto.
+    pedido.items = pedido.items.map((it: any) => {
+      const imagenColor = it.producto?.imagenesProducto?.find(
+        (img: any) => img.colorId === it.precioCO?.colorId,
+      )?.url;
+      return {
+        ...it,
+        productoImagen: imagenColor ?? it.producto?.imagenPrincipal ?? null,
+      };
+    }) as any;
     return pedido;
   }
 

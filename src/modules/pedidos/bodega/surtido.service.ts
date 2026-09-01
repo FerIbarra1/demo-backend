@@ -60,10 +60,24 @@ export class SurtidoService {
         items: {
           orderBy: { id: 'asc' },
           include: {
-            producto: { select: { imagenPrincipal: true } },
+            producto: {
+              select: {
+                imagenPrincipal: true,
+                imagenesProducto: { select: { url: true, colorId: true } },
+              },
+            },
+            precioCO: { select: { colorId: true } },
             sustitucionPropuesta: {
               include: {
-                producto: { select: { id: true, nombre: true, codigo: true, imagenPrincipal: true } },
+                producto: {
+                  select: {
+                    id: true,
+                    nombre: true,
+                    codigo: true,
+                    imagenPrincipal: true,
+                    imagenesProducto: { select: { url: true, colorId: true } },
+                  },
+                },
                 talla: { select: { nombre: true } },
                 color: { select: { nombre: true, hex: true } },
                 corrida: { select: { nombre: true } },
@@ -94,12 +108,18 @@ export class SurtidoService {
     // aquí no mutamos, así que permitimos.
     void pedidoReducido;
 
-    // Adjuntar productoImagen (imagen del producto original) a cada item para
-    // que el chat con cards embebidas pueda mostrar la foto.
-    pedido.items = pedido.items.map((it: any) => ({
-      ...it,
-      productoImagen: it.producto?.imagenPrincipal ?? null,
-    })) as any;
+    // Adjuntar productoImagen a cada item: la imagen del color de la variante
+    // (si el producto tiene imágenes asociadas a ese color); fallback a la
+    // imagen principal. Para que el chat con cards embebidas muestre la foto.
+    pedido.items = pedido.items.map((it: any) => {
+      const imagenColor = it.producto?.imagenesProducto?.find(
+        (img: any) => img.colorId === it.precioCO?.colorId,
+      )?.url;
+      return {
+        ...it,
+        productoImagen: imagenColor ?? it.producto?.imagenPrincipal ?? null,
+      };
+    }) as any;
 
     // Banner "surtir juntos": sólo si el pedido está en estados accionables.
     let pedidosSimilares: Array<{

@@ -294,7 +294,13 @@ export class PedidoStateService {
       include: {
         items: {
           include: {
-            producto: { select: { imagenPrincipal: true } },
+            producto: {
+              select: {
+                imagenPrincipal: true,
+                imagenesProducto: { select: { url: true, colorId: true } },
+              },
+            },
+            precioCO: { select: { colorId: true } },
           },
         },
         tienda: true,
@@ -312,10 +318,15 @@ export class PedidoStateService {
       },
     });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
-    pedido.items = pedido.items.map((it: any) => ({
-      ...it,
-      productoImagen: it.producto?.imagenPrincipal ?? null,
-    })) as any;
+    pedido.items = pedido.items.map((it: any) => {
+      const imagenColor = it.producto?.imagenesProducto?.find(
+        (img: any) => img.colorId === it.precioCO?.colorId,
+      )?.url;
+      return {
+        ...it,
+        productoImagen: imagenColor ?? it.producto?.imagenPrincipal ?? null,
+      };
+    }) as any;
     (pedido as any).asignadoANombre = asignadoANombre((pedido as any).asignadoA);
     return pedido;
   }

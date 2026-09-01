@@ -336,10 +336,24 @@ export class CatalogoService {
         id: { in: ids },
         ...(tiendaId ? { tiendaId } : {}),
       },
-      include: { producto: true, talla: true, color: true, corrida: true },
+      include: {
+        producto: {
+          include: {
+            imagenesProducto: { select: { url: true, colorId: true } },
+          },
+        },
+        talla: true,
+        color: true,
+        corrida: true,
+      },
     });
     return precios.map((p) => {
       const precioLista = Number(p[columnaLista] ?? 0);
+      // Imagen del color de la variante (si el producto tiene imágenes
+      // asociadas a ese color); fallback a la imagen principal del producto.
+      const imagenColor = p.producto.imagenesProducto.find(
+        (img) => img.colorId === p.colorId,
+      )?.url;
       return {
       id: p.id,
       tiendaId: p.tiendaId,
@@ -355,6 +369,7 @@ export class CatalogoService {
         talla: p.talla.nombre,
         color: p.color.nombre,
         colorHex: p.color.hex,
+        imagen: imagenColor ?? p.producto.imagenPrincipal,
       },
       };
     });

@@ -7,49 +7,90 @@ const prisma = new PrismaClient();
 // CONFIGURACIÓN DE PRODUCTOS POR IMÁGENES
 // ============================================
 // Las imágenes están en: public/products/
-// Formato: {producto}-{num-img}-{color}.webp
-// Ejemplo: manga-corta-1-naranja.webp
+// Formato: {modelo}-{color}-{num-img}.webp
+// Ejemplo: C0200-caribe-1.webp
 //
 // IMPORTANTE: Se usan rutas relativas (/products/...) para evitar
 // problemas de CORS cuando el frontend corre en otro puerto.
+//
+// Los productos provienen del catálogo de Yazbek (yazbek.com.mx).
+// Cada modelo (código C/D/N/J/B + número) tiene varios colores; aquí se
+// agrupa un modelo con 5 de sus colores. Precios en MXN de la tienda.
 
 const PRODUCTOS_CONFIG = [
   {
-    codigo: 'CAM-MC-001',
-    nombre: 'Camiseta Manga Corta',
-    descripcion: 'Camiseta manga corta 100% algodón premium. Diseño clásico con acabados de calidad. Disponible en colores vibrantes.',
-    categoria: 'Camisetas',
+    codigo: 'C0200',
+    nombre: 'Playera Cuello Redondo Manga Corta para Caballero · 100% Algodón',
+    descripcion: 'Peso 155 gr/m², tejido chifón, composición 100% algodón.',
+    categoria: 'Playeras',
     subcategoria: 'Manga Corta',
-    precioBase: 299.99,
+    precioBase: 60.0,
     colores: [
-      { nombre: 'Naranja', hex: '#FF8C00', imagen1: 'manga-corta-1-naranja.webp', imagen2: 'manga-corta-2-naranja.webp' },
-      { nombre: 'Verde', hex: '#228B22', imagen1: 'manga-corta-1-verde.webp', imagen2: 'manga-corta-2-verde.webp' },
-      { nombre: 'Salmon', hex: '#FA8072', imagen1: 'manga-corta-1-salmon.webp', imagen2: 'manga-corta-salmon-2.webp' },
+      { nombre: 'Caribe', hex: '#0E7C7B', imagenes: ['C0200-caribe-1.webp', 'C0200-caribe-2.webp', 'C0200-caribe-3.webp'] },
+      { nombre: 'Negro', hex: '#000000', imagenes: ['C0200-negro-1.webp', 'C0200-negro-2.webp', 'C0200-negro-3.webp'] },
+      { nombre: 'Marino', hex: '#1F2A44', imagenes: ['C0200-marino-1.webp', 'C0200-marino-2.webp', 'C0200-marino-3.webp'] },
+      { nombre: 'Blanco', hex: '#FFFFFF', imagenes: ['C0200-blanco-1.webp', 'C0200-blanco-2.webp', 'C0200-blanco-3.webp'] },
+      { nombre: 'Arena', hex: '#C2B280', imagenes: ['C0200-arena-1.webp', 'C0200-arena-2.webp', 'C0200-arena-3.webp'] },
     ],
   },
   {
-    codigo: 'CAM-ML-001',
-    nombre: 'Camiseta Manga Larga',
-    descripcion: 'Camiseta manga larga de algodón suave. Perfecta para climas frescos. Corte moderno y confortable.',
-    categoria: 'Camisetas',
-    subcategoria: 'Manga Larga',
-    precioBase: 349.99,
+    codigo: 'C0300',
+    nombre: 'Playera Peso Completo Cuello Redondo Manga Corta para Caballero · 100% Algodón',
+    descripcion: 'Peso 195 gr/m², tejido chifón, composición 100% algodón.',
+    categoria: 'Playeras',
+    subcategoria: 'Peso Completo Manga Corta',
+    precioBase: 65.0,
     colores: [
-      { nombre: 'Azul', hex: '#1E90FF', imagen1: 'manga-larga-1-azul.webp', imagen2: 'manga-larga-2-azul.webp' },
-      { nombre: 'Cafe', hex: '#8B4513', imagen1: 'manga-larga-1-cafe.webp', imagen2: 'manga-larga-2-cafe.webp' },
-      { nombre: 'Naranja', hex: '#FF8C00', imagen1: 'manga-larga-1-naranja.webp', imagen2: 'manga-larga-2-naranja.webp' },
+      { nombre: 'Blanco', hex: '#FFFFFF', imagenes: ['C0300-blanco-1.webp', 'C0300-blanco-2.webp', 'C0300-blanco-3.webp'] },
+      { nombre: 'Negro', hex: '#000000', imagenes: ['C0300-negro-1.webp', 'C0300-negro-2.webp', 'C0300-negro-3.webp'] },
+      { nombre: 'Marino', hex: '#1F2A44', imagenes: ['C0300-marino-1.webp', 'C0300-marino-2.webp', 'C0300-marino-3.webp'] },
+      { nombre: 'Marrón', hex: '#6B4226', imagenes: ['C0300-marron-1.webp', 'C0300-marron-2.webp', 'C0300-marron-3.webp'] },
+      { nombre: 'Jade', hex: '#00A86B', imagenes: ['C0300-jade-1.webp', 'C0300-jade-2.webp', 'C0300-jade-3.webp'] },
     ],
   },
   {
-    codigo: 'POLO-001',
-    nombre: 'Polo Clásico',
-    descripcion: 'Polo clásico con cuello y botones. 60% algodón 40% poliéster. Ideal para ocasiones semi-formales.',
-    categoria: 'Polos',
-    subcategoria: 'Clásico',
-    precioBase: 399.99,
+    codigo: 'D0200',
+    nombre: 'Playera Cuello Redondo Manga Corta para Dama · 100% Algodón',
+    descripcion: 'Peso 155 gr/m², tejido chifón, composición 100% algodón.',
+    categoria: 'Playeras',
+    subcategoria: 'Manga Corta Dama',
+    precioBase: 60.0,
     colores: [
-      { nombre: 'Blanco', hex: '#FFFFFF', imagen1: 'polo-1-blanco.webp', imagen2: 'polo-2-blanco.webp' },
-      { nombre: 'Negro', hex: '#000000', imagen1: 'polo-1-negro.webp', imagen2: 'polo-2-negro.webp' },
+      { nombre: 'Lavanda', hex: '#B57EDC', imagenes: ['D0200-lavanda-1.webp', 'D0200-lavanda-2.webp', 'D0200-lavanda-3.webp'] },
+      { nombre: 'Fucsia', hex: '#FF00FF', imagenes: ['D0200-fucsia-1.webp', 'D0200-fucsia-2.webp', 'D0200-fucsia-3.webp'] },
+      { nombre: 'Marino', hex: '#1F2A44', imagenes: ['D0200-marino-1.webp', 'D0200-marino-2.webp', 'D0200-marino-3.webp'] },
+      { nombre: 'Blanco', hex: '#FFFFFF', imagenes: ['D0200-blanco-1.webp', 'D0200-blanco-2.webp', 'D0200-blanco-3.webp'] },
+      { nombre: 'Arena', hex: '#C2B280', imagenes: ['D0200-arena-1.webp', 'D0200-arena-2.webp', 'D0200-arena-3.webp'] },
+    ],
+  },
+  {
+    codigo: 'D0300',
+    nombre: 'Playera Peso Completo Cuello Redondo Manga Corta con Silueta para Dama · 100% Algodón',
+    descripcion: 'Peso 195 gr/m², tejido chifón, composición 100% algodón.',
+    categoria: 'Playeras',
+    subcategoria: 'Peso Completo Manga Corta Dama',
+    precioBase: 65.0,
+    colores: [
+      { nombre: 'Negro', hex: '#000000', imagenes: ['D0300-negro-1.webp', 'D0300-negro-2.webp', 'D0300-negro-3.webp'] },
+      { nombre: 'Turquesa', hex: '#40E0D0', imagenes: ['D0300-turquesa-1.webp', 'D0300-turquesa-2.webp', 'D0300-turquesa-3.webp'] },
+      { nombre: 'Marino', hex: '#1F2A44', imagenes: ['D0300-marino-1.webp', 'D0300-marino-2.webp', 'D0300-marino-3.webp'] },
+      { nombre: 'Fucsia', hex: '#FF00FF', imagenes: ['D0300-fucsia-1.webp', 'D0300-fucsia-2.webp', 'D0300-fucsia-3.webp'] },
+      { nombre: 'Rojo', hex: '#FF0000', imagenes: ['D0300-rojo-1.webp', 'D0300-rojo-2.webp', 'D0300-rojo-3.webp'] },
+    ],
+  },
+  {
+    codigo: 'C1302',
+    nombre: 'Playera Cuello Redondo Manga Corta para Caballero · 100% Poliéster',
+    descripcion: 'Peso 150 gr/m², tejido mesh, composición 100% poliéster.',
+    categoria: 'Playeras',
+    subcategoria: 'Manga Corta Poliéster',
+    precioBase: 100.0,
+    colores: [
+      { nombre: 'Negro', hex: '#000000', imagenes: ['C1302-negro-1.webp', 'C1302-negro-2.webp', 'C1302-negro-3.webp'] },
+      { nombre: 'Rojo', hex: '#FF0000', imagenes: ['C1302-rojo-1.webp', 'C1302-rojo-2.webp', 'C1302-rojo-3.webp'] },
+      { nombre: 'Marino', hex: '#1F2A44', imagenes: ['C1302-marino-1.webp', 'C1302-marino-2.webp', 'C1302-marino-3.webp'] },
+      { nombre: 'Verde Neón', hex: '#39FF14', imagenes: ['C1302-verde-neon-1.webp', 'C1302-verde-neon-2.webp', 'C1302-verde-neon-3.webp'] },
+      { nombre: 'Amarillo Neón', hex: '#FFFF00', imagenes: ['C1302-amarillo-neon-1.webp', 'C1302-amarillo-neon-2.webp', 'C1302-amarillo-neon-3.webp'] },
     ],
   },
 ];
@@ -375,8 +416,9 @@ async function main() {
 
   // Generar códigos de color únicos
   const colorCodes: Record<string, string> = {
-    'Naranja': 'NA', 'Verde': 'VD', 'Salmon': 'SL',
-    'Azul': 'AZ', 'Cafe': 'CF', 'Blanco': 'BL', 'Negro': 'NG',
+    'Caribe': 'CA', 'Negro': 'NG', 'Marino': 'MA', 'Blanco': 'BL', 'Arena': 'AR',
+    'Marrón': 'MR', 'Jade': 'JD', 'Lavanda': 'LV', 'Fucsia': 'FU', 'Turquesa': 'TU',
+    'Rojo': 'RO', 'Verde Neón': 'VN', 'Amarillo Neón': 'AN',
   };
 
   const coloresData = Array.from(coloresUnicos.values()).map((c) => ({
@@ -400,13 +442,10 @@ async function main() {
 
   for (const config of PRODUCTOS_CONFIG) {
     // Todas las imágenes del producto (para el array de imágenes)
-    const todasImagenes = config.colores.flatMap(c => [
-      getImagenUrl(c.imagen1),
-      getImagenUrl(c.imagen2),
-    ]);
+    const todasImagenes = config.colores.flatMap(c => c.imagenes.map(getImagenUrl));
 
     // Imagen principal = primera imagen del primer color
-    const imagenPrincipal = getImagenUrl(config.colores[0].imagen1);
+    const imagenPrincipal = getImagenUrl(config.colores[0].imagenes[0]);
 
     const producto = await prisma.producto.create({
       data: {
@@ -420,6 +459,27 @@ async function main() {
         subcategoria: config.subcategoria,
       },
     });
+
+    // Filas ProductoImagen con colorId: asocian cada imagen a su color para
+    // que catálogo/carrito/pedidos puedan mostrar la imagen del color elegido.
+    // esPrincipal en la primera imagen del primer color.
+    let esPrincipalYa = false;
+    for (const colorConfig of config.colores) {
+      const colorDB = coloresDB.find(c => c.nombre === colorConfig.nombre);
+      if (!colorDB) continue;
+      for (let i = 0; i < colorConfig.imagenes.length; i++) {
+        await prisma.productoImagen.create({
+          data: {
+            productoId: producto.id,
+            colorId: colorDB.id,
+            url: getImagenUrl(colorConfig.imagenes[i]),
+            orden: i,
+            esPrincipal: !esPrincipalYa && i === 0,
+          },
+        });
+        if (!esPrincipalYa && i === 0) esPrincipalYa = true;
+      }
+    }
 
     productosCreados.push({
       id: producto.id,
@@ -449,7 +509,7 @@ async function main() {
           productoId: producto.id,
           tiendaId: tienda.id,
           visible: true,
-          destacado: producto.codigo === 'CAM-MC-001',
+          destacado: producto.codigo === 'C0200',
         },
       });
 
