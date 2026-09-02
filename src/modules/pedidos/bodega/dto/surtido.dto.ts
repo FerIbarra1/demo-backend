@@ -21,7 +21,7 @@ export class MarcarSurtidoItemDto {
 
   @ApiPropertyOptional({
     description:
-      'Motivo del bodeguero cuando hay faltante (se persiste en ItemPedido.motivoSurtido y se propaga al PedidoRevisionItem.motivo al confirmar).',
+      'Motivo del bodeguero cuando hay faltante (se persiste en ItemPedido.motivoSurtido).',
   })
   @IsOptional()
   @IsString()

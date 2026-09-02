@@ -14,6 +14,8 @@ import { AdminController } from './admin/admin.controller';
 import { AdminService } from './admin/admin.service';
 import { MessagesController } from './messages/messages.controller';
 import { MessagesService } from './messages/messages.service';
+import { PropuestaController } from './propuesta/propuesta.controller';
+import { PropuestaService } from './propuesta/propuesta.service';
 import { PedidoAccessService } from './core/pedido-access.service';
 import { PedidoStateService } from './core/pedido-state.service';
 import { PedidoBusquedaController } from './core/pedido-busqueda.controller';
@@ -55,6 +57,7 @@ import { VentanillasModule } from '../ventanillas/ventanillas.module';
     CajeroController,
     AdminController,
     MessagesController,
+    PropuestaController,
     PedidoBusquedaController,
   ],
   providers: [
@@ -66,6 +69,7 @@ import { VentanillasModule } from '../ventanillas/ventanillas.module';
     CajeroMonitorService,
     AdminService,
     MessagesService,
+    PropuestaService,
     PedidoAccessService,
     PedidoStateService,
   ],

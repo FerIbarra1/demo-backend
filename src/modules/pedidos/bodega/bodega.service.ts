@@ -11,10 +11,19 @@ import { PedidoStateService } from '../core/pedido-state.service';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
-import { rankearSimilares, TOP_LISTA } from '../core/similitud.util';
-import { MAX_PEDIDOS_POR_BODEGUERO } from '../core/pedido-limits';
+import {
+  rankearSimilares,
+  TOP_LISTA,
+  agruparColaPorZonaCompartida,
+  type PedidoColaParaAgrupar,
+} from '../core/similitud.util';
+import {
+  MAX_PEDIDOS_POR_BODEGUERO,
+  ESTADOS_OCUPAN_SLOT_BODEGA,
+} from '../core/pedido-limits';
 import { zonaKey } from '../core/zona.util';
 import { asignadoANombre } from '../core/pedido-mapper';
+import { tiempoAtencionEn } from '../core/atencion.util';
 import type {
   SurtirJuntosPedidoDto,
   LoteSurtirJuntosDto,
@@ -79,9 +88,22 @@ export class BodegaService {
       }),
       this.prisma.pedido.count({ where }),
     ]);
+    const ahora = new Date();
     const data = pedidos.map((p: any) => ({
       ...p,
       asignadoANombre: asignadoANombre(p.asignadoA),
+      // F12: minutos en manos del bodeguero (reloj de atención). Se pausa en
+      // WAITING_CUSTOMER_APPROVAL. Para pedidos en cola (PENDING_REVIEW) el
+      // reloj corre desde que se creó.
+      minutosAtencionBodega: Math.floor(
+        tiempoAtencionEn(
+          {
+            tiempoAtencionBodegaMs: p.tiempoAtencionBodegaMs,
+            bodegaTurnoDesdeAt: p.bodegaTurnoDesdeAt,
+          },
+          ahora,
+        ) / 60000,
+      ),
     }));
     return {
       data,
@@ -90,10 +112,7 @@ export class BodegaService {
   }
 
   async obtenerMisPedidosBodeguero(usuarioId: number, tiendaId?: number, max?: number) {
-    const estadosEnProcesoBodega: EstadoPedido[] = [
-      EstadoPedido.REVIEWING,
-      EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-    ];
+    const estadosEnProcesoBodega: EstadoPedido[] = ESTADOS_OCUPAN_SLOT_BODEGA;
     const [pedidos, total] = await Promise.all([
       this.prisma.pedido.findMany({
         where: {
@@ -110,6 +129,9 @@ export class BodegaService {
           total: true,
           fechaPedido: true,
           asignadoAt: true,
+          // F12: reloj de atención del bodeguero (para urgencia correcta).
+          tiempoAtencionBodegaMs: true,
+          bodegaTurnoDesdeAt: true,
           _count: { select: { items: true } },
         },
         orderBy: { asignadoAt: 'asc' },
@@ -123,13 +145,22 @@ export class BodegaService {
       }),
     ]);
 
+    const ahora = new Date();
     return {
       data: pedidos.map((p) => ({
         ...p,
         total: Number(p.total),
-        minutosEnProceso: p.asignadoAt
-          ? Math.floor((Date.now() - p.asignadoAt.getTime()) / 60000)
-          : 0,
+        // F12: minutos en manos del bodeguero usando el reloj de atención.
+        // Se PAUSA en WAITING_CUSTOMER_APPROVAL (esperando al cliente).
+        minutosEnProceso: Math.floor(
+          tiempoAtencionEn(
+            {
+              tiempoAtencionBodegaMs: p.tiempoAtencionBodegaMs,
+              bodegaTurnoDesdeAt: p.bodegaTurnoDesdeAt,
+            },
+            ahora,
+          ) / 60000,
+        ),
       })),
       meta: {
         total,
@@ -156,14 +187,24 @@ export class BodegaService {
     }
 
     if (pedido.estado === EstadoPedido.REVIEWING) {
+      // F12: atomicidad contra la carrera TOCTOU — dos bodegueros no pueden
+      // tomar el mismo pedido liberado. updateMany con condición asignadoAId=null
+      // garantiza que solo uno gana (count===1). Al retomar, el reloj de
+      // atención sigue corriendo (bodegaTurnoDesdeAt se mantiene si ya corría).
       const result = await this.prisma.$transaction(async (tx) => {
-        const actualizado = await tx.pedido.update({
-          where: { id: pedidoId },
+        const actualizado = await tx.pedido.updateMany({
+          where: { id: pedidoId, asignadoAId: null },
           data: {
             asignadoAId: usuario.userId,
             asignadoAt: new Date(),
+            bodegaTurnoDesdeAt: new Date(),
           },
         });
+        if (actualizado.count !== 1) {
+          throw new ConflictException(
+            'Este pedido ya fue tomado por otro bodeguero. Actualiza la pantalla.',
+          );
+        }
         await tx.historialPedido.create({
           data: {
             pedidoId,
@@ -174,7 +215,7 @@ export class BodegaService {
             usuarioNombre: usuario.nombre,
           },
         });
-        return actualizado;
+        return tx.pedido.findUnique({ where: { id: pedidoId } });
       });
       this.realtime.emitToTienda(pedido.tiendaId, 'pedido.asignado', {
         id: pedidoId,
@@ -212,9 +253,16 @@ export class BodegaService {
       );
     }
 
-    if (pedido.estado !== EstadoPedido.REVIEWING) {
+    // F12: se puede liberar desde REVIEWING (caso normal) o desde
+    // WAITING_CUSTOMER_APPROVAL (cliente no respondió, bodeguero lo suelta a la
+    // cola). En ambos casos el pedido vuelve a REVIEWING sin asignar y el reloj
+    // de atención se reanuda (sigue siendo tarea de bodega).
+    const liberable =
+      pedido.estado === EstadoPedido.REVIEWING ||
+      pedido.estado === EstadoPedido.WAITING_CUSTOMER_APPROVAL;
+    if (!liberable) {
       throw new BadRequestException(
-        `Sólo se puede liberar un pedido en REVIEWING (actual: ${pedido.estado})`,
+        `Sólo se puede liberar un pedido en REVIEWING o esperando cliente (actual: ${pedido.estado})`,
       );
     }
 
@@ -222,16 +270,22 @@ export class BodegaService {
       const pedidoActualizado = await tx.pedido.update({
         where: { id: pedidoId },
         data: {
+          estado: EstadoPedido.REVIEWING,
           asignadoAId: null,
           asignadoAt: null,
+          // F12: al liberar, el reloj sigue corriendo (es tarea de bodega).
+          bodegaTurnoDesdeAt: new Date(),
         },
       });
       await tx.historialPedido.create({
         data: {
           pedidoId,
-          estadoAnterior: EstadoPedido.REVIEWING,
+          estadoAnterior: pedido.estado,
           estadoNuevo: EstadoPedido.REVIEWING,
-          observacion: `Pedido liberado por ${usuario.nombre}`,
+          observacion:
+            pedido.estado === EstadoPedido.WAITING_CUSTOMER_APPROVAL
+              ? `Pedido liberado por ${usuario.nombre} (cliente no respondió la propuesta)`
+              : `Pedido liberado por ${usuario.nombre}`,
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
         },
@@ -458,6 +512,111 @@ export class BodegaService {
   }
 
   /**
+   * F12 (sep 2026): agrupa la COLA de bodega (PENDING_REVIEW + REVIEWING sin
+   * asignar) en clusters de pedidos que comparten zona (producto+color).
+   *
+   * A diferencia de `obtenerSurtirJuntos` (que parte de los pedidos del
+   * bodeguero), esto sugiere desde la cola SIN requerir selección previa: el
+   * bodeguero ve qué pedidos conviene tomar juntos desde que entran.
+   *
+   * Devuelve clusters con >= 2 pedidos. Cada cluster trae `grupoId` (estable)
+   * para que el frontend marque los pedidos que se surten juntos.
+   */
+  async obtenerSurtirJuntosCola(tiendaId?: number) {
+    if (!tiendaId) return [];
+
+    const pedidos = await this.prisma.pedido.findMany({
+      where: {
+        tiendaId,
+        OR: [
+          { estado: EstadoPedido.PENDING_REVIEW },
+          { estado: EstadoPedido.REVIEWING, asignadoAId: null },
+        ],
+      },
+      select: {
+        id: true,
+        numeroPedido: true,
+        clienteNombre: true,
+        canalOrigen: true,
+        fechaPedido: true,
+        items: {
+          where: { cancelada: false },
+          select: {
+            productoId: true,
+            precioCO: { select: { colorId: true } },
+          },
+        },
+      },
+      orderBy: { fechaPedido: 'asc' },
+    });
+
+    const paraAgrupar: PedidoColaParaAgrupar[] = pedidos.map((p) => ({
+      id: p.id,
+      numeroPedido: p.numeroPedido,
+      clienteNombre: p.clienteNombre,
+      canalOrigen: p.canalOrigen,
+      fechaPedido: p.fechaPedido,
+      items: p.items.map((it) => ({
+        productoId: it.productoId,
+        colorId: it.precioCO?.colorId ?? null,
+      })),
+    }));
+
+    const clusters = agruparColaPorZonaCompartida(paraAgrupar);
+
+    // Hidratar nombre de producto y color para cada zona compartida.
+    const zonas = new Set<string>();
+    for (const c of clusters) for (const z of c.zonasCompartidas) zonas.add(z);
+    const productoIds = new Set<number>();
+    const colorIds = new Set<number>();
+    for (const z of zonas) {
+      const [pid, cid] = z.split(':');
+      const pn = parseInt(pid, 10);
+      if (!isNaN(pn)) productoIds.add(pn);
+      const cn = parseInt(cid, 10);
+      if (!isNaN(cn)) colorIds.add(cn);
+    }
+    const [productos, colores] = await Promise.all([
+      this.prisma.producto.findMany({
+        where: { id: { in: Array.from(productoIds) } },
+        select: { id: true, nombre: true },
+      }),
+      this.prisma.color.findMany({
+        where: { id: { in: Array.from(colorIds) } },
+        select: { id: true, nombre: true, hex: true },
+      }),
+    ]);
+    const productoNombreById = new Map(productos.map((p) => [p.id, p.nombre]));
+    const colorById = new Map(colores.map((c) => [c.id, c]));
+
+    return clusters.map((c) => ({
+      grupoId: c.grupoId,
+      zonasCompartidas: c.zonasCompartidas.map((z) => {
+        const [pid, cid] = z.split(':');
+        const pn = parseInt(pid, 10);
+        const cn = parseInt(cid, 10);
+        const color = !isNaN(cn) ? colorById.get(cn) : undefined;
+        return {
+          productoId: pn,
+          productoNombre: productoNombreById.get(pn) ?? '(producto)',
+          colorId: !isNaN(cn) ? cn : null,
+          colorNombre: color?.nombre ?? null,
+          colorHex: color?.hex ?? null,
+        };
+      }),
+      pedidos: c.pedidos.map((p) => ({
+        id: p.id,
+        numeroPedido: p.numeroPedido,
+        clienteNombre: p.clienteNombre,
+        canalOrigen: p.canalOrigen,
+        minutosEnCola: Math.floor(
+          (new Date().getTime() - p.fechaPedido.getTime()) / 60000,
+        ),
+      })),
+    }));
+  }
+
+  /**
    * F11 (ago 2026): batch de surtido del bodeguero. Devuelve todos los items
    * de sus pedidos asignados agrupados por ZONA (producto+color), para que
    * pueda surtir varios pedidos a la vez sin navegar entre ellos: va una sola
@@ -615,13 +774,7 @@ export class BodegaService {
     const actuales = await this.prisma.pedido.count({
       where: {
         asignadoAId: usuario.userId,
-        estado: {
-          in: [
-            EstadoPedido.REVIEWING,
-            EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-            EstadoPedido.APPROVED,
-          ],
-        },
+        estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA },
       },
     });
     if (actuales + aTomar > MAX_PEDIDOS_POR_BODEGUERO) {
@@ -633,17 +786,45 @@ export class BodegaService {
     }
 
     const tomados = await this.prisma.$transaction(async (tx) => {
+      // F12: re-validar el límite DENTRO de la transacción (el conteo previo
+      // fuera de ella es una carrera: otro bodeguero pudo tomar pedidos entre
+      // el count y la asignación). Contamos los slots ocupados por este
+      // bodeguero en el momento de la escritura.
+      const actualesTx = await tx.pedido.count({
+        where: {
+          asignadoAId: usuario.userId,
+          estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA },
+        },
+      });
+      if (actualesTx + aTomar > MAX_PEDIDOS_POR_BODEGUERO) {
+        const faltan = actualesTx + aTomar - MAX_PEDIDOS_POR_BODEGUERO;
+        throw new BadRequestException(
+          `El grupo excede el límite de ${MAX_PEDIDOS_POR_BODEGUERO} pedidos simultáneos. ` +
+            `Libera ${faltan} espacio(s) (finaliza o libera un pedido) antes de agregar este grupo.`,
+        );
+      }
+
       const resultado: Array<{ id: number }> = [];
       for (const pedido of pedidos) {
         // Saltar los que ya son del bodeguero (defensa; no deberían venir en candidatos).
         if (pedido.asignadoAId === usuario.userId) continue;
 
-        const data =
-          pedido.estado === EstadoPedido.REVIEWING
-            ? { asignadoAId: usuario.userId, asignadoAt: new Date() }
-            : { estado: EstadoPedido.REVIEWING, asignadoAId: usuario.userId, asignadoAt: new Date() };
-
-        await tx.pedido.update({ where: { id: pedido.id }, data });
+        // F12: atomicidad contra la carrera TOCTOU — updateMany con condición
+        // asignadoAId=null garantiza que solo un bodeguero gana cada pedido.
+        const res = await tx.pedido.updateMany({
+          where: { id: pedido.id, asignadoAId: null },
+          data: {
+            estado: EstadoPedido.REVIEWING,
+            asignadoAId: usuario.userId,
+            asignadoAt: new Date(),
+            bodegaTurnoDesdeAt: new Date(),
+          },
+        });
+        if (res.count !== 1) {
+          throw new ConflictException(
+            `El pedido ${pedido.id} ya fue tomado por otro bodeguero. Actualiza la pantalla.`,
+          );
+        }
         await tx.historialPedido.create({
           data: {
             pedidoId: pedido.id,

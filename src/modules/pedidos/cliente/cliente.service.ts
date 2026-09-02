@@ -324,6 +324,13 @@ export class ClienteService {
         historial: { orderBy: { createdAt: 'asc' } },
         mensajes: { where: { visibleParaCliente: true }, orderBy: { createdAt: 'asc' } },
         cajeroAsignado: { select: { id: true, nombre: true, apellido: true } },
+        // F12: propuestas de ajuste para que el cliente vea y responda.
+        propuestas: {
+          orderBy: { enviadaAt: 'asc' },
+          include: {
+            creadaPor: { select: { id: true, nombre: true, apellido: true } },
+          },
+        },
       },
     });
     if (!pedido) {

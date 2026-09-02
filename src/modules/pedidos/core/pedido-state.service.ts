@@ -23,23 +23,33 @@ import {
  *
  * Flujo de pago (jun 2026): la tienda cobra en un sistema externo (Visual FoxPro +
  * Firebird). El backend sólo registra cuándo se cobró vía webhook autenticado
- * (`POST /admin/pedidos/:id/marcar-pagado`). APPROVED → PENDING_PAID es una
- * transición automática disparada por `SurtidoService.confirmarSurtido` (sin
- * acción humana).
+ * (`POST /admin/pedidos/:id/marcar-pagado`). REVIEWING → PENDING_PAID es una
+ * transición disparada por `SurtidoService.confirmarSurtido` (sin acción humana)
+ * o por `PropuestaService` cuando el cliente acepta la propuesta.
  */
 const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
   [EstadoPedido.PENDING_REVIEW]: [EstadoPedido.REVIEWING, EstadoPedido.CANCELLED],
   [EstadoPedido.REVIEWING]: [
+    // REVIEWING → WAITING_CUSTOMER_APPROVAL: lo dispara PropuestaService
+    // cuando bodega envía una propuesta (hay faltantes). El pedido sigue
+    // asignado al bodeguero y el reloj de atención se pausa.
     EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-    EstadoPedido.APPROVED,
     // REVIEWING → PENDING_PAID: lo dispara SurtidoService.confirmarSurtido
-    // cuando la bodega cierra el surtido (con o sin faltantes). El pedido
-    // queda listo para pago; la transición y los cambios de items son atómicos.
+    // cuando la bodega cierra el surtido SIN faltantes. El pedido queda listo
+    // para pago; la transición y los cambios de items son atómicos.
     EstadoPedido.PENDING_PAID,
     EstadoPedido.CANCELLED,
   ],
-  [EstadoPedido.WAITING_CUSTOMER_APPROVAL]: [EstadoPedido.APPROVED, EstadoPedido.CANCELLED],
-  [EstadoPedido.APPROVED]: [EstadoPedido.PENDING_PAID, EstadoPedido.CANCELLED],
+  // F12 (sep 2026): WAITING_CUSTOMER_APPROVAL es un estado REAL. El cliente
+  // acepta (→ PENDING_PAID, aplica cambios) o rechaza (→ REVIEWING, re-trabaja).
+  // El admin puede forzar la aprobación (→ PENDING_PAID). El bodeguero puede
+  // liberar el pedido de vuelta a la cola (→ REVIEWING sin asignar) si el
+  // cliente no responde.
+  [EstadoPedido.WAITING_CUSTOMER_APPROVAL]: [
+    EstadoPedido.PENDING_PAID,
+    EstadoPedido.REVIEWING,
+    EstadoPedido.CANCELLED,
+  ],
   [EstadoPedido.PENDING_PAID]: [EstadoPedido.PAID, EstadoPedido.CANCELLED],
   // PAID → SHIPPED sólo aplica a pedidos a domicilio (con shippingDireccion).
   // Kiosko y web recoger en tienda saltan directo a COMPLETED vía el módulo
@@ -113,6 +123,8 @@ export class PedidoStateService {
           ...(estadoNuevo === EstadoPedido.REVIEWING && {
             asignadoAId: usuario.userId,
             asignadoAt: new Date(),
+            // F12: al tomar el pedido arranca el reloj de atención del bodeguero.
+            bodegaTurnoDesdeAt: new Date(),
           }),
         },
       });
@@ -312,6 +324,14 @@ export class PedidoStateService {
         asignadoA: { select: { id: true, nombre: true, apellido: true } },
         historial: { orderBy: { createdAt: 'asc' } },
         mensajes: { orderBy: { createdAt: 'asc' } },
+        // F12: propuestas de ajuste (historial de negociación).
+        propuestas: {
+          orderBy: { enviadaAt: 'asc' },
+          include: {
+            creadaPor: { select: { id: true, nombre: true, apellido: true } },
+            forzadaPor: { select: { id: true, nombre: true, apellido: true } },
+          },
+        },
         // QR: el folio VFP (externalFolio) se expone para que el frontend
         // muestre el QR y el folio visible. Solo existe tras el ACK del agente.
         pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
@@ -334,9 +354,8 @@ export class PedidoStateService {
   private notifTipoParaEstado(estado: EstadoPedido): TipoNotificacion | null {
     switch (estado) {
       case EstadoPedido.WAITING_CUSTOMER_APPROVAL: return TipoNotificacion.REVISION_PROPUESTA;
-      case EstadoPedido.APPROVED: return TipoNotificacion.REVISION_APROBADA;
       // PENDING_PAID no notifica al cliente: el cambio lo ve por realtime/refresh
-      // cuando bodega confirma el surtido.
+      // cuando bodega confirma el surtido o el cliente acepta la propuesta.
       case EstadoPedido.PAID: return TipoNotificacion.PAGO_CONFIRMADO;
       case EstadoPedido.SHIPPED: return TipoNotificacion.ENVIADO;
       case EstadoPedido.COMPLETED: return TipoNotificacion.ENTREGADO;

@@ -100,3 +100,130 @@ export function rankearSimilares(
     .sort((a, b) => b.score - a.score)
     .slice(0, top);
 }
+
+// =================================================================
+// F12 (sep 2026): agrupación de la COLA por zona compartida.
+// =================================================================
+
+export interface PedidoColaParaAgrupar {
+  id: number;
+  numeroPedido: string;
+  clienteNombre: string;
+  canalOrigen: string;
+  fechaPedido: Date;
+  items: ItemParaSimilitud[];
+}
+
+export interface ClusterSurtirJuntos {
+  /** Id estable del cluster (derivado de los ids de sus pedidos, ordenados). */
+  grupoId: string;
+  /** Pedidos del cluster, ordenados por antigüedad (más viejos primero). */
+  pedidos: PedidoColaParaAgrupar[];
+  /** Zonas (producto+color) compartidas por al menos 2 pedidos del cluster. */
+  zonasCompartidas: string[];
+}
+
+/**
+ * Agrupa los pedidos de la cola en clusters donde cada par de pedidos del
+ * mismo cluster comparte al menos una zona (producto+color). Es un problema
+ * de componentes conexos: dos pedidos están conectados si comparten zona.
+ *
+ * F12: a diferencia de `rankearSimilares` (que parte de los pedidos del
+ * bodeguero), esto agrupa la COLA completa sin depender de lo que el
+ * bodeguero ya tenga tomado. Así el bodeguero ve sugerencias desde el
+ * momento en que entran pedidos, sin seleccionar uno primero.
+ *
+ * Devuelve solo clusters con >= 2 pedidos (un cluster de 1 no es "surtir
+ * juntos"). Cada cluster se ordena por antigüedad.
+ */
+export function agruparColaPorZonaCompartida(
+  pedidos: PedidoColaParaAgrupar[],
+): ClusterSurtirJuntos[] {
+  if (pedidos.length < 2) return [];
+
+  // Mapa zona → set de pedidos que la tienen.
+  const pedidosPorZona = new Map<string, Set<number>>();
+  for (const p of pedidos) {
+    const zonas = new Set(p.items.map((i) => zonaKey(i.productoId, i.colorId)));
+    for (const z of zonas) {
+      let s = pedidosPorZona.get(z);
+      if (!s) {
+        s = new Set();
+        pedidosPorZona.set(z, s);
+      }
+      s.add(p.id);
+    }
+  }
+
+  // Union-find para componentes conexos.
+  const parent = new Map<number, number>();
+  const find = (x: number): number => {
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    // Compresión de ruta.
+    let cur = x;
+    while (parent.get(cur) !== root) {
+      const next = parent.get(cur)!;
+      parent.set(cur, root);
+      cur = next;
+    }
+    return root;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+
+  for (const p of pedidos) parent.set(p.id, p.id);
+  for (const zonaPedidos of pedidosPorZona.values()) {
+    const arr = Array.from(zonaPedidos);
+    for (let i = 1; i < arr.length; i++) union(arr[0], arr[i]);
+  }
+
+  // Agrupar por raíz.
+  const porRaiz = new Map<number, PedidoColaParaAgrupar[]>();
+  for (const p of pedidos) {
+    const r = find(p.id);
+    let arr = porRaiz.get(r);
+    if (!arr) {
+      arr = [];
+      porRaiz.set(r, arr);
+    }
+    arr.push(p);
+  }
+
+  const clusters: ClusterSurtirJuntos[] = [];
+  for (const arr of porRaiz.values()) {
+    if (arr.length < 2) continue;
+    // Zonas compartidas por al menos 2 pedidos del cluster.
+    const zonasCompartidas = Array.from(pedidosPorZona.entries())
+      .filter(([, ids]) => {
+        const enCluster = Array.from(ids).filter((id) =>
+          arr.some((p) => p.id === id),
+        );
+        return enCluster.length >= 2;
+      })
+      .map(([z]) => z);
+    const ordenados = [...arr].sort(
+      (a, b) => a.fechaPedido.getTime() - b.fechaPedido.getTime(),
+    );
+    const grupoId = ordenados
+      .map((p) => p.id)
+      .sort((a, b) => a - b)
+      .join('-');
+    clusters.push({
+      grupoId,
+      pedidos: ordenados,
+      zonasCompartidas,
+    });
+  }
+
+  // Ordenar clusters por el pedido más viejo (los más urgentes primero).
+  clusters.sort(
+    (a, b) =>
+      a.pedidos[0].fechaPedido.getTime() - b.pedidos[0].fechaPedido.getTime(),
+  );
+
+  return clusters;
+}

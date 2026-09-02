@@ -41,7 +41,7 @@ export class AdminController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Obtener pedido completo con historial, revisiones y mensajes' })
+  @ApiOperation({ summary: 'Obtener pedido completo con historial, propuestas y mensajes' })
   async obtenerPedidoCompleto(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.adminService.obtenerDetalle(id, user);
   }

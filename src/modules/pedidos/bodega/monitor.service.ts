@@ -6,7 +6,10 @@ import {
   MonitorPedidoDto,
   MonitorBodegueroDto,
 } from './dto/monitor.dto';
-import { MAX_PEDIDOS_POR_BODEGUERO } from '../core/pedido-limits';
+import {
+  MAX_PEDIDOS_POR_BODEGUERO,
+  ESTADOS_OCUPAN_SLOT_BODEGA,
+} from '../core/pedido-limits';
 import { asignadoANombre } from '../core/pedido-mapper';
 
 /**
@@ -85,7 +88,9 @@ export class MonitorService {
         activo: true,
         lastLogin: true,
         pedidosAsignados: {
-          where: { estado: EstadoPedido.REVIEWING },
+          // F12: incluir WAITING_CUSTOMER_APPROVAL para que el slot del
+          // bodeguero muestre "esperando cliente" (el pedido sigue asignado).
+          where: { estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } },
           orderBy: { asignadoAt: 'desc' },
           take: MAX_PEDIDOS_POR_BODEGUERO,
           select: {
@@ -141,26 +146,18 @@ export class MonitorService {
     // marcamos con `esLiberado=true` para que destaquen visualmente.
     //
     // F11 (ago 2026): este monitor es SOLO de bodega. Sólo se listan
-    // pedidos en estados accionables por bodega: PENDING_REVIEW
-    // (esperando tomar), REVIEWING (asignado o recién liberado),
-    // WAITING_CUSTOMER_APPROVAL (propuesta enviada al cliente) y
-    // APPROVED (transitorio). PENDING_PAID / PAID / SHIPPED /
-    // COMPLETED / CANCELLED son responsabilidad del monitor de cajeros
-    // o de mostrador — NUNCA del de bodega. Antes aparecía WEB en
-    // PENDING_PAID+ aquí, lo cual era incorrecto.
+    // pedidos en estados accionables por bodega: PENDING_REVIEW (esperando
+    // tomar) y REVIEWING sin asignar (recién liberado). F12: se quitaron
+    // WAITING_CUSTOMER_APPROVAL (está asignado, no es accionable por otro
+    // bodeguero — vive en el slot del bodeguero).
+    // PENDING_PAID / PAID / SHIPPED / COMPLETED / CANCELLED son
+    // responsabilidad del monitor de cajeros o de mostrador — NUNCA del de
+    // bodega.
     const pedidosRaw = await this.prisma.pedido.findMany({
       where: {
         tiendaId,
         OR: [
-          {
-            estado: {
-              in: [
-                EstadoPedido.PENDING_REVIEW,
-                EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-                EstadoPedido.APPROVED,
-              ],
-            },
-          },
+          { estado: EstadoPedido.PENDING_REVIEW },
           { estado: EstadoPedido.REVIEWING, asignadoAId: null },
         ],
       },
@@ -318,11 +315,7 @@ export class MonitorService {
         pedido: {
           tiendaId,
           estado: {
-            in: [
-              EstadoPedido.REVIEWING,
-              EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-              EstadoPedido.APPROVED,
-            ],
+            in: ESTADOS_OCUPAN_SLOT_BODEGA,
           },
         },
         cancelada: false,

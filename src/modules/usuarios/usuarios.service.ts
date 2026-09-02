@@ -11,7 +11,7 @@ import { RolUsuario } from '@prisma/client';
 import {
   CrearUsuarioDto,
   ActualizarUsuarioDto,
-  ResetPasswordDto,
+  AdminResetPasswordDto,
   ListarUsuariosQueryDto,
   ROLES_EMPLEADO,
 } from './dto/usuarios.dto';
@@ -181,7 +181,7 @@ export class UsuariosService {
   }
 
   /** Admin define una nueva contraseña para un empleado. */
-  async resetPassword(id: number, dto: ResetPasswordDto) {
+  async resetPassword(id: number, dto: AdminResetPasswordDto) {
     const usuario = await this.prisma.usuario.findUnique({ where: { id } });
     if (!usuario || usuario.deletedAt !== null) {
       throw new NotFoundException('Usuario no encontrado');

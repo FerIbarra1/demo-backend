@@ -5,14 +5,22 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { EstadoPedido, EstadoSurtido, EstadoRevision, Prisma, TipoNotificacion } from '@prisma/client';
+import {
+  EstadoPedido,
+  EstadoSurtido,
+  EstadoPropuesta,
+  Prisma,
+} from '@prisma/client';
 import { UserContext } from '../../../types/pedido.types';
 import { MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { rankearSimilares } from '../core/similitud.util';
-import { MAX_PEDIDOS_POR_BODEGUERO } from '../core/pedido-limits';
+import {
+  MAX_PEDIDOS_POR_BODEGUERO,
+  ESTADOS_OCUPAN_SLOT_BODEGA,
+} from '../core/pedido-limits';
 
 /**
  * Servicio de surtido en bodega.
@@ -24,9 +32,9 @@ import { MAX_PEDIDOS_POR_BODEGUERO } from '../core/pedido-limits';
  *      /items/:itemId/surtido (opcionalmente motivo y nuevoPrecioCOId)
  *   4. Cuando todos los items están en estado terminal (COMPLETO, NO_DISPONIBLE
  *      o PARCIAL), confirma el surtido vía /confirmar-surtido
- *   5. Si todo es COMPLETO → el pedido pasa a APPROVED
- *      Si hay items con faltante o sustitución propuesta → se genera revisión al
- *      cliente automáticamente y se notifica vía NotificationsService
+ *   5. Si todo es COMPLETO → el pedido pasa a PENDING_PAID (encola a Firebird).
+ *      Si hay faltantes → el bodeguero envía una propuesta (PropuestaService) y
+ *      solo cuando el cliente la acepta puede confirmar el surtido.
  */
 
 @Injectable()
@@ -88,9 +96,13 @@ export class SurtidoService {
         tienda: { select: { id: true, nombre: true } },
         usuario: { select: { id: true, nombre: true, email: true, telefono: true } },
         asignadoA: { select: { id: true, nombre: true, apellido: true } },
-        revisiones: {
-          where: { estadoRevision: EstadoRevision.PENDIENTE },
-          include: { items: true },
+        // F12: propuestas de ajuste (historial de negociación bodega↔cliente).
+        propuestas: {
+          orderBy: { enviadaAt: 'asc' },
+          include: {
+            creadaPor: { select: { id: true, nombre: true, apellido: true } },
+            forzadaPor: { select: { id: true, nombre: true, apellido: true } },
+          },
         },
       },
     });
@@ -227,12 +239,11 @@ export class SurtidoService {
 
   /**
    * Confirma el surtido. Aplica transición de estado coherente:
-   *   - Todos los items COMPLETO  → APPROVED
-   *   - Algún item PARCIAL / NO_DISPONIBLE / con sustitución  → WAITING_CUSTOMER_APPROVAL
-   *     con PedidoRevision creada automáticamente.
+   *   - Todos los items COMPLETO  → PENDING_PAID (encola a Firebird).
+   *   - Algún item PARCIAL / NO_DISPONIBLE / con sustitución  → requiere que
+   *     exista una propuesta ACEPTADA por el cliente (o forzada por admin);
+   *     aplica los cambios y pasa a PENDING_PAID.
    *   - Al menos un item aún PENDIENTE  → 400 (debe completar todos los items)
-   *
-   * Notifica al cliente (REVISION_PROPUESTA) cuando se genera revisión.
    */
   async confirmarSurtido(pedidoId: number, usuario: UserContext, esAdmin: boolean) {
     return this.prisma.$transaction(async (tx) => {
@@ -298,11 +309,13 @@ export class SurtidoService {
         const pedidoActualizado = await tx.pedido.update({
           where: { id: pedidoId },
           data: {
-            // Encadenar REVIEWING → APPROVED → PENDING_PAID en una sola escritura.
+            // Encadenar REVIEWING → PENDING_PAID en una sola escritura.
             // La bodega libera el pedido al confirmar surtido: ya no espera pago.
             estado: EstadoPedido.PENDING_PAID,
             asignadoAId: null,
             asignadoAt: null,
+            // El reloj de atención se detiene: ya no es tarea de bodega.
+            bodegaTurnoDesdeAt: null,
           },
         });
         await tx.historialPedido.create({
@@ -317,9 +330,8 @@ export class SurtidoService {
         });
         await this.encolarEnvioAFirebird(tx, pedidoId);
 
-        // Realtime: igual que el caso con faltantes, para que el monitor de
-        // bodega libere el slot del bodeguero y el monitor de cajeros reciba
-        // el pedido en su cola al instante (sin esperar el polling 5s).
+        // Realtime: para que el monitor de bodega libere el slot del bodeguero
+        // y el monitor de cajeros reciba el pedido en su cola al instante.
         this.realtime.emitToTienda(pedido.tiendaId, 'monitor.invalidado', { pedidoId });
         this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
           id: pedidoId,
@@ -336,10 +348,26 @@ export class SurtidoService {
         };
       }
 
-      // Hay faltantes. Aplicar los cambios directamente sobre el pedido
-      // (mismo approach que `cerrarRevision` pero sin crear PedidoRevision).
-      // Esto reemplaza el flujo formal de revisión: el chat es el canal de
-      // negociación y bodega confirma el acuerdo al surtir.
+      // F12 (sep 2026): hay faltantes. El bodeguero debe haber enviado una
+      // propuesta y el cliente debe haberla ACEPTADO (o el admin forzado la
+      // aprobación). Solo entonces se aplican los cambios y se libera a
+      // PENDING_PAID (encolando a Firebird). Si no hay propuesta aceptada,
+      // se bloquea: el bodeguero debe enviar la propuesta primero.
+      const propuestaAceptada = await tx.pedidoPropuesta.findFirst({
+        where: {
+          pedidoId,
+          estado: EstadoPropuesta.ACEPTADA,
+        },
+        orderBy: { respondidaAt: 'desc' },
+      });
+      if (!propuestaAceptada) {
+        throw new BadRequestException(
+          `Hay ${itemsConFaltante.length} item(s) con faltante o sustitución. ` +
+            'Envía la propuesta al cliente (botón "Enviar propuesta") y espera a que la acepte antes de confirmar el surtido.',
+        );
+      }
+
+      // Aplicar los cambios de la propuesta aceptada sobre los items.
       const cambios = await this.aplicarCambiosSurtido(tx, pedido, itemsConFaltante);
 
       const pedidoActualizado = await tx.pedido.update({
@@ -348,6 +376,8 @@ export class SurtidoService {
           estado: EstadoPedido.PENDING_PAID,
           asignadoAId: null,
           asignadoAt: null,
+          // El reloj de atención se detiene: ya no es tarea de bodega.
+          bodegaTurnoDesdeAt: null,
         },
       });
 
@@ -356,7 +386,7 @@ export class SurtidoService {
           pedidoId,
           estadoAnterior: EstadoPedido.REVIEWING,
           estadoNuevo: EstadoPedido.PENDING_PAID,
-          observacion: `Surtido confirmado con ${cambios.length} cambio(s) aplicado(s) — pendiente de pago`,
+          observacion: `Surtido confirmado con ${cambios.length} cambio(s) aplicado(s) (propuesta #${propuestaAceptada.id} aceptada) — pendiente de pago`,
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
         },
@@ -364,35 +394,16 @@ export class SurtidoService {
       await this.encolarEnvioAFirebird(tx, pedidoId);
 
       this.logger.log(
-        `Pedido ${pedidoId}: surtido con ${cambios.length} cambio(s) → PENDING_PAID`,
+        `Pedido ${pedidoId}: surtido con ${cambios.length} cambio(s) (propuesta aceptada) → PENDING_PAID`,
       );
 
-      // Realtime: el monitor de bodega debe recomputar (ya no aplica al pedido)
-      // y el monitor de ventanillas debe refrescar la cola.
+      // Realtime: el monitor de bodega debe recomputar y el de cajeros refrescar.
       this.realtime.emitToTienda(pedido.tiendaId, 'monitor.invalidado', { pedidoId });
       this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
         id: pedidoId,
         estadoAnterior: EstadoPedido.REVIEWING,
         estadoNuevo: EstadoPedido.PENDING_PAID,
       });
-
-      // Notificar al cliente: pedido aprobado con los cambios aplicados.
-      // El cliente verá el resultado al refrescar (realtime invalida la query).
-      const pedidoCompleto = await tx.pedido.findUnique({
-        where: { id: pedidoId },
-        include: { items: true },
-      });
-      if (pedidoCompleto) {
-        setImmediate(() => {
-          this.notifications
-            .enviar(pedidoCompleto, TipoNotificacion.REVISION_APROBADA)
-            .catch((err) =>
-              this.logger.error(
-                `Error enviando REVISION_APROBADA tras confirmarSurtido: ${err.message}`,
-              ),
-            );
-        });
-      }
 
       return {
         mensaje: `Surtido confirmado con ${cambios.length} cambio(s) aplicado(s)`,
@@ -408,9 +419,12 @@ export class SurtidoService {
    * crear sustituciones) sobre los items del pedido. Recalcula subtotal y
    * total. Helper extraído para que `confirmarSurtido` quede legible.
    *
+   * F12 (sep 2026): ahora también lo consume `PropuestaService` cuando el
+   * cliente ACEPTA la propuesta (o el admin la fuerza). Por eso es público.
+   *
    * Devuelve un array con la descripción de cada cambio aplicado (para el log).
    */
-  private async aplicarCambiosSurtido(
+  async aplicarCambiosSurtido(
     tx: Prisma.TransactionClient,
     pedido: { id: number; tiendaId: number },
     itemsConFaltante: Array<{
@@ -477,6 +491,16 @@ export class SurtidoService {
       // PARCIAL: ajustar cantidad al valor surtido y recalcular subtotal.
       if (item.estadoSurtido === EstadoSurtido.PARCIAL) {
         const nuevaCantidad = Math.max(0, item.cantidadSurtida);
+        // F12: si la cantidad surtida es 0, el item se CANCELA (no queda
+        // activo con cantidad 0). Antes quedaba un item activo con 0 piezas.
+        if (nuevaCantidad === 0) {
+          await tx.itemPedido.update({
+            where: { id: item.id },
+            data: { cancelada: true },
+          });
+          cambios.push(`Item #${item.id} cancelado (cantidad 0)`);
+          continue;
+        }
         const itemActual = await tx.itemPedido.findUnique({ where: { id: item.id } });
         if (!itemActual) throw new NotFoundException(`Item ${item.id} no existe`);
         const nuevoSubtotal = new Prisma.Decimal(itemActual.precioUnitario).mul(nuevaCantidad);
@@ -513,13 +537,7 @@ export class SurtidoService {
     const count = await this.prisma.pedido.count({
       where: {
         asignadoAId: usuarioId,
-        estado: {
-          in: [
-            EstadoPedido.REVIEWING,
-            EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-            EstadoPedido.APPROVED,
-          ],
-        },
+        estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA },
       },
     });
     return count < MAX_PEDIDOS_POR_BODEGUERO;
@@ -631,7 +649,7 @@ export class SurtidoService {
    * agente se pierda, GRABAR_PEDIDOS recibe siempre el mismo ID y la SP lo
    * trata como UPDATE (idempotente).
    */
-  private async encolarEnvioAFirebird(
+  async encolarEnvioAFirebird(
     tx: Prisma.TransactionClient,
     pedidoId: number,
   ): Promise<void> {

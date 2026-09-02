@@ -129,8 +129,22 @@ export class BodegaController {
     return this.bodegaService.tomarGrupo(dto.ids, user);
   }
 
+  @Get('surtir-juntos/cola')
+  @ApiOperation({
+    summary:
+      'F12: agrupa la cola de bodega (PENDING_REVIEW + REVIEWING sin asignar) en clusters de pedidos que comparten zona (producto+color). Sugiere qué pedidos tomar juntos desde la cola, sin requerir selección previa.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Array de clusters. Cada cluster trae grupoId (estable), zonasCompartidas y los pedidos que lo componen.',
+  })
+  async surtirJuntosCola(@CurrentUser() user: any) {
+    return this.bodegaService.obtenerSurtirJuntosCola(user.tiendaId);
+  }
+
   @Get(':id')
-  @ApiOperation({ summary: 'Obtener pedido completo (items, revisiones, mensajes)' })
+  @ApiOperation({ summary: 'Obtener pedido completo (items, propuestas, mensajes)' })
   async obtenerPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.pedidoState.obtenerDetalle(id, user);
   }
@@ -196,7 +210,7 @@ export class BodegaController {
   @Post(':id/confirmar-surtido')
   @ApiOperation({
     summary:
-      'Cerrar surtido. Aplica los cambios (cancela NO_DISPONIBLES, ajusta cantidades, crea sustituciones) y pasa el pedido a APPROVED. La negociación con el cliente ocurre por chat.',
+      'Cerrar surtido. Si hay faltantes, requiere una propuesta aceptada por el cliente. Aplica los cambios y pasa el pedido a PENDING_PAID.',
   })
   async confirmarSurtido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     const esAdmin = user.rol === RolUsuario.ADMIN;

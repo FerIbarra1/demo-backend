@@ -16,7 +16,7 @@ import { UsuariosService } from './usuarios.service';
 import {
   CrearUsuarioDto,
   ActualizarUsuarioDto,
-  ResetPasswordDto,
+  AdminResetPasswordDto,
   CambiarActivoDto,
   ListarUsuariosQueryDto,
 } from './dto/usuarios.dto';
@@ -64,7 +64,7 @@ export class UsuariosController {
   @ApiOperation({ summary: 'Cambiar la contraseña de un empleado (Admin)' })
   resetPassword(
     @Param('id', ParseIntPipe) id: number,
-    @Body() dto: ResetPasswordDto,
+    @Body() dto: AdminResetPasswordDto,
   ) {
     return this.usuariosService.resetPassword(id, dto);
   }

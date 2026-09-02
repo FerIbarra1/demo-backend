@@ -4,6 +4,9 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
   OnGatewayInit,
+  SubscribeMessage,
+  MessageBody,
+  ConnectedSocket,
 } from '@nestjs/websockets';
 import { Logger, OnModuleDestroy, Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -12,6 +15,7 @@ import { Server, Socket } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { Redis } from 'ioredis';
 import { RolUsuario } from '@prisma/client';
+import { PrismaService } from '../../prisma/prisma.service';
 
 /**
  * Gateway de Socket.IO. Namespace por defecto (raíz).
@@ -60,6 +64,7 @@ export class RealtimeGateway
   constructor(
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
   ) {}
 
   /**
@@ -133,6 +138,45 @@ export class RealtimeGateway
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.debug(`WS ${client.id}: auth fallida (${msg})`);
       client.disconnect(true);
+    }
+  }
+
+  /**
+   * Une al cliente al room `pedido-{id}` para recibir eventos de ese pedido
+   * (mensaje.creado, surtido.actualizado, pedido.estado). Valida que el
+   * usuario tenga derecho: dueño del pedido, bodeguero de la tienda, o admin.
+   *
+   * F12: sin esto, el bodeguero NO recibe los mensajes del cliente en tiempo
+   * real (el backend emite a `pedido-{id}`, pero nadie se unía al room).
+   */
+  @SubscribeMessage('joinPedido')
+  async handleJoinPedido(
+    @MessageBody() pedidoId: number,
+    @ConnectedSocket() client: Socket,
+  ) {
+    const data = client.data as SocketData | undefined;
+    if (!data || !pedidoId) return;
+
+    try {
+      const pedido = await this.prisma.pedido.findUnique({
+        where: { id: pedidoId },
+        select: { id: true, usuarioId: true, tiendaId: true },
+      });
+      if (!pedido) return;
+
+      const esAdmin = data.rol === RolUsuario.ADMIN;
+      const esDueno = pedido.usuarioId === data.userId;
+      const esDeSuTienda = data.tiendaId != null && pedido.tiendaId === data.tiendaId;
+
+      if (esAdmin || esDueno || esDeSuTienda) {
+        await client.join(`pedido-${pedidoId}`);
+        this.logger.debug(
+          `WS ${client.id}: user=${data.userId} se unió a pedido-${pedidoId}`,
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.debug(`WS joinPedido ${pedidoId}: error (${msg})`);
     }
   }
 

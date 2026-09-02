@@ -83,7 +83,7 @@ export class ActualizarUsuarioDto {
   tiendaId?: number;
 }
 
-export class ResetPasswordDto {
+export class AdminResetPasswordDto {
   @ApiProperty({ minLength: 6 })
   @IsString()
   @MinLength(6)

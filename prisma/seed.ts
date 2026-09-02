@@ -102,8 +102,10 @@ async function limpiarBaseDeDatos() {
   // Primero las tablas que referencian a usuarios/tiendas/productos.
   await prisma.notificacion.deleteMany({});
   await prisma.pedidoMensaje.deleteMany({});
-  await prisma.pedidoRevisionItem.deleteMany({});
-  await prisma.pedidoRevision.deleteMany({});
+  // F12 (sep 2026): las propuestas y la cola de envío a Firebird referencian
+  // a pedidos — borrarlas antes de pedidos.
+  await prisma.pedidoPropuesta.deleteMany({});
+  await prisma.pedidoPendienteEnvio.deleteMany({});
   await prisma.itemPedido.deleteMany({});
   await prisma.historialPedido.deleteMany({});
   await prisma.logActividad.deleteMany({});
@@ -144,8 +146,9 @@ async function limpiarBaseDeDatos() {
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "items_pedido_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "historial_pedidos_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_revisiones_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_revisiones_items_id_seq" RESTART WITH 1`;
+  // F12 (sep 2026): secuencias de propuestas y cola de envío a Firebird.
+  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_propuestas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_pendientes_envio_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_mensajes_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "notificaciones_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "ventanillas_id_seq" RESTART WITH 1`;

@@ -24,7 +24,6 @@ enum EstadoPedido {
   PENDING_REVIEW
   REVIEWING
   WAITING_CUSTOMER_APPROVAL
-  APPROVED
   PENDING_PAID
   PAID
   SHIPPED
@@ -32,16 +31,14 @@ enum EstadoPedido {
   CANCELLED
 }
 
-enum EstadoRevision {
+// F12 (sep 2026): estado de una propuesta de ajuste que bodega envía al
+// cliente cuando faltan productos. El pedido pasa a WAITING_CUSTOMER_APPROVAL
+// mientras la propuesta está PENDIENTE. Al ACEPTAR, bodega aplica los cambios
+// y libera a PENDING_PAID. Al RECHAZAR, vuelve a REVIEWING para re-trabajar.
+enum EstadoPropuesta {
   PENDIENTE
-  APROBADA
+  ACEPTADA
   RECHAZADA
-}
-
-enum EstadoDecision {
-  PENDIENTE
-  ACEPTADO
-  RECHAZADO
 }
 
 enum CanalOrigen {
@@ -174,9 +171,8 @@ model Usuario {
   pedidosAsignados    Pedido[]             @relation("PedidoBodeguero")
   pedidosEnCaja       Pedido[]             @relation("PedidoCajero")
   actividades         LogActividad[]
-  revisionesCreadas   PedidoRevision[]     @relation("RevisionCreador")
-  revisionesAprobadas PedidoRevision[]     @relation("RevisionAprobador")
-  decisionesTomadas   PedidoRevisionItem[] @relation("RevisionItemDecisor")
+  propuestasCreadas   PedidoPropuesta[]    @relation("PropuestaCreador")
+  propuestasForzadas  PedidoPropuesta[]    @relation("PropuestaForzador")
   mensajes            PedidoMensaje[]
   favoritos           Favorito[]
   kioskosActivados    Kiosko[]             @relation("KioskoActivador")
@@ -402,7 +398,6 @@ model PrecioCO {
   talla                   Talla                @relation(fields: [tallaId], references: [id], onDelete: Cascade)
   color                   Color                @relation(fields: [colorId], references: [id], onDelete: Cascade)
   itemsPedido             ItemPedido[]
-  revisionItemsNuevo      PedidoRevisionItem[]
   sustitucionesPropuestas ItemPedido[]         @relation("SustitucionPropuesta")
 
   @@unique([productoId, tiendaId, corridaId, tallaId, colorId])
@@ -474,6 +469,21 @@ model Pedido {
   cajeroAsignadoId Int?      @map("cajero_asignado_id")
   cajeroAsignadoAt DateTime? @map("cajero_asignado_at")
 
+  // F12 (sep 2026): reloj de atención del bodeguero. La urgencia de un pedido
+  // mide cuánto tiempo lleva en MANOS del bodeguero, no el tiempo total desde
+  // que se creó. El reloj se PAUSA mientras la pelota está del lado del cliente
+  // (WAITING_CUSTOMER_APPROVAL) y se REANUDA cuando el cliente responde y vuelve
+  // a ser tarea del bodeguero.
+  //
+  //   tiempoAtencionBodegaMs: tiempo acumulado en manos del bodeguero (ms).
+  //   bodegaTurnoDesdeAt:     cuándo empezó el turno actual del bodeguero.
+  //                           NULL = el reloj está pausado (esperando al cliente).
+  //
+  // El tiempo "en manos del bodeguero" en un instante T es:
+  //   tiempoAtencionBodegaMs + (bodegaTurnoDesdeAt ? T - bodegaTurnoDesdeAt : 0)
+  tiempoAtencionBodegaMs Int       @default(0) @map("tiempo_atencion_bodega_ms")
+  bodegaTurnoDesdeAt     DateTime? @map("bodega_turno_desde_at")
+
   // Timestamps
   fechaPedido DateTime  @default(now()) @map("fecha_pedido")
   // Lo rellena el webhook del sistema externo (Firebird) al confirmar el cobro,
@@ -489,7 +499,7 @@ model Pedido {
   items          ItemPedido[]
   historial      HistorialPedido[]
   actividades    LogActividad[]
-  revisiones     PedidoRevision[]
+  propuestas     PedidoPropuesta[]
   mensajes       PedidoMensaje[]
   notificaciones Notificacion[]
   mensajeEnviado MensajeBodegueroEnviado?
@@ -551,57 +561,50 @@ model ItemPedido {
   pedido        Pedido               @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
   producto      Producto             @relation(fields: [productoId], references: [id])
   precioCO      PrecioCO?            @relation(fields: [precioCOId], references: [id], onDelete: SetNull)
-  revisionItems PedidoRevisionItem[]
   mensajes      PedidoMensaje[]
 
   @@index([pedidoId, cancelada])
   @@map("items_pedido")
 }
 
-model PedidoRevision {
-  id             Int            @id @default(autoincrement())
-  pedidoId       Int            @map("pedido_id")
-  estadoRevision EstadoRevision @default(PENDIENTE) @map("estado_revision")
-  creadaPorId    Int            @map("creada_por_id")
-  createdAt      DateTime       @default(now()) @map("created_at")
-  aprobadaAt     DateTime?      @map("aprobada_at")
-  aprobadaPorId  Int?           @map("aprobada_por_id")
+// F12 (sep 2026): propuesta de ajuste que bodega envía al cliente cuando
+// faltan productos. Reemplaza el flujo formal de revisión (PedidoRevision)
+// por una negociación vía chat con un modelo verificable server-side.
+//
+// La propuesta se ATA AL PEDIDO, no al bodeguero: si el bodeguero la libera
+// a la cola, la propuesta persiste y la respuesta del cliente se aplica al
+// pedido sin importar quién esté asignado.
+//
+// `items` es un JSON con la propuesta completa (mismo shape que el frontend
+// `lib/propuesta.ts`): array de { itemId, tipo, producto, variante, cantidad,
+// precioUnitario, subtotal, ... }. Se guarda como snapshot para que la
+// propuesta no cambie aunque el pedido/items cambien después.
+model PedidoPropuesta {
+  id        Int             @id @default(autoincrement())
+  pedidoId  Int             @map("pedido_id")
+  estado    EstadoPropuesta @default(PENDIENTE)
+  items     Json            @db.Json
+  total     Decimal         @db.Decimal(12, 2)
+  // Nota libre del bodeguero que acompaña la propuesta (ej. "Sólo hay 2 piezas").
+  nota      String?         @db.Text
+  creadaPorId Int           @map("creada_por_id")
+  enviadaAt DateTime        @default(now()) @map("enviada_at")
+  // Cuándo el cliente respondió (aceptó o rechazó). NULL = aún pendiente.
+  respondidaAt DateTime?    @map("respondida_at")
+  // F12: nota del cliente al responder (ej. motivo del rechazo). Se guarda
+  // aquí para que el bodeguero la vea en el historial de propuestas.
+  notaCliente String?       @map("nota_cliente") @db.Text
+  // Si el admin forzó la aprobación sin respuesta del cliente, se registra aquí.
+  forzadaPorId Int?         @map("forzada_por_id")
+  forzadaAt    DateTime?     @map("forzada_at")
 
   // Relaciones
-  pedido      Pedido               @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
-  creadaPor   Usuario              @relation("RevisionCreador", fields: [creadaPorId], references: [id])
-  aprobadaPor Usuario?             @relation("RevisionAprobador", fields: [aprobadaPorId], references: [id])
-  items       PedidoRevisionItem[]
+  pedido      Pedido   @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  creadaPor   Usuario  @relation("PropuestaCreador", fields: [creadaPorId], references: [id])
+  forzadaPor  Usuario? @relation("PropuestaForzador", fields: [forzadaPorId], references: [id])
 
-  // SIN @unique en pedidoId: la unicidad activa la garantiza la capa de servicio.
-  // Si bodega quiere re-revisar, marca la anterior como RECHAZADA y crea una nueva.
-  @@index([pedidoId, estadoRevision])
-  @@map("pedidos_revisiones")
-}
-
-model PedidoRevisionItem {
-  id                   Int            @id @default(autoincrement())
-  revisionId           Int            @map("revision_id")
-  itemPedidoOriginalId Int            @map("item_pedido_original_id")
-  // Si la propuesta es sustitución total (otro producto/variante):
-  nuevoPrecioCOId      Int?           @map("nuevo_precioco_id")
-  // Si la propuesta es sólo cambiar cantidad (misma variante):
-  nuevaCantidad        Int?           @map("nueva_cantidad")
-  // Siempre: motivo textual
-  motivo               String         @db.Text
-  // Decisión del cliente
-  decision             EstadoDecision @default(PENDIENTE)
-  decidedAt            DateTime?      @map("decided_at")
-  decidedPorId         Int?           @map("decided_por_id")
-
-  // Relaciones
-  revision           PedidoRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
-  itemPedidoOriginal ItemPedido     @relation(fields: [itemPedidoOriginalId], references: [id])
-  nuevoPrecioCO      PrecioCO?      @relation(fields: [nuevoPrecioCOId], references: [id], onDelete: SetNull)
-  decidedPor         Usuario?       @relation("RevisionItemDecisor", fields: [decidedPorId], references: [id])
-
-  @@index([revisionId, decision])
-  @@map("pedidos_revisiones_items")
+  @@index([pedidoId, estado])
+  @@map("pedidos_propuestas")
 }
 
 model PedidoMensaje {
