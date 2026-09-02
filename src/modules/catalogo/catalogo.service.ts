@@ -58,6 +58,14 @@ export class CatalogoService {
       where.producto.categoria = { equals: categoria, mode: 'insensitive' };
     }
 
+    // Filtrar por color a nivel de PRODUCTO (no solo de variante): solo
+    // traer productos que tengan al menos una variante (PrecioCO) de ese
+    // color en la tienda. Sin esto, el colorId solo recortaba las variantes
+    // del include y el catálogo devolvía todos los productos.
+    if (colorId) {
+      where.producto.preciosCO = { some: { tiendaId, colorId } };
+    }
+
     if (busqueda) {
       where.producto.OR = [
         { nombre: { contains: busqueda, mode: 'insensitive' } },
@@ -97,6 +105,7 @@ export class CatalogoService {
                 },
                 select: {
                   id: true,
+                  colorId: true,
                   precio: true,
                   lista1: true,
                   lista2: true,
@@ -145,6 +154,7 @@ export class CatalogoService {
           precioCOId: pco.id,
           corrida: pco.corrida.nombre,
           talla: pco.talla.nombre,
+          colorId: pco.colorId,
           color: pco.color.nombre,
           colorHex: pco.color.hex,
           // F9: mismo criterio que precioBase — usar la lista del cliente.
@@ -298,7 +308,7 @@ export class CatalogoService {
   }
 
   async obtenerFiltrosDisponibles(tiendaId: number) {
-    const [categorias, corridas, colores] = await Promise.all([
+    const [categorias, corridas, colores, precioMax] = await Promise.all([
       this.prisma.producto.groupBy({
         by: ['categoria'],
         where: {
@@ -315,12 +325,24 @@ export class CatalogoService {
         where: { activo: true },
         orderBy: { nombre: 'asc' },
       }),
+      this.prisma.precio.aggregate({
+        _max: { precioBase: true },
+        where: {
+          tiendaId,
+          activo: true,
+          producto: {
+            activo: true,
+            productosTienda: { some: { tiendaId, visible: true } },
+          },
+        },
+      }),
     ]);
 
     return {
       categorias: categorias.map((c) => c.categoria).filter(Boolean),
       corridas,
       colores,
+      precioMaximo: Number(precioMax._max.precioBase ?? 0),
     };
   }
 
