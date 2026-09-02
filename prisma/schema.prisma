@@ -931,3 +931,22 @@ model SyncEventLog {
   @@index([tipo, exitoso, createdAt])
   @@map("sync_event_log")
 }
+
+// Outbox de eventos realtime (Socket.IO). Cada evento que se emite a un room
+// se persiste aquí ANTES de emitir en vivo. Si el proceso muere entre el
+// persist y el emit, la fila queda con `emitidoAt = null` y el worker
+// (RealtimeOutboxWorker) la re-emite al arrancar. `emitidoAt` se setea a now
+// en el flujo normal (ya emitido en vivo), así el worker solo re-emite los
+// huérfanos. Retención: 1h (el worker borra lo más viejo).
+model RealtimeEventOutbox {
+  id        Int      @id @default(autoincrement())
+  room      String   @db.VarChar(100) // 'tienda-1' | 'pedido-5' | 'user-3' | 'admin:all'
+  evento    String   @db.VarChar(60)  // 'pedido.creado', 'pedido.estado', ...
+  payload   Json
+  createdAt DateTime @default(now()) @map("created_at")
+  emitidoAt DateTime? @map("emitido_at") // null = pendiente de re-emitir
+
+  @@index([room, createdAt])
+  @@index([emitidoAt])
+  @@map("realtime_event_outbox")
+}

@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { RealtimeGateway } from './realtime.gateway';
 import { RealtimeService } from './realtime.service';
+import { RealtimeOutboxWorker } from './realtime-outbox.worker';
 
 /**
  * Módulo de tiempo real.
@@ -29,7 +30,7 @@ import { RealtimeService } from './realtime.service';
       }),
     }),
   ],
-  providers: [RealtimeGateway, RealtimeService],
+  providers: [RealtimeGateway, RealtimeService, RealtimeOutboxWorker],
   exports: [RealtimeService],
 })
 export class RealtimeModule {}
