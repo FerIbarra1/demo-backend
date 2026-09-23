@@ -6,11 +6,11 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { StorageService } from '../../imagenes/storage.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
-import { isValidPickupSlot } from '../core/pickup-slot.util';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
 import { UserContext } from '../../../types/pedido.types';
 import {
@@ -37,6 +37,7 @@ export class ClienteService {
     private notifications: NotificationsService,
     private realtime: RealtimeService,
     private state: PedidoStateService,
+    private readonly storage: StorageService,
   ) {}
 
   async crearPedido(
@@ -134,19 +135,7 @@ export class ClienteService {
           : null,
       dejarAdminDecidePaqueteria:
         modoEntregaFinal === ModoEntrega.DOMICILIO && dto.dejarAdminDecidePaqueteria === true,
-      recogerProgramado:
-        modoEntregaFinal === ModoEntrega.RECOGER_TIENDA && dto.recogerProgramado
-          ? new Date(dto.recogerProgramado)
-          : null,
     };
-
-    // Validar que el slot de recogida es válido (defensa en profundidad: el
-    // frontend no debería mandar slots inválidos).
-    if (envioFields.recogerProgramado && !isValidPickupSlot(envioFields.recogerProgramado)) {
-      throw new BadRequestException(
-        'El horario de recogida seleccionado no es válido. Elige otro slot disponible.',
-      );
-    }
 
     const preciosCO = await this.prisma.precioCO.findMany({
       where: {
@@ -346,7 +335,9 @@ export class ClienteService {
       )?.url;
       return {
         ...it,
-        productoImagen: imagenColor ?? it.producto?.imagenPrincipal ?? null,
+        productoImagen: this.storage.resolverImagen(
+          imagenColor ?? it.producto?.imagenPrincipal ?? null,
+        ),
       };
     }) as any;
     return pedido;

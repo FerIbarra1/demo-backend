@@ -13,6 +13,11 @@ export class SurtirJuntosItemDto {
   productoNombre: string;
 
   @ApiProperty({
+    description: 'Código del producto (ej. "C0200"). Para mostrar al bodeguero.',
+  })
+  productoCodigo: string;
+
+  @ApiProperty({
     description: 'Cantidad pedida por el cliente en este pedido.',
   })
   cantidad: number;

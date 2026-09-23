@@ -3,11 +3,15 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from './storage.service';
 import { ListarProductosQueryDto } from './dto/listar-productos-query.dto';
-
-const MAX_IMAGENES_POR_COLOR = 4;
+import { detectarMimeImagen } from './validar-imagen.util';
+import {
+  LIMITE_IMAGEN_BYTES,
+  MAX_IMAGENES_POR_COLOR,
+} from './imagenes.constants';
 
 @Injectable()
 export class ImagenesService {
@@ -60,13 +64,7 @@ export class ImagenesService {
           .filter((c) => !!c)
           .map((c) => ({ id: c!.id, nombre: c!.nombre, hex: c!.hex })),
         // Imágenes agrupadas: general (colorId null) + por color.
-        imagenes: p.imagenesProducto.map((img) => ({
-          id: img.id,
-          url: img.url,
-          colorId: img.colorId,
-          orden: img.orden,
-          esPrincipal: img.esPrincipal,
-        })),
+        imagenes: p.imagenesProducto.map((img) => this.formatearImagen(img)),
         totalImagenes: p.imagenesProducto.length,
       })),
       meta: { total, pagina, limite, totalPaginas: Math.ceil(total / limite) },
@@ -124,32 +122,51 @@ export class ImagenesService {
       }
     }
 
-    // Tope de 4 imágenes por (producto, color).
-    const existentes = await this.prisma.productoImagen.count({
-      where: { productoId, colorId: colorId ?? null },
-    });
-    if (existentes >= MAX_IMAGENES_POR_COLOR) {
-      const etiqueta = colorId ? `para este color` : 'generales';
-      throw new BadRequestException(
-        `Máximo ${MAX_IMAGENES_POR_COLOR} imágenes ${etiqueta} por producto`,
-      );
-    }
-
     const ext = this.extensionDe(file.originalname);
-    const key = `productos/${productoId}/${colorId ? `color-${colorId}` : 'general'}/${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+    const key = `productos/${productoId}/${colorId ? `color-${colorId}` : 'general'}/${randomUUID()}${ext}`;
     const url = await this.storage.subirImagen(file, key);
 
-    const imagen = await this.prisma.productoImagen.create({
-      data: {
-        productoId,
-        colorId: colorId ?? null,
-        url,
-        orden: existentes,
-        // La primera imagen (general) se marca como principal si no hay ninguna.
-        esPrincipal:
-          (await this.prisma.productoImagen.count({ where: { productoId } })) === 0,
-      },
-    });
+    let imagen;
+    try {
+      // El tope se valida DENTRO de la transacción: contarlo antes y crear
+      // después permite que dos subidas concurrentes lo rebasen.
+      imagen = await this.prisma.$transaction(async (tx) => {
+        const existentes = await tx.productoImagen.count({
+          where: { productoId, colorId: colorId ?? null },
+        });
+        if (existentes >= MAX_IMAGENES_POR_COLOR) {
+          const etiqueta = colorId ? `para este color` : 'generales';
+          throw new BadRequestException(
+            `Máximo ${MAX_IMAGENES_POR_COLOR} imágenes ${etiqueta} por producto`,
+          );
+        }
+
+        // `orden` se calcula sobre el máximo existente, no sobre el conteo:
+        // borrar una imagen intermedia deja un hueco y el conteo lo reutiliza.
+        const ultima = await tx.productoImagen.findFirst({
+          where: { productoId, colorId: colorId ?? null },
+          orderBy: { orden: 'desc' },
+          select: { orden: true },
+        });
+
+        return tx.productoImagen.create({
+          data: {
+            productoId,
+            colorId: colorId ?? null,
+            url,
+            orden: (ultima?.orden ?? -1) + 1,
+            // La primera imagen del producto se marca como principal.
+            esPrincipal:
+              (await tx.productoImagen.count({ where: { productoId } })) === 0,
+          },
+        });
+      });
+    } catch (err) {
+      // El objeto ya está en S3: sin esta compensación quedaría huérfano
+      // (ocupando espacio y contando en la factura) para siempre.
+      await this.storage.eliminarImagen(url);
+      throw err;
+    }
 
     await this.actualizarCamposLegacy(productoId);
 
@@ -165,22 +182,43 @@ export class ImagenesService {
     }
     const eraPrincipal = imagen.esPrincipal;
 
-    await this.prisma.productoImagen.delete({ where: { id: imagenId } });
+    // El objeto se borra PRIMERO: si falla el borrado en BD, el peor caso es un
+    // objeto huérfano (recuperable con el job de reconciliación). Al revés, un
+    // fallo de S3 dejaría una fila apuntando a un objeto inexistente.
     await this.storage.eliminarImagen(imagen.url);
 
-    // Si se borró la principal, promover otra.
-    if (eraPrincipal) {
-      const siguiente = await this.prisma.productoImagen.findFirst({
-        where: { productoId },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.productoImagen.delete({ where: { id: imagenId } });
+
+      // Renumerar el resto: sin esto queda un hueco en `orden` y el siguiente
+      // upload puede reutilizar un valor ya tomado.
+      const restantes = await tx.productoImagen.findMany({
+        where: { productoId, colorId: imagen.colorId },
         orderBy: { orden: 'asc' },
+        select: { id: true, orden: true },
       });
-      if (siguiente) {
-        await this.prisma.productoImagen.update({
-          where: { id: siguiente.id },
-          data: { esPrincipal: true },
+      for (const [i, r] of restantes.entries()) {
+        if (r.orden === i) continue;
+        await tx.productoImagen.update({
+          where: { id: r.id },
+          data: { orden: i },
         });
       }
-    }
+
+      // Si se borró la principal, promover otra.
+      if (eraPrincipal) {
+        const siguiente = await tx.productoImagen.findFirst({
+          where: { productoId },
+          orderBy: { orden: 'asc' },
+        });
+        if (siguiente) {
+          await tx.productoImagen.update({
+            where: { id: siguiente.id },
+            data: { esPrincipal: true },
+          });
+        }
+      }
+    });
 
     await this.actualizarCamposLegacy(productoId);
     return { mensaje: 'Imagen eliminada' };
@@ -212,16 +250,21 @@ export class ImagenesService {
   // ---------------------------------------------------------------
 
   private validarArchivo(file: Express.Multer.File) {
-    const permitidos = ['image/jpeg', 'image/png', 'image/webp'];
-    if (!permitidos.includes(file.mimetype)) {
-      throw new BadRequestException(
-        'Formato no permitido. Usa JPG, PNG o WEBP.',
-      );
-    }
-    const maxBytes = 5 * 1024 * 1024; // 5 MB
-    if (file.size > maxBytes) {
+    if (file.size > LIMITE_IMAGEN_BYTES) {
       throw new BadRequestException('La imagen supera el tamaño máximo de 5 MB');
     }
+    // El `mimetype` lo declara el cliente y es falsificable: un .svg o .html
+    // renombrado llega como image/jpeg. Se valida el contenido real por firma
+    // binaria, porque ese valor se usa como ContentType en un bucket público.
+    const mimeReal = detectarMimeImagen(file.buffer);
+    if (!mimeReal) {
+      throw new BadRequestException(
+        'El archivo no es una imagen válida. Usa JPG, PNG o WEBP.',
+      );
+    }
+    // Se normaliza para que el ContentType que se envía a S3 sea el detectado,
+    // no el declarado por el cliente.
+    file.mimetype = mimeReal;
   }
 
   private extensionDe(originalname: string): string {
@@ -271,7 +314,8 @@ export class ImagenesService {
   private formatearImagen(imagen: any) {
     return {
       id: imagen.id,
-      url: imagen.url,
+      // La BD guarda la key; el panel admin necesita una URL para el <img>.
+      url: this.storage.resolverImagen(imagen.url),
       colorId: imagen.colorId,
       orden: imagen.orden,
       esPrincipal: imagen.esPrincipal,

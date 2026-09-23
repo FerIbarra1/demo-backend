@@ -1,14 +1,14 @@
--- CreateEnum
-CREATE TYPE "RolUsuario" AS ENUM ('CLIENTE', 'BODEGA', 'BODEGA_MONITOR', 'CAJERO', 'CAJERO_MONITOR', 'MOSTRADOR', 'ADMIN');
+-- CreateSchema
+CREATE SCHEMA IF NOT EXISTS "public";
 
 -- CreateEnum
-CREATE TYPE "EstadoPedido" AS ENUM ('PENDING_REVIEW', 'REVIEWING', 'WAITING_CUSTOMER_APPROVAL', 'APPROVED', 'PENDING_PAID', 'PAID', 'SHIPPED', 'COMPLETED', 'CANCELLED');
+CREATE TYPE "RolUsuario" AS ENUM ('CLIENTE', 'BODEGA', 'BODEGA_MONITOR', 'CAJERO', 'CAJERO_MONITOR', 'MOSTRADOR', 'VENTAS', 'ADMIN');
 
 -- CreateEnum
-CREATE TYPE "EstadoRevision" AS ENUM ('PENDIENTE', 'APROBADA', 'RECHAZADA');
+CREATE TYPE "EstadoPedido" AS ENUM ('PENDING_REVIEW', 'REVIEWING', 'WAITING_CUSTOMER_APPROVAL', 'EN_ASESORIA', 'PENDING_PAID', 'PAID', 'SHIPPED', 'COMPLETED', 'CANCELLED');
 
 -- CreateEnum
-CREATE TYPE "EstadoDecision" AS ENUM ('PENDIENTE', 'ACEPTADO', 'RECHAZADO');
+CREATE TYPE "EstadoPropuesta" AS ENUM ('PENDIENTE', 'ACEPTADA', 'RECHAZADA', 'SUPERADA');
 
 -- CreateEnum
 CREATE TYPE "CanalOrigen" AS ENUM ('WEB', 'KIOSKO');
@@ -23,10 +23,13 @@ CREATE TYPE "Paqueteria" AS ENUM ('ALBATROS', 'TUFESA', 'ESTAFETA', 'DHL', 'FEDE
 CREATE TYPE "CanalNotificacion" AS ENUM ('EMAIL');
 
 -- CreateEnum
-CREATE TYPE "TipoNotificacion" AS ENUM ('PEDIDO_RECIBIDO', 'REVISION_PROPUESTA', 'REVISION_APROBADA', 'REVISION_RECHAZADA', 'PAGO_CONFIRMADO', 'ENVIADO', 'ENTREGADO', 'CANCELADO', 'MENSAJE_BODEGUERO', 'RESET_PASSWORD', 'BIENVENIDA');
+CREATE TYPE "TipoNotificacion" AS ENUM ('PEDIDO_RECIBIDO', 'REVISION_PROPUESTA', 'REVISION_APROBADA', 'REVISION_RECHAZADA', 'PAGO_CONFIRMADO', 'ENVIADO', 'ENTREGADO', 'CANCELADO', 'MENSAJE_BODEGUERO', 'RESET_PASSWORD', 'BIENVENIDA', 'ASESOR_SOLICITADO', 'PROPUESTA_VENTAS');
 
 -- CreateEnum
 CREATE TYPE "EstadoSurtido" AS ENUM ('PENDIENTE', 'PARCIAL', 'COMPLETO', 'NO_DISPONIBLE');
+
+-- CreateEnum
+CREATE TYPE "EstadoReposicion" AS ENUM ('PENDIENTE', 'REPUESTO');
 
 -- CreateEnum
 CREATE TYPE "EstadoKiosko" AS ENUM ('ACTIVO', 'INACTIVO');
@@ -63,6 +66,7 @@ CREATE TABLE "usuarios" (
     "last_login" TIMESTAMP(3),
     "ultimo_heartbeat" TIMESTAMP(3),
     "lista_precio_codigo" VARCHAR(2),
+    "deleted_at" TIMESTAMP(3),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL,
 
@@ -111,6 +115,20 @@ CREATE TABLE "productos" (
     "updated_at" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "productos_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "productos_imagenes" (
+    "id" SERIAL NOT NULL,
+    "producto_id" INTEGER NOT NULL,
+    "color_id" INTEGER,
+    "url" VARCHAR(500) NOT NULL,
+    "orden" INTEGER NOT NULL DEFAULT 0,
+    "es_principal" BOOLEAN NOT NULL DEFAULT false,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "productos_imagenes_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -216,7 +234,6 @@ CREATE TABLE "pedidos" (
     "shipping_codigo_postal" VARCHAR(10),
     "shipping_paqueteria" "Paqueteria",
     "dejar_admin_decide_paqueteria" BOOLEAN NOT NULL DEFAULT false,
-    "recoger_programado" TIMESTAMP(3),
     "subtotal" DECIMAL(12,2) NOT NULL,
     "descuento" DECIMAL(12,2) NOT NULL DEFAULT 0,
     "impuestos" DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -226,6 +243,13 @@ CREATE TABLE "pedidos" (
     "asignado_at" TIMESTAMP(3),
     "cajero_asignado_id" INTEGER,
     "cajero_asignado_at" TIMESTAMP(3),
+    "tiempo_atencion_bodega_ms" INTEGER NOT NULL DEFAULT 0,
+    "bodega_turno_desde_at" TIMESTAMP(3),
+    "asesor_solicitado_at" TIMESTAMP(3),
+    "asesor_solicitud_nota" TEXT,
+    "cliente_ultimo_mensaje_entregado_id" INTEGER,
+    "cliente_ultimo_mensaje_leido_id" INTEGER,
+    "tienda_ultimo_mensaje_leido_id" INTEGER,
     "fecha_pedido" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "fecha_pago" TIMESTAMP(3),
 
@@ -259,31 +283,23 @@ CREATE TABLE "items_pedido" (
 );
 
 -- CreateTable
-CREATE TABLE "pedidos_revisiones" (
+CREATE TABLE "pedidos_propuestas" (
     "id" SERIAL NOT NULL,
     "pedido_id" INTEGER NOT NULL,
-    "estado_revision" "EstadoRevision" NOT NULL DEFAULT 'PENDIENTE',
+    "estado" "EstadoPropuesta" NOT NULL DEFAULT 'PENDIENTE',
+    "items" JSON NOT NULL,
+    "total" DECIMAL(12,2) NOT NULL,
+    "nota" TEXT,
     "creada_por_id" INTEGER NOT NULL,
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "aprobada_at" TIMESTAMP(3),
-    "aprobada_por_id" INTEGER,
+    "creada_por_rol" "RolUsuario" NOT NULL DEFAULT 'BODEGA',
+    "enviada_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "respondida_at" TIMESTAMP(3),
+    "consumida_at" TIMESTAMP(3),
+    "nota_cliente" TEXT,
+    "forzada_por_id" INTEGER,
+    "forzada_at" TIMESTAMP(3),
 
-    CONSTRAINT "pedidos_revisiones_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "pedidos_revisiones_items" (
-    "id" SERIAL NOT NULL,
-    "revision_id" INTEGER NOT NULL,
-    "item_pedido_original_id" INTEGER NOT NULL,
-    "nuevo_precioco_id" INTEGER,
-    "nueva_cantidad" INTEGER,
-    "motivo" TEXT NOT NULL,
-    "decision" "EstadoDecision" NOT NULL DEFAULT 'PENDIENTE',
-    "decided_at" TIMESTAMP(3),
-    "decided_por_id" INTEGER,
-
-    CONSTRAINT "pedidos_revisiones_items_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "pedidos_propuestas_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -296,6 +312,7 @@ CREATE TABLE "pedidos_mensajes" (
     "contenido" TEXT NOT NULL,
     "visible_para_cliente" BOOLEAN NOT NULL DEFAULT true,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "adjunto" JSONB,
 
     CONSTRAINT "pedidos_mensajes_pkey" PRIMARY KEY ("id")
 );
@@ -459,6 +476,20 @@ CREATE TABLE "pedidos_pendientes_envio" (
 );
 
 -- CreateTable
+CREATE TABLE "pedidos_reposicion" (
+    "id" SERIAL NOT NULL,
+    "pedido_id" INTEGER NOT NULL,
+    "estado" "EstadoReposicion" NOT NULL DEFAULT 'PENDIENTE',
+    "items" JSON NOT NULL,
+    "motivo" TEXT,
+    "creada_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "repuesto_at" TIMESTAMP(3),
+    "repuesto_por_id" INTEGER,
+
+    CONSTRAINT "pedidos_reposicion_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "sync_event_inbox" (
     "id" SERIAL NOT NULL,
     "event_id" VARCHAR(160) NOT NULL,
@@ -494,6 +525,18 @@ CREATE TABLE "sync_event_log" (
     CONSTRAINT "sync_event_log_pkey" PRIMARY KEY ("id")
 );
 
+-- CreateTable
+CREATE TABLE "realtime_event_outbox" (
+    "id" SERIAL NOT NULL,
+    "room" VARCHAR(100) NOT NULL,
+    "evento" VARCHAR(60) NOT NULL,
+    "payload" JSONB NOT NULL,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "emitido_at" TIMESTAMP(3),
+
+    CONSTRAINT "realtime_event_outbox_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "tiendas_external_id_key" ON "tiendas"("external_id");
 
@@ -517,6 +560,12 @@ CREATE UNIQUE INDEX "ventanillas_tienda_id_numero_key" ON "ventanillas"("tienda_
 
 -- CreateIndex
 CREATE UNIQUE INDEX "productos_codigo_key" ON "productos"("codigo");
+
+-- CreateIndex
+CREATE INDEX "productos_imagenes_producto_id_color_id_idx" ON "productos_imagenes"("producto_id", "color_id");
+
+-- CreateIndex
+CREATE INDEX "productos_imagenes_producto_id_es_principal_idx" ON "productos_imagenes"("producto_id", "es_principal");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "productos_tienda_producto_id_tienda_id_key" ON "productos_tienda"("producto_id", "tienda_id");
@@ -564,10 +613,7 @@ CREATE INDEX "pedidos_kiosko_id_idx" ON "pedidos"("kiosko_id");
 CREATE INDEX "items_pedido_pedido_id_cancelada_idx" ON "items_pedido"("pedido_id", "cancelada");
 
 -- CreateIndex
-CREATE INDEX "pedidos_revisiones_pedido_id_estado_revision_idx" ON "pedidos_revisiones"("pedido_id", "estado_revision");
-
--- CreateIndex
-CREATE INDEX "pedidos_revisiones_items_revision_id_decision_idx" ON "pedidos_revisiones_items"("revision_id", "decision");
+CREATE INDEX "pedidos_propuestas_pedido_id_estado_idx" ON "pedidos_propuestas"("pedido_id", "estado");
 
 -- CreateIndex
 CREATE INDEX "pedidos_mensajes_pedido_id_created_at_idx" ON "pedidos_mensajes"("pedido_id", "created_at");
@@ -651,6 +697,12 @@ CREATE INDEX "pedidos_pendientes_envio_claim_idx" ON "pedidos_pendientes_envio"(
 CREATE INDEX "pedidos_pendientes_envio_lease_token_idx" ON "pedidos_pendientes_envio"("lease_token");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "pedidos_reposicion_pedido_id_key" ON "pedidos_reposicion"("pedido_id");
+
+-- CreateIndex
+CREATE INDEX "pedidos_reposicion_estado_creada_at_idx" ON "pedidos_reposicion"("estado", "creada_at");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "sync_event_inbox_event_id_key" ON "sync_event_inbox"("event_id");
 
 -- CreateIndex
@@ -668,6 +720,12 @@ CREATE INDEX "sync_event_log_tienda_id_created_at_idx" ON "sync_event_log"("tien
 -- CreateIndex
 CREATE INDEX "sync_event_log_tipo_exitoso_created_at_idx" ON "sync_event_log"("tipo", "exitoso", "created_at");
 
+-- CreateIndex
+CREATE INDEX "realtime_event_outbox_room_created_at_idx" ON "realtime_event_outbox"("room", "created_at");
+
+-- CreateIndex
+CREATE INDEX "realtime_event_outbox_emitido_at_idx" ON "realtime_event_outbox"("emitido_at");
+
 -- AddForeignKey
 ALTER TABLE "usuarios" ADD CONSTRAINT "usuarios_tienda_id_fkey" FOREIGN KEY ("tienda_id") REFERENCES "tiendas"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
@@ -682,6 +740,12 @@ ALTER TABLE "ventanillas" ADD CONSTRAINT "ventanillas_tienda_id_fkey" FOREIGN KE
 
 -- AddForeignKey
 ALTER TABLE "ventanillas" ADD CONSTRAINT "ventanillas_cajero_id_fkey" FOREIGN KEY ("cajero_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "productos_imagenes" ADD CONSTRAINT "productos_imagenes_producto_id_fkey" FOREIGN KEY ("producto_id") REFERENCES "productos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "productos_imagenes" ADD CONSTRAINT "productos_imagenes_color_id_fkey" FOREIGN KEY ("color_id") REFERENCES "colores"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "productos_tienda" ADD CONSTRAINT "productos_tienda_producto_id_fkey" FOREIGN KEY ("producto_id") REFERENCES "productos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -741,25 +805,13 @@ ALTER TABLE "items_pedido" ADD CONSTRAINT "items_pedido_producto_id_fkey" FOREIG
 ALTER TABLE "items_pedido" ADD CONSTRAINT "items_pedido_precioco_id_fkey" FOREIGN KEY ("precioco_id") REFERENCES "preciosco"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "pedidos_revisiones" ADD CONSTRAINT "pedidos_revisiones_pedido_id_fkey" FOREIGN KEY ("pedido_id") REFERENCES "pedidos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "pedidos_propuestas" ADD CONSTRAINT "pedidos_propuestas_pedido_id_fkey" FOREIGN KEY ("pedido_id") REFERENCES "pedidos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "pedidos_revisiones" ADD CONSTRAINT "pedidos_revisiones_creada_por_id_fkey" FOREIGN KEY ("creada_por_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "pedidos_propuestas" ADD CONSTRAINT "pedidos_propuestas_creada_por_id_fkey" FOREIGN KEY ("creada_por_id") REFERENCES "usuarios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "pedidos_revisiones" ADD CONSTRAINT "pedidos_revisiones_aprobada_por_id_fkey" FOREIGN KEY ("aprobada_por_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "pedidos_revisiones_items" ADD CONSTRAINT "pedidos_revisiones_items_revision_id_fkey" FOREIGN KEY ("revision_id") REFERENCES "pedidos_revisiones"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "pedidos_revisiones_items" ADD CONSTRAINT "pedidos_revisiones_items_item_pedido_original_id_fkey" FOREIGN KEY ("item_pedido_original_id") REFERENCES "items_pedido"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "pedidos_revisiones_items" ADD CONSTRAINT "pedidos_revisiones_items_nuevo_precioco_id_fkey" FOREIGN KEY ("nuevo_precioco_id") REFERENCES "preciosco"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey
-ALTER TABLE "pedidos_revisiones_items" ADD CONSTRAINT "pedidos_revisiones_items_decided_por_id_fkey" FOREIGN KEY ("decided_por_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "pedidos_propuestas" ADD CONSTRAINT "pedidos_propuestas_forzada_por_id_fkey" FOREIGN KEY ("forzada_por_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "pedidos_mensajes" ADD CONSTRAINT "pedidos_mensajes_pedido_id_fkey" FOREIGN KEY ("pedido_id") REFERENCES "pedidos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -816,4 +868,11 @@ ALTER TABLE "sync_checkpoints" ADD CONSTRAINT "sync_checkpoints_tienda_id_fkey" 
 ALTER TABLE "pedidos_pendientes_envio" ADD CONSTRAINT "pedidos_pendientes_envio_pedido_id_fkey" FOREIGN KEY ("pedido_id") REFERENCES "pedidos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "pedidos_reposicion" ADD CONSTRAINT "pedidos_reposicion_pedido_id_fkey" FOREIGN KEY ("pedido_id") REFERENCES "pedidos"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "pedidos_reposicion" ADD CONSTRAINT "pedidos_reposicion_repuesto_por_id_fkey" FOREIGN KEY ("repuesto_por_id") REFERENCES "usuarios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "sync_event_inbox" ADD CONSTRAINT "sync_event_inbox_tienda_id_fkey" FOREIGN KEY ("tienda_id") REFERENCES "tiendas"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+

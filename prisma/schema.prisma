@@ -3,8 +3,13 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  // directUrl sólo se usa para migraciones/DDL. En Neon apunta al endpoint
+  // SIN pooler (PgBouncer no soporta DDL); en local es idéntico a url.
+  // Prisma EXIGE que la variable exista aunque su valor sea igual a url:
+  // si falta, el CLI aborta con "Environment variable not found".
+  // Ambas deben apuntar a la MISMA base — ver .env.
   directUrl = env("DIRECT_DATABASE_URL")
 }
 
@@ -17,6 +22,11 @@ enum RolUsuario {
   CAJERO
   CAJERO_MONITOR
   MOSTRADOR
+  // F13 (sep 2026): asesor de ventas. Uno por tienda, SIN asignación 1:1 —
+  // ve la cola de pedidos que el cliente escaló desde una propuesta de bodega.
+  // Tiene el chat con el cliente (el bodeguero ya no lo tiene) y arma la
+  // contrapropuesta de productos, cantidades y variantes.
+  VENTAS
   ADMIN
 }
 
@@ -24,6 +34,10 @@ enum EstadoPedido {
   PENDING_REVIEW
   REVIEWING
   WAITING_CUSTOMER_APPROVAL
+  // F13 (sep 2026): el cliente pidió un asesor de ventas, o rechazó la
+  // propuesta del vendedor y quiere re-negociar. El pedido sale de la cola
+  // de bodega y entra a la cola de VENTAS de su tienda.
+  EN_ASESORIA
   PENDING_PAID
   PAID
   SHIPPED
@@ -33,12 +47,21 @@ enum EstadoPedido {
 
 // F12 (sep 2026): estado de una propuesta de ajuste que bodega envía al
 // cliente cuando faltan productos. El pedido pasa a WAITING_CUSTOMER_APPROVAL
-// mientras la propuesta está PENDIENTE. Al ACEPTAR, bodega aplica los cambios
-// y libera a PENDING_PAID. Al RECHAZAR, vuelve a REVIEWING para re-trabajar.
+// mientras la propuesta está PENDIENTE.
+//
+// F13 (sep 2026): la semántica de la respuesta cambió. Ya no vuelve a
+// REVIEWING a que el bodeguero confirme:
+//   - ACEPTAR  → el pedido pasa DIRECTO a PENDING_PAID (bodega ya verificó
+//                físicamente lo que propuso, no hay nada que confirmar).
+//   - RECHAZAR → el pedido se CANCELA y sus productos entran a la lista de
+//                reposición de bodega.
+//   - SUPERADA → el cliente pidió un asesor de ventas, así que esta propuesta
+//                (de bodega) queda sin efecto y el pedido pasa a EN_ASESORIA.
 enum EstadoPropuesta {
   PENDIENTE
   ACEPTADA
   RECHAZADA
+  SUPERADA
 }
 
 enum CanalOrigen {
@@ -49,8 +72,9 @@ enum CanalOrigen {
 // F8 (jul 2026): modo de entrega del pedido. Determina qué datos se requieren
 // al crearlo desde el checkout y cómo lo procesa bodega/mostrador.
 // - DOMICILIO: requiere dirección + colonia + CP + paquetería (o "admin decide").
-// - RECOGER_TIENDA: requiere fecha+hora del slot de recogida (helper isValidPickupSlot).
-// - KIOSKO: siempre recoger en tienda, sin horario. El canalOrigen debe ser KIOSKO.
+// - RECOGER_TIENDA: el cliente recoge en tienda. Sin fecha ni hora programada
+//   (se eliminaron en sep 2026: el cliente llega cuando puede).
+// - KIOSKO: siempre recoger en tienda. El canalOrigen debe ser KIOSKO.
 enum ModoEntrega {
   DOMICILIO
   RECOGER_TIENDA
@@ -85,6 +109,11 @@ enum TipoNotificacion {
   MENSAJE_BODEGUERO
   RESET_PASSWORD
   BIENVENIDA
+  // F13 (sep 2026): el cliente pidió un asesor de ventas. Se manda al cliente
+  // (confirmación de que alguien lo contactará) y al equipo de ventas.
+  ASESOR_SOLICITADO
+  // F13: el asesor de ventas envió una contrapropuesta al cliente.
+  PROPUESTA_VENTAS
 }
 
 enum EstadoSurtido {
@@ -92,6 +121,16 @@ enum EstadoSurtido {
   PARCIAL // Se surtió menos de lo pedido (pero algo sí)
   COMPLETO // Se surtió todo lo pedido
   NO_DISPONIBLE // No se pudo surtir nada
+}
+
+// F13 (sep 2026): estado de la lista de reposición de bodega. Cuando el
+// cliente rechaza una propuesta, los productos del pedido tienen que volver
+// físicamente al anaquel. Como el modelo B2B no maneja inventario (el modelo
+// Stock se eliminó — ver comentario más abajo), esto es un AVISO OPERATIVO
+// con confirmación humana, no un contador que se suma.
+enum EstadoReposicion {
+  PENDIENTE // Bodega todavía no ha repuesto la mercancía
+  REPUESTO // Bodega confirmó que los productos volvieron al anaquel
 }
 
 enum EstadoKiosko {
@@ -173,6 +212,9 @@ model Usuario {
   actividades         LogActividad[]
   propuestasCreadas   PedidoPropuesta[]    @relation("PropuestaCreador")
   propuestasForzadas  PedidoPropuesta[]    @relation("PropuestaForzador")
+  // F13 (sep 2026): bodeguero que confirmó que la mercancía de un pedido
+  // cancelado volvió al anaquel.
+  reposicionesRepuestas PedidoReposicion[] @relation("ReposicionReponedor")
   mensajes            PedidoMensaje[]
   favoritos           Favorito[]
   kioskosActivados    Kiosko[]             @relation("KioskoActivador")
@@ -444,10 +486,6 @@ model Pedido {
   // dejarAdminDecidePaqueteria=true y este campo queda NULL.
   shippingPaqueteria         Paqueteria? @map("shipping_paqueteria")
   dejarAdminDecidePaqueteria Boolean     @default(false) @map("dejar_admin_decide_paqueteria")
-  // F8 (jul 2026): fecha+hora exactas en que el cliente pasará a recoger el
-  // pedido. Sólo aplica a modoEntrega=RECOGER_TIENDA. KIOSKO no usa este
-  // campo. Validado contra isValidPickupSlot en el service.
-  recogerProgramado          DateTime?   @map("recoger_programado")
 
   // Totales
   subtotal  Decimal @db.Decimal(12, 2)
@@ -484,6 +522,30 @@ model Pedido {
   tiempoAtencionBodegaMs Int       @default(0) @map("tiempo_atencion_bodega_ms")
   bodegaTurnoDesdeAt     DateTime? @map("bodega_turno_desde_at")
 
+  // F13 (sep 2026): cuándo el cliente pidió un asesor de ventas desde una
+  // propuesta de bodega. NULL = nunca lo pidió. El pedido pasa a EN_ASESORIA
+  // y entra a la cola de VENTAS de su tienda (que es 1 por tienda, sin
+  // asignación 1:1 — no hay vendedorAsignadoId).
+  asesorSolicitadoAt DateTime? @map("asesor_solicitado_at")
+  // F13: nota libre del cliente al pedir asesor (qué quiere negociar).
+  asesorSolicitudNota String?  @map("asesor_solicitud_nota") @db.Text
+
+  // F15 (sep 2026): marcas de agua de lectura del chat (modelo WhatsApp/Telegram).
+  //   * Por LADO, no por usuario (hay UN asesor por tienda, así que "tienda leyó" es la
+  //     unidad correcta; si algún día hay varios asesores por tienda, migrar a una tabla
+  //     PedidoChatLectura con (userId, pedidoId, ultimoMensajeLeidoId)).
+  //   * Por ID de mensaje, no por timestamp: id es autoincrement monótono y clock-free;
+  //     timestamp(3) tiene colisiones de ms y deriva entre instancias. Comparar
+  //     `m.id <= watermark` es O(1) y estable sin importar el reloj.
+  //
+  // cliente_ultimo_mensaje_entregado_id: el cliente recibió el último eco del socket.
+  //   No se persiste via REST; el cliente lo bumpea al recibir el eco, idempotente.
+  // cliente_ultimo_mensaje_leido_id: el cliente abrió el detalle con foco, persistido via REST.
+  // tienda_ultimo_mensaje_leido_id: alguien del lado tienda abrió el detalle con foco.
+  clienteUltimoMensajeEntregadoId Int? @map("cliente_ultimo_mensaje_entregado_id")
+  clienteUltimoMensajeLeidoId     Int? @map("cliente_ultimo_mensaje_leido_id")
+  tiendaUltimoMensajeLeidoId      Int? @map("tienda_ultimo_mensaje_leido_id")
+
   // Timestamps
   fechaPedido DateTime  @default(now()) @map("fecha_pedido")
   // Lo rellena el webhook del sistema externo (Firebird) al confirmar el cobro,
@@ -505,6 +567,9 @@ model Pedido {
   mensajeEnviado MensajeBodegueroEnviado?
   // F9 (ago 2026): cola de envío hacia Firebird. 1:1 con Pedido.
   pendienteEnvio PedidoPendienteEnvio?
+  // F13 (sep 2026): lista de reposición. 1:1 con Pedido, sólo existe si el
+  // pedido se canceló por rechazo del cliente (los productos vuelven al anaquel).
+  reposicion     PedidoReposicion?
 
   @@index([tiendaId, estado])
   @@index([usuarioId])
@@ -579,6 +644,11 @@ model ItemPedido {
 // `lib/propuesta.ts`): array de { itemId, tipo, producto, variante, cantidad,
 // precioUnitario, subtotal, ... }. Se guarda como snapshot para que la
 // propuesta no cambie aunque el pedido/items cambien después.
+//
+// F13 (sep 2026): la propuesta puede venir de BODEGA (solo hay todo/menos/no
+// hay) o de VENTAS (puede cambiar productos, cantidades y variantes). Las
+// decisiones legales del cliente dependen del origen — ver
+// `creadaPorRol` y `PropuestaService`.
 model PedidoPropuesta {
   id        Int             @id @default(autoincrement())
   pedidoId  Int             @map("pedido_id")
@@ -588,9 +658,19 @@ model PedidoPropuesta {
   // Nota libre del bodeguero que acompaña la propuesta (ej. "Sólo hay 2 piezas").
   nota      String?         @db.Text
   creadaPorId Int           @map("creada_por_id")
+  // F13: snapshot del rol del autor (mismo patrón que PedidoMensaje.autorRol).
+  // Determina qué decisiones puede tomar el cliente: una propuesta de BODEGA
+  // admite CONTACTAR_ASESOR; una de VENTAS admite CANCELAR_PEDIDO.
+  creadaPorRol RolUsuario   @default(BODEGA) @map("creada_por_rol")
   enviadaAt DateTime        @default(now()) @map("enviada_at")
   // Cuándo el cliente respondió (aceptó o rechazó). NULL = aún pendiente.
   respondidaAt DateTime?    @map("respondida_at")
+  // F13 (sep 2026): cuándo bodega CONSUMIÓ esta propuesta aceptada al cerrar
+  // el surtido. Sin esto, una propuesta ACEPTADA en la ronda 1 autorizaría
+  // faltantes de la ronda 2 sin que el cliente los haya aprobado (el bug de
+  // loop: `confirmarSurtido` busca la última ACEPTADA sin importar si ya se
+  // aplicó). `confirmarSurtido` exige `consumidaAt IS NULL`.
+  consumidaAt DateTime?     @map("consumida_at")
   // F12: nota del cliente al responder (ej. motivo del rechazo). Se guarda
   // aquí para que el bodeguero la vea en el historial de propuestas.
   notaCliente String?       @map("nota_cliente") @db.Text
@@ -603,6 +683,11 @@ model PedidoPropuesta {
   creadaPor   Usuario  @relation("PropuestaCreador", fields: [creadaPorId], references: [id])
   forzadaPor  Usuario? @relation("PropuestaForzador", fields: [forzadaPorId], references: [id])
 
+  // F13: índice único PARCIAL sobre (pedidoId) WHERE estado = 'PENDIENTE'.
+  // No se puede declarar en Prisma (no soporta índices parciales) — vive en
+  // la migración SQL. Cierra la carrera del "no apilar PENDIENTES": ahora que
+  // BODEGA y VENTAS pueden proponer sobre el mismo pedido, dos envíos
+  // concurrentes crearían dos PENDIENTES y la segunda quedaría zombi.
   @@index([pedidoId, estado])
   @@map("pedidos_propuestas")
 }
@@ -616,6 +701,14 @@ model PedidoMensaje {
   contenido          String     @db.Text
   visibleParaCliente Boolean    @default(true) @map("visible_para_cliente")
   createdAt          DateTime   @default(now()) @map("created_at")
+  // F13 (sep 2026): adjuntos del mensaje. Modelo discriminado por `tipo`:
+  // - { tipo: 'propuesta', propuestaId: number } para mensajes que viajan
+  //   junto a una propuesta (estilo WhatsApp/Airbnb).
+  // La columna es JSONB sin CHECK para no romper migraciones futuras; la
+  // validación del discriminador vive en el DTO del backend.
+  // Sin @db.Json a propósito: el default de Prisma en PostgreSQL es jsonb,
+  // que es lo que la columna realmente es (y lo deseable: indexable).
+  adjunto            Json?      @map("adjunto")
 
   // Relaciones
   pedido         Pedido                    @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
@@ -888,6 +981,41 @@ model PedidoPendienteEnvio {
   @@map("pedidos_pendientes_envio")
 }
 
+// F13 (sep 2026): lista de reposición de bodega.
+//
+// Cuando el cliente RECHAZA una propuesta, el pedido se cancela y los
+// productos que bodega ya había apartado tienen que volver físicamente al
+// anaquel. Como el modelo B2B NO maneja inventario (el modelo Stock se
+// eliminó en el refactor B2B — ver el comentario sobre PrecioCO), esto NO es
+// un contador que se suma: es una lista de trabajo para bodega con
+// confirmación humana.
+//
+// 1:1 con Pedido (pedidoId es @unique). Sólo existe si el pedido se canceló
+// por rechazo del cliente; una cancelación desde Firebird (SWCANCEL) no la
+// crea, porque en ese caso el ERP ya sabe que el pedido murió.
+model PedidoReposicion {
+  id        Int              @id @default(autoincrement())
+  pedidoId  Int              @unique @map("pedido_id")
+  estado    EstadoReposicion @default(PENDIENTE)
+  // Snapshot de los items a reponer (mismo shape que ItemPedido relevante:
+  // productoNombre, productoCodigo, tallaNombre, colorNombre, corridaNombre,
+  // cantidad). Se guarda como snapshot para que la lista no cambie aunque el
+  // pedido o sus items se modifiquen después.
+  items     Json             @db.Json
+  // Por qué se canceló (texto del cliente al rechazar, o motivo del sistema).
+  motivo    String?          @db.Text
+  creadaAt  DateTime         @default(now()) @map("creada_at")
+  repuestoAt   DateTime?     @map("repuesto_at")
+  repuestoPorId Int?         @map("repuesto_por_id")
+
+  // Relaciones
+  pedido      Pedido   @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  repuestoPor Usuario? @relation("ReposicionReponedor", fields: [repuestoPorId], references: [id], onDelete: SetNull)
+
+  @@index([estado, creadaAt])
+  @@map("pedidos_reposicion")
+}
+
 // Auditoría bidireccional: cada evento de sync (cambio procesado, error,
 // ack, heartbeat) deja un rastro para debugging desde panel admin.
 model SyncEventInbox {
@@ -952,4 +1080,21 @@ model RealtimeEventOutbox {
   @@index([room, createdAt])
   @@index([emitidoAt])
   @@map("realtime_event_outbox")
+}
+
+// Configuración editable desde el panel ADMIN (clave → valor). Singleton por
+// `clave`. Hoy solo se usa para el logo de los correos; el patrón permite
+// añadir más ajustes sin migración nueva.
+//
+// `valor` guarda una KEY de storage (p.ej. `branding/logo/uuid.png`), no una
+// URL: el borde de la API la resuelve con StorageService, así cambiar de
+// bucket o a un CDN no requiere migrar datos.
+model ConfiguracionSitio {
+  id        Int      @id @default(autoincrement())
+  clave     String   @unique @db.VarChar(50)
+  valor     String   @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("configuracion_sitio")
 }

@@ -10,6 +10,7 @@ import { ClienteHandler } from './handlers/cliente.handler';
 import { PedidoPagoHandler } from './handlers/pedido-pago.handler';
 import { PedidoDescargaHandler } from './handlers/pedido-descarga.handler';
 import { NotificationsService } from '../notifications/notifications.service';
+import { EstadoPedido } from '@prisma/client';
 import type { UploadBatchDto } from './dto/upload-batch.dto';
 import type { PedidosAckDto } from './dto/pedidos-ack.dto';
 import type { HeartbeatDto } from './dto/heartbeat.dto';
@@ -281,12 +282,37 @@ export class SyncAgentService {
       try {
         const pedido = await this.prisma.pedido.findUnique({
           where: { id: ack.pedidoId },
-          select: { tiendaId: true },
+          // F13 (bug fix): también leemos `estado`. Antes solo se validaba la
+          // tienda, así que un pedido cancelado entre el poll y el ACK se
+          // marcaba PROCESADO y disparaba el email "listo para pagar" con QR
+          // de un pedido muerto.
+          select: { tiendaId: true, estado: true },
         });
         if (!pedido || pedido.tiendaId !== tiendaIdNube) {
           throw new NotFoundException(
             `Pedido ${ack.pedidoId} no pertenece a la tienda ${tiendaIdNube}`,
           );
+        }
+        // Si el pedido se canceló mientras el agente lo subía, el folio ya
+        // existe en Firebird pero el pedido está muerto en la nube: no
+        // disparamos "listo para pagar" ni marcamos la entrega como exitosa.
+        if (pedido.estado === EstadoPedido.CANCELLED) {
+          await this.prisma.pedidoPendienteEnvio.updateMany({
+            where: { pedidoId: ack.pedidoId, estado: { not: 'PROCESADO' } },
+            data: {
+              estado: 'CANCELADO',
+              claimedBy: null,
+              leaseToken: null,
+              leaseUntil: null,
+              processedAt: new Date(),
+              ultimoErrorCode: 'PEDIDO_CANCELADO_EN_ACK',
+              ultimoError: 'Pedido cancelado en la nube antes del ACK del agente',
+            },
+          });
+          this.logger.warn(
+            `ACK de pedido ${ack.pedidoId} ignorado: el pedido fue cancelado en la nube`,
+          );
+          continue;
         }
 
         const entrega = await this.prisma.pedidoPendienteEnvio.findUnique({

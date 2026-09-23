@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { StorageService } from '../imagenes/storage.service';
 import { FiltroCatalogoDto } from './dto/filtro-catalogo.dto';
 
 /**
@@ -30,7 +31,10 @@ function resolverColumnaLista(
 
 @Injectable()
 export class CatalogoService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   async obtenerProductos(filtros: FiltroCatalogoDto, usuarioId?: number) {
     const { tiendaId, categoria, corridaId, colorId, busqueda, pagina = 1, limite = 20 } = filtros;
@@ -179,9 +183,10 @@ export class CatalogoService {
         codigo: producto.codigo,
         nombre: producto.nombre,
         descripcion: producto.descripcion,
-        imagenPrincipal: producto.imagenPrincipal,
-        imagenes: producto.imagenes,
-        imagenesPorColor,
+        // La BD guarda keys; el borde de la API las resuelve a URL.
+        imagenPrincipal: this.storage.resolverImagen(producto.imagenPrincipal),
+        imagenes: this.storage.resolverImagenes(producto.imagenes),
+        imagenesPorColor: this.storage.resolverImagenesPorColor(imagenesPorColor),
         categoria: producto.categoria,
         subcategoria: producto.subcategoria,
         precioBase,
@@ -278,9 +283,9 @@ export class CatalogoService {
       codigo: producto.codigo,
       nombre: producto.nombre,
       descripcion: producto.descripcion,
-      imagenPrincipal: producto.imagenPrincipal,
-      imagenes: producto.imagenes,
-      imagenesPorColor,
+      imagenPrincipal: this.storage.resolverImagen(producto.imagenPrincipal),
+      imagenes: this.storage.resolverImagenes(producto.imagenes),
+      imagenesPorColor: this.storage.resolverImagenesPorColor(imagenesPorColor),
       categoria: producto.categoria,
       subcategoria: producto.subcategoria,
       precioBase,
@@ -384,14 +389,17 @@ export class CatalogoService {
         id: p.producto.id,
         codigo: p.producto.codigo,
         nombre: p.producto.nombre,
-        imagenPrincipal: p.producto.imagenPrincipal,
+        imagenPrincipal: this.storage.resolverImagen(p.producto.imagenPrincipal),
       },
       variante: {
         corrida: p.corrida.nombre,
         talla: p.talla.nombre,
+        colorId: p.colorId,
         color: p.color.nombre,
         colorHex: p.color.hex,
-        imagen: imagenColor ?? p.producto.imagenPrincipal,
+        imagen: this.storage.resolverImagen(
+          imagenColor ?? p.producto.imagenPrincipal,
+        ),
       },
       };
     });

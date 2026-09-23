@@ -47,8 +47,14 @@ export type PedidoParaVerificar = Prisma.PedidoGetPayload<{
  * Reglas:
  * - ADMIN: pasa siempre.
  * - CLIENTE: sólo puede ver/operar pedidos donde `pedido.usuarioId === user.userId`.
- * - BODEGA / CAJERO / BODEGA_MONITOR: sólo pueden ver/operar pedidos de su tienda.
- *   Si `requiereAsignacionBodega`, BODEGA también debe tener `pedido.asignadoAId === user.userId`.
+ * - BODEGA / CAJERO / BODEGA_MONITOR / MOSTRADOR / VENTAS: sólo pueden
+ *   ver/operar pedidos de su tienda.
+ *   Si `requiereAsignacionBodega`, BODEGA también debe tener
+ *   `pedido.asignadoAId === user.userId`.
+ *
+ * F13 (sep 2026): VENTAS entra por la rama de tienda. Hay UN asesor por tienda
+ * y atiende la cola de escalados completa, así que NO se le aplica el guard de
+ * asignación (que es específico del bodeguero, que sí tiene slots 1:1).
  */
 @Injectable()
 export class PedidoAccessService {

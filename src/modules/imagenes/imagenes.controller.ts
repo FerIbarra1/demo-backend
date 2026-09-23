@@ -11,12 +11,14 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
 import { RolUsuario } from '@prisma/client';
 import { ImagenesService } from './imagenes.service';
 import { ListarProductosQueryDto } from './dto/listar-productos-query.dto';
 import { SubirImagenDto } from './dto/subir-imagen.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { LIMITE_IMAGEN_BYTES } from './imagenes.constants';
 
 @ApiTags('Imágenes de Productos (Admin)')
 @ApiBearerAuth()
@@ -45,7 +47,17 @@ export class ImagenesController {
       'Campo multipart `file` (JPG/PNG/WEBP, máx 5 MB) y campo `colorId` opcional. ' +
       'Máximo 4 imágenes por (producto, color).',
   })
-  @UseInterceptors(FileInterceptor('file'))
+  // El límite va en el interceptor para que busboy corte el stream a nivel de
+  // red. Sin él, memoryStorage bufferiza el archivo COMPLETO en RAM antes de que
+  // el service pueda validar los 5 MB: un archivo de GB agota la memoria.
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: LIMITE_IMAGEN_BYTES, files: 1, fields: 5 },
+    }),
+  )
+  // Límite propio (el global es 100/60s): acota cuántas subidas puede disparar
+  // una cuenta de admin comprometida.
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   subirImagen(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: SubirImagenDto,

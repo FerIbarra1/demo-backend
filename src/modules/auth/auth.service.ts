@@ -20,6 +20,7 @@ import { ForgotPasswordDto, ResetPasswordDto } from './dto/password-reset.dto';
 import { RolUsuario, TipoNotificacion, Usuario } from '@prisma/client';
 import { AuthResponse, JwtPayload, KioskTokenPayload } from '../../types/user.types';
 import { MailService } from '../mail/mail.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { mailTemplates, mailSubjects } from '../mail/mail.templates';
 import { CuentaDesactivadaException } from './exceptions/cuenta-desactivada.exception';
 
@@ -32,6 +33,7 @@ export class AuthService {
     private jwtService: JwtService,
     private configService: ConfigService,
     private mail: MailService,
+    private readonly configuracion: ConfiguracionService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponse> {
@@ -75,7 +77,7 @@ export class AuthService {
   }
 
   private async enviarBienvenida(usuario: Usuario) {
-    const logoUrl = this.configService.get<string>('app.mail.logoUrl') ?? '';
+    const logoUrl = await this.configuracion.obtenerLogoUrl();
     const frontendUrl =
       this.configService.get<string>('app.mail.frontendUrl') ?? '';
 
@@ -447,7 +449,7 @@ export class AuthService {
       },
     });
 
-    const logoUrl = this.configService.get<string>('app.mail.logoUrl') ?? '';
+    const logoUrl = await this.configuracion.obtenerLogoUrl();
     const frontendUrl =
       this.configService.get<string>('app.mail.frontendUrl') ?? '';
     const resetUrl = `${frontendUrl}/reset-password?token=${tokenRandom}`;

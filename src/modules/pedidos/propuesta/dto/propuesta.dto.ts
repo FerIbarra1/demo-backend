@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsArray,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -115,23 +116,46 @@ export class CrearPropuestaDto {
   @Type(() => PropuestaItemDto)
   items: PropuestaItemDto[];
 
-  @ApiProperty()
+  @ApiProperty({
+    description:
+      'Total propuesto. El backend lo RECALCULA desde los items y lo ignora: ' +
+      'ahora que el asesor de ventas propone precios, confiar en este valor ' +
+      'permitiría aprobar un número distinto al que se cobra.',
+  })
   @IsNumber()
   @Min(0)
   total: number;
 
-  @ApiPropertyOptional({ description: 'Nota libre del bodeguero que acompaña la propuesta' })
+  @ApiPropertyOptional({ description: 'Nota libre del autor que acompaña la propuesta' })
   @IsOptional()
   @IsString()
   nota?: string;
 }
 
-export class ResponderPropuestaDto {
-  @ApiProperty({ enum: ['ACEPTAR', 'RECHAZAR'] })
-  @IsString()
-  decision: 'ACEPTAR' | 'RECHAZAR';
+/**
+ * F13 (sep 2026): decisiones del cliente. Cuáles son legales depende del
+ * ORIGEN de la propuesta (ver `PropuestaService.DECISIONES_POR_ORIGEN`):
+ *
+ *   Propuesta de BODEGA: APROBAR | RECHAZAR | CONTACTAR_ASESOR
+ *   Propuesta de VENTAS: APROBAR | RECHAZAR | CANCELAR_PEDIDO
+ *
+ * El backend valida, no confía en el frontend.
+ */
+export type DecisionPropuesta =
+  | 'APROBAR'
+  | 'RECHAZAR'
+  | 'CONTACTAR_ASESOR'
+  | 'CANCELAR_PEDIDO';
 
-  @ApiPropertyOptional({ description: 'Nota libre del cliente (ej. motivo del rechazo)' })
+export class ResponderPropuestaDto {
+  @ApiProperty({ enum: ['APROBAR', 'RECHAZAR', 'CONTACTAR_ASESOR', 'CANCELAR_PEDIDO'] })
+  @IsIn(['APROBAR', 'RECHAZAR', 'CONTACTAR_ASESOR', 'CANCELAR_PEDIDO'])
+  decision: DecisionPropuesta;
+
+  @ApiPropertyOptional({
+    description:
+      'Nota libre del cliente (motivo del rechazo, qué quiere negociar con el asesor).',
+  })
   @IsOptional()
   @IsString()
   nota?: string;

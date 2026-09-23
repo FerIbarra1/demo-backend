@@ -224,8 +224,9 @@ export class CatalogHandler {
     return { ok: true, mensaje: 'LINEAS: sin modelo PG, ignorado' };
   }
 
+  // Recibe `evento` por la firma del dispatcher, pero SUBLINEAS no se persiste.
   private async procesarSublinea(
-    evento: SyncEventoDto,
+    _evento: SyncEventoDto,
   ): Promise<{ ok: boolean; mensaje?: string }> {
     return { ok: true, mensaje: 'SUBLINEAS: sin modelo PG, ignorado' };
   }

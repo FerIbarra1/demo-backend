@@ -19,7 +19,17 @@ src/
 │   ├── auth/           # Autenticación JWT
 │   ├── tiendas/        # Gestión de sucursales
 │   ├── catalogo/       # Catálogo de productos
-│   └── pedidos/        # Gestión de pedidos (5 roles)
+│   ├── pedidos/        # Gestión de pedidos (5 roles)
+│   ├── usuarios/       # Empleados y clientes (panel ADMIN)
+│   ├── imagenes/       # Imágenes de producto (S3 + fallback local)
+│   ├── favoritos/      # Favoritos del cliente
+│   ├── kiosko/         # Kioskos físicos de autoservicio
+│   ├── mostrador/      # Ventas en mostrador
+│   ├── ventanillas/    # Ventanillas de cajero
+│   ├── notifications/  # Notificaciones y correos transaccionales
+│   ├── mail/           # Plantillas de correo (React Email)
+│   ├── realtime/       # WebSockets (Socket.IO)
+│   └── sync/           # Sincronización con Firebird (agente externo)
 ├── common/
 │   ├── decorators/     # Decoradores personalizados
 │   ├── guards/         # Guards de auth y roles
@@ -80,18 +90,22 @@ npm run start:prod
 ```
 
 El servidor estará disponible en:
-- **API**: http://localhost:3000/api/v1
+- **API**: http://localhost:3000/api
 - **Documentación**: http://localhost:3000/api/docs
 
 ## Usuarios de Prueba
 
 | Rol | Email | Contraseña |
 |-----|-------|------------|
-| Admin | admin@tienda.com | password123 |
-| Bodega | bodega@tienda.com | password123 |
-| Cajero | cajero@tienda.com | password123 |
-| Mostrador | mostrador@tienda.com | password123 |
-| Cliente | cliente@demo.com | password123 |
+| Admin | admin@puntotextil.com | 123456 |
+| Bodega | bodega@puntotextil.com | 123456 |
+| Cajero | cajero@puntotextil.com | 123456 |
+| Mostrador | mostrador@puntotextil.com | 123456 |
+| Ventas | ventas@puntotextil.com | 123456 |
+| Cliente | cliente@puntotextil.com | 123456 |
+
+> Datos creados por `pnpm prisma:seed`, que es **destructivo** y sólo corre contra
+> una base de datos local.
 
 ## Flujo de Pedidos
 
@@ -118,35 +132,35 @@ El servidor estará disponible en:
 ## Endpoints Principales
 
 ### Autenticación
-- `POST /api/v1/auth/register` - Registrar usuario
-- `POST /api/v1/auth/login` - Iniciar sesión
-- `GET /api/v1/auth/me` - Perfil del usuario
+- `POST /api/auth/register` - Registrar usuario
+- `POST /api/auth/login` - Iniciar sesión
+- `GET /api/auth/me` - Perfil del usuario
 
 ### Catálogo (Público)
-- `GET /api/v1/catalogo?tiendaId=1` - Ver productos
-- `GET /api/v1/catalogo/tienda/1/producto/1` - Detalle producto
-- `POST /api/v1/catalogo/verificar-stock` - Verificar disponibilidad
+- `GET /api/catalogo?tiendaId=1` - Ver productos
+- `GET /api/catalogo/tienda/1/producto/1` - Detalle producto
+- `POST /api/catalogo/verificar-stock` - Verificar disponibilidad
 
 ### Pedidos - Cliente
-- `POST /api/v1/pedidos/cliente` - Crear pedido
-- `GET /api/v1/pedidos/cliente/mis-pedidos` - Mis pedidos
+- `POST /api/pedidos/cliente` - Crear pedido
+- `GET /api/pedidos/cliente/mis-pedidos` - Mis pedidos
 
 ### Pedidos - Bodega
-- `GET /api/v1/pedidos/bodega/pendientes` - Ver pendientes
-- `POST /api/v1/pedidos/bodega/:id/en-bodega` - Marcar recibido
-- `POST /api/v1/pedidos/bodega/:id/listo` - Marcar listo
+- `GET /api/pedidos/bodega/pendientes` - Ver pendientes
+- `POST /api/pedidos/bodega/:id/en-bodega` - Marcar recibido
+- `POST /api/pedidos/bodega/:id/listo` - Marcar listo
 
 ### Pedidos - Cajero
-- `GET /api/v1/pedidos/cajero/pendientes-pago` - Ver pendientes
-- `POST /api/v1/pedidos/cajero/:id/verificar-pago` - Verificar transferencia
+- `GET /api/pedidos/cajero/pendientes-pago` - Ver pendientes
+- `POST /api/pedidos/cajero/:id/verificar-pago` - Verificar transferencia
 
 ### Pedidos - Mostrador
-- `GET /api/v1/pedidos/mostrador/listos` - Ver listos
-- `POST /api/v1/pedidos/mostrador/:id/entregar` - Entregar pedido
+- `GET /api/pedidos/mostrador/listos` - Ver listos
+- `POST /api/pedidos/mostrador/:id/entregar` - Entregar pedido
 
 ### Admin
-- `GET /api/v1/pedidos/admin` - Todos los pedidos
-- `GET /api/v1/pedidos/admin/:id/historial` - Historial de cambios
+- `GET /api/pedidos/admin` - Todos los pedidos
+- `GET /api/pedidos/admin/:id/historial` - Historial de cambios
 
 ## Comandos Útiles
 

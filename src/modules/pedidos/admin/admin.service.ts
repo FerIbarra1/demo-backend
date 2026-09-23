@@ -121,13 +121,30 @@ export class AdminService {
     // El agente externo (Firebird) inyecta userId=0 vía ApiKeyGuard. Puede
     // marcar pagado un pedido desde cualquier estado no-terminal: en VFP el
     // cobro ya ocurrió, no tiene sentido rechazar por el estado de la nube.
-    // El admin humano conserva el gate estricto de PENDING_PAID.
+    //
+    // F13: PERO solo si el pedido ya llegó a Firebird. Un pedido en
+    // EN_ASESORIA o WAITING_CUSTOMER_APPROVAL nunca se encoló (la fila de
+    // `PedidoPendienteEnvio` se crea al pasar a PENDING_PAID), así que no
+    // existe en el ERP: marcarlo PAID dejaría un pedido pagado sin folio, sin
+    // items confirmados y sin nada que cobrar. Se exige la fila de cola.
     const esAgente = usuario.userId === 0;
     if (pedido.estado !== EstadoPedido.PENDING_PAID) {
       const terminales: EstadoPedido[] = [EstadoPedido.CANCELLED, EstadoPedido.COMPLETED];
       if (!esAgente || terminales.includes(pedido.estado)) {
         throw new BadRequestException(
           `Sólo se marca como pagado un pedido en PENDING_PAID (actual: ${pedido.estado})`,
+        );
+      }
+      // El agente solo puede saltarse el gate si el pedido ya fue encolado a
+      // Firebird (es decir, pasó por PENDING_PAID en algún momento).
+      const encolado = await this.prisma.pedidoPendienteEnvio.findUnique({
+        where: { pedidoId },
+        select: { id: true },
+      });
+      if (!encolado) {
+        throw new BadRequestException(
+          `El pedido ${pedidoId} nunca llegó a Firebird (estado ${pedido.estado}); ` +
+            'no se puede marcar como pagado.',
         );
       }
     }

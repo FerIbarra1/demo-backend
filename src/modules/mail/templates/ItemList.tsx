@@ -43,6 +43,17 @@ const nombre = {
   lineHeight: '1.3',
 };
 
+const codigo = {
+  fontSize: '11px',
+  fontFamily:
+    'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+  color: colors.foregroundSubtle,
+  letterSpacing: '0.02em',
+  margin: '0 0 4px 0',
+  lineHeight: '1.3',
+  textTransform: 'uppercase' as const,
+};
+
 const variante = {
   fontSize: '12px',
   color: colors.foregroundMuted,
@@ -69,16 +80,6 @@ const subtotal = {
   borderBottom: `1px solid ${colors.borderSubtle}`,
   verticalAlign: 'top' as const,
   fontVariantNumeric: 'tabular-nums' as const,
-};
-
-const imgWrap = {
-  width: '64px',
-  height: '64px',
-  backgroundColor: colors.backgroundSubtle,
-  borderRadius: '8px',
-  overflow: 'hidden' as const,
-  flexShrink: 0,
-  marginRight: '14px',
 };
 
 const placeholder = {
@@ -153,6 +154,7 @@ export const ItemList: React.FC<ItemListProps> = ({ items }) => {
                   )}
                 </td>
                 <td style={cell}>
+                  {it.productoCodigo && <Text style={codigo}>{it.productoCodigo}</Text>}
                   <Text style={nombre}>{it.productoNombre}</Text>
                   <Text style={variante}>
                     Talla {it.tallaNombre} · {it.colorNombre}

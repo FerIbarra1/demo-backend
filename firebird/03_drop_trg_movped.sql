@@ -13,7 +13,7 @@
 --   3. Pegar este script y ejecutar (F9).
 --
 -- ROLLBACK: si necesitas restaurar el trigger, ejecuta el bloque
--- "3. TRG_MOVPED_SYNC" de firebird/02_triggers_sync_sin_asumir.sql.
+-- "3. TRG_MOVPED_SYNC" de firebird/02_sync_fixes_prefijo_folio.sql.
 -- ============================================================================
 
 DROP TRIGGER TRG_MOVPED_SYNC;

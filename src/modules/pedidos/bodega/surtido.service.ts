@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { StorageService } from '../../imagenes/storage.service';
 import {
   EstadoPedido,
   EstadoSurtido,
@@ -14,6 +15,7 @@ import {
 import { UserContext } from '../../../types/pedido.types';
 import { MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { PedidoAccessService } from '../core/pedido-access.service';
+import { PedidoStateService } from '../core/pedido-state.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { rankearSimilares } from '../core/similitud.util';
@@ -44,8 +46,10 @@ export class SurtidoService {
   constructor(
     private prisma: PrismaService,
     private access: PedidoAccessService,
+    private state: PedidoStateService,
     private notifications: NotificationsService,
     private realtime: RealtimeService,
+    private readonly storage: StorageService,
   ) {}
 
   /**
@@ -129,7 +133,9 @@ export class SurtidoService {
       )?.url;
       return {
         ...it,
-        productoImagen: imagenColor ?? it.producto?.imagenPrincipal ?? null,
+        productoImagen: this.storage.resolverImagen(
+          imagenColor ?? it.producto?.imagenPrincipal ?? null,
+        ),
       };
     }) as any;
 
@@ -153,8 +159,12 @@ export class SurtidoService {
 
   /**
    * Marca un item con su cantidad surtida y estado. El bodeguero debe ser el
-   * asignado, o un admin. Si viene nuevoPrecioCOId, se persiste y se valida
-   * que pertenezca a la tienda del pedido.
+   * asignado, o un admin.
+   *
+   * F13 (sep 2026): el bodeguero ya NO puede proponer sustituciones. Se
+   * eliminó `nuevoPrecioCOId` — las opciones son hay todo / hay menos / no hay.
+   * Proponer productos, variantes o cantidades distintas es tarea del asesor
+   * de ventas (`VentasService`), que arma una contrapropuesta al cliente.
    */
   async marcarItem(
     pedidoId: number,
@@ -189,30 +199,6 @@ export class SurtidoService {
       throw new NotFoundException(`Item ${itemId} no pertenece al pedido ${pedidoId}`);
     }
 
-    // Validar PrecioCO sustituto: pertenece a la misma tienda
-    if (dto.nuevoPrecioCOId) {
-      const pco = await this.prisma.precioCO.findUnique({
-        where: { id: dto.nuevoPrecioCOId },
-        select: { tiendaId: true },
-      });
-      if (!pco) {
-        throw new NotFoundException(`PrecioCO ${dto.nuevoPrecioCOId} no existe`);
-      }
-      if (pco.tiendaId !== pedidoActual.tiendaId) {
-        throw new BadRequestException(
-          `El PrecioCO ${dto.nuevoPrecioCOId} pertenece a otra tienda y no puede sustituir un item de este pedido.`,
-        );
-      }
-    }
-
-    // Coherencia con la sustitución: si viene nuevoPrecioCOId, no se puede estar
-    // marcando PENDIENTE; se espera estado terminal (PARCIAL, COMPLETO, NO_DISPONIBLE).
-    if (dto.nuevoPrecioCOId && dto.estadoSurtido === EstadoSurtido.PENDIENTE) {
-      throw new BadRequestException(
-        'Si se propone una sustitución (nuevoPrecioCOId), el estado no puede ser PENDIENTE.',
-      );
-    }
-
     const actualizado = await this.prisma.itemPedido.update({
       where: { id: itemId },
       data: {
@@ -220,7 +206,6 @@ export class SurtidoService {
         estadoSurtido: dto.estadoSurtido,
         surtidoAt: new Date(),
         motivoSurtido: dto.motivo ?? null,
-        sustitucionPropuestaPrecioCOId: dto.nuevoPrecioCOId ?? null,
       },
     });
 
@@ -240,178 +225,136 @@ export class SurtidoService {
   /**
    * Confirma el surtido. Aplica transición de estado coherente:
    *   - Todos los items COMPLETO  → PENDING_PAID (encola a Firebird).
-   *   - Algún item PARCIAL / NO_DISPONIBLE / con sustitución  → requiere que
-   *     exista una propuesta ACEPTADA por el cliente (o forzada por admin);
-   *     aplica los cambios y pasa a PENDING_PAID.
+   *   - Algún item PARCIAL / NO_DISPONIBLE → requiere una propuesta ACEPTADA
+   *     por el cliente que NO haya sido consumida; aplica los cambios y pasa
+   *     a PENDING_PAID.
    *   - Al menos un item aún PENDIENTE  → 400 (debe completar todos los items)
+   *
+   * F13 (sep 2026): la transición se delega a `PedidoStateService.cambiarEstado`
+   * con `efectos` para aplicar los cambios de items en la MISMA transacción.
+   * Antes este método escribía el estado a mano, lo que duplicaba historial/
+   * realtime/notificación y dejaba el camino fuera de la máquina de estados.
    */
   async confirmarSurtido(pedidoId: number, usuario: UserContext, esAdmin: boolean) {
-    return this.prisma.$transaction(async (tx) => {
-      const pedido = await tx.pedido.findUnique({
-        where: { id: pedidoId },
-        include: { items: true },
-      });
-      if (!pedido) throw new NotFoundException('Pedido no encontrado');
-      if (!esAdmin && pedido.asignadoAId !== usuario.userId) {
-        throw new BadRequestException('Sólo el bodeguero asignado puede confirmar este surtido');
-      }
-      if (pedido.estado !== EstadoPedido.REVIEWING) {
-        throw new BadRequestException(
-          `Sólo se puede confirmar surtido en estado REVIEWING (actual: ${pedido.estado})`,
-        );
-      }
-
-      // Validar que todos los items estén en estado terminal
-      const pendientes = pedido.items.filter((i) => i.estadoSurtido === EstadoSurtido.PENDIENTE);
-      if (pendientes.length > 0) {
-        throw new BadRequestException(
-          `Hay ${pendientes.length} item(s) aún PENDIENTE de surtir. Márcalos antes de confirmar.`,
-        );
-      }
-
-      // Detectar faltantes: PARCIAL, NO_DISPONIBLE, o con sustitución propuesta.
-      const itemsConFaltante = pedido.items.filter(
-        (i) =>
-          i.estadoSurtido === EstadoSurtido.PARCIAL ||
-          i.estadoSurtido === EstadoSurtido.NO_DISPONIBLE ||
-          i.sustitucionPropuestaPrecioCOId != null,
+    const pedido = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      include: { items: true },
+    });
+    if (!pedido) throw new NotFoundException('Pedido no encontrado');
+    if (!esAdmin && pedido.asignadoAId !== usuario.userId) {
+      throw new BadRequestException('Sólo el bodeguero asignado puede confirmar este surtido');
+    }
+    if (pedido.estado !== EstadoPedido.REVIEWING) {
+      throw new BadRequestException(
+        `Sólo se puede confirmar surtido en estado REVIEWING (actual: ${pedido.estado})`,
       );
+    }
 
-      // F4 (jun 2026): no permitir pedidos con 0 productos activos.
-      // Simula el resultado tras aplicar los cambios y cuenta cuántos
-      // items activos quedarán. Si es 0, rechazar: bodega debe al menos
-      // dejar un sustituto o cantidad > 0 en algún item.
-      //
-      // Reglas de conteo (espejo de `aplicarCambiosSurtido`):
-      //   - Sustitución propuesta → cuenta 1 (se crea item nuevo).
-      //   - NO_DISPONIBLE → cuenta 0 (se cancela).
-      //   - PARCIAL con cantidadSurtida > 0 → cuenta 1.
-      //   - PARCIAL con cantidadSurtida === 0 → cuenta 0.
-      //   - COMPLETO → cuenta 1.
-      //   - El resto (no en itemsConFaltante) son COMPLETO y cuentan 1.
-      const itemsActivosFinales = pedido.items.reduce((acc, it) => {
-        if (it.sustitucionPropuestaPrecioCOId) return acc + 1;
-        if (it.estadoSurtido === EstadoSurtido.NO_DISPONIBLE) return acc;
-        if (it.estadoSurtido === EstadoSurtido.PARCIAL) {
-          return acc + (it.cantidadSurtida > 0 ? 1 : 0);
-        }
-        return acc + 1;
-      }, 0);
-      if (itemsActivosFinales === 0) {
-        throw new BadRequestException(
-          'No puedes confirmar el surtido: todos los productos quedarían cancelados o en 0 piezas. ' +
-            'Agrega al menos un sustituto o ajusta la cantidad de algún item a >0 antes de confirmar.',
-        );
+    // Validar que todos los items estén en estado terminal
+    const pendientes = pedido.items.filter((i) => i.estadoSurtido === EstadoSurtido.PENDIENTE);
+    if (pendientes.length > 0) {
+      throw new BadRequestException(
+        `Hay ${pendientes.length} item(s) aún PENDIENTE de surtir. Márcalos antes de confirmar.`,
+      );
+    }
+
+    // Detectar faltantes: PARCIAL o NO_DISPONIBLE.
+    const itemsConFaltante = pedido.items.filter(
+      (i) =>
+        i.estadoSurtido === EstadoSurtido.PARCIAL ||
+        i.estadoSurtido === EstadoSurtido.NO_DISPONIBLE,
+    );
+
+    // F4 (jun 2026): no permitir pedidos con 0 productos activos.
+    // Simula el resultado tras aplicar los cambios y cuenta cuántos items
+    // activos quedarán. Si es 0, rechazar: bodega debe dejar al menos un item
+    // con cantidad > 0.
+    //
+    // Reglas de conteo (espejo de `aplicarCambiosSurtido`):
+    //   - NO_DISPONIBLE → cuenta 0 (se cancela).
+    //   - PARCIAL con cantidadSurtida > 0 → cuenta 1.
+    //   - PARCIAL con cantidadSurtida === 0 → cuenta 0.
+    //   - COMPLETO → cuenta 1.
+    const itemsActivosFinales = pedido.items.reduce((acc, it) => {
+      if (it.estadoSurtido === EstadoSurtido.NO_DISPONIBLE) return acc;
+      if (it.estadoSurtido === EstadoSurtido.PARCIAL) {
+        return acc + (it.cantidadSurtida > 0 ? 1 : 0);
       }
+      return acc + 1;
+    }, 0);
+    if (itemsActivosFinales === 0) {
+      throw new BadRequestException(
+        'No puedes confirmar el surtido: todos los productos quedarían cancelados o en 0 piezas. ' +
+          'Ajusta la cantidad de algún item a >0 antes de confirmar.',
+      );
+    }
 
-      if (itemsConFaltante.length === 0) {
-        // Caso feliz: todo surtido, sin faltantes ni sustituciones
-        const pedidoActualizado = await tx.pedido.update({
-          where: { id: pedidoId },
-          data: {
-            // Encadenar REVIEWING → PENDING_PAID en una sola escritura.
-            // La bodega libera el pedido al confirmar surtido: ya no espera pago.
-            estado: EstadoPedido.PENDING_PAID,
-            asignadoAId: null,
-            asignadoAt: null,
-            // El reloj de atención se detiene: ya no es tarea de bodega.
-            bodegaTurnoDesdeAt: null,
-          },
-        });
-        await tx.historialPedido.create({
-          data: {
-            pedidoId,
-            estadoAnterior: EstadoPedido.REVIEWING,
-            estadoNuevo: EstadoPedido.PENDING_PAID,
-            observacion: 'Surtido confirmado completo — pendiente de pago',
-            usuarioId: usuario.userId,
-            usuarioNombre: usuario.nombre,
-          },
-        });
-        await this.encolarEnvioAFirebird(tx, pedidoId);
-
-        // Realtime: para que el monitor de bodega libere el slot del bodeguero
-        // y el monitor de cajeros reciba el pedido en su cola al instante.
-        this.realtime.emitToTienda(pedido.tiendaId, 'monitor.invalidado', { pedidoId });
-        this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-          id: pedidoId,
-          estadoAnterior: EstadoPedido.REVIEWING,
-          estadoNuevo: EstadoPedido.PENDING_PAID,
-        });
-
-        this.logger.log(`Pedido ${pedidoId}: surtido completo → PENDING_PAID`);
-        return {
-          mensaje: 'Surtido completo confirmado',
-          estado: EstadoPedido.PENDING_PAID,
-          pedido: pedidoActualizado,
-          cambiosAplicados: 0,
-        };
-      }
-
-      // F12 (sep 2026): hay faltantes. El bodeguero debe haber enviado una
-      // propuesta y el cliente debe haberla ACEPTADO (o el admin forzado la
-      // aprobación). Solo entonces se aplican los cambios y se libera a
-      // PENDING_PAID (encolando a Firebird). Si no hay propuesta aceptada,
-      // se bloquea: el bodeguero debe enviar la propuesta primero.
-      const propuestaAceptada = await tx.pedidoPropuesta.findFirst({
-        where: {
-          pedidoId,
-          estado: EstadoPropuesta.ACEPTADA,
-        },
+    // F13: si hay faltantes, exigir una propuesta ACEPTADA y NO CONSUMIDA.
+    // Sin el filtro de `consumidaAt`, una propuesta aceptada en una ronda
+    // anterior autorizaría faltantes nuevos sin que el cliente los aprobara.
+    let propuestaAceptada: { id: number } | null = null;
+    if (itemsConFaltante.length > 0) {
+      propuestaAceptada = await this.prisma.pedidoPropuesta.findFirst({
+        where: { pedidoId, estado: EstadoPropuesta.ACEPTADA, consumidaAt: null },
         orderBy: { respondidaAt: 'desc' },
+        select: { id: true },
       });
       if (!propuestaAceptada) {
         throw new BadRequestException(
-          `Hay ${itemsConFaltante.length} item(s) con faltante o sustitución. ` +
+          `Hay ${itemsConFaltante.length} item(s) con faltante. ` +
             'Envía la propuesta al cliente (botón "Enviar propuesta") y espera a que la acepte antes de confirmar el surtido.',
         );
       }
+    }
 
-      // Aplicar los cambios de la propuesta aceptada sobre los items.
-      const cambios = await this.aplicarCambiosSurtido(tx, pedido, itemsConFaltante);
+    // Los cambios se aplican DENTRO de la transacción de la transición (vía
+    // `efectos`), así que la descripción se captura desde el callback.
+    let cambios: string[] = [];
 
-      const pedidoActualizado = await tx.pedido.update({
-        where: { id: pedidoId },
-        data: {
-          estado: EstadoPedido.PENDING_PAID,
-          asignadoAId: null,
-          asignadoAt: null,
-          // El reloj de atención se detiene: ya no es tarea de bodega.
-          bodegaTurnoDesdeAt: null,
-        },
-      });
+    const pedidoActualizado = await this.state.cambiarEstado(
+      pedidoId,
+      {
+        nuevoEstado: EstadoPedido.PENDING_PAID,
+        observacion: propuestaAceptada
+          ? `Surtido confirmado con faltante(s) (propuesta #${propuestaAceptada.id} aceptada) — pendiente de pago`
+          : 'Surtido confirmado completo — pendiente de pago',
+      },
+      usuario,
+      {
+        // La bodega libera el pedido al confirmar: ya no espera pago.
+        asignacion: 'limpiar',
+        // El reloj se detiene: ya no es tarea de bodega.
+        reloj: 'detener',
+        // Obligatorio: un PENDING_PAID sin fila de cola es invisible al agente.
+        encolarFirebird: true,
+        // Los monitores deben recomputar (slot del bodeguero + cola de cajeros).
+        invalidarMonitor: true,
+        efectos: propuestaAceptada
+          ? async (tx) => {
+              cambios = await this.aplicarCambiosSurtido(tx, pedido, itemsConFaltante);
+              // Marcar la propuesta como consumida para que no autorice
+              // faltantes de una ronda futura.
+              await tx.pedidoPropuesta.update({
+                where: { id: propuestaAceptada!.id },
+                data: { consumidaAt: new Date() },
+              });
+            }
+          : undefined,
+      },
+    );
 
-      await tx.historialPedido.create({
-        data: {
-          pedidoId,
-          estadoAnterior: EstadoPedido.REVIEWING,
-          estadoNuevo: EstadoPedido.PENDING_PAID,
-          observacion: `Surtido confirmado con ${cambios.length} cambio(s) aplicado(s) (propuesta #${propuestaAceptada.id} aceptada) — pendiente de pago`,
-          usuarioId: usuario.userId,
-          usuarioNombre: usuario.nombre,
-        },
-      });
-      await this.encolarEnvioAFirebird(tx, pedidoId);
+    this.logger.log(
+      `Pedido ${pedidoId}: surtido confirmado (${cambios.length} cambio(s)) → PENDING_PAID`,
+    );
 
-      this.logger.log(
-        `Pedido ${pedidoId}: surtido con ${cambios.length} cambio(s) (propuesta aceptada) → PENDING_PAID`,
-      );
-
-      // Realtime: el monitor de bodega debe recomputar y el de cajeros refrescar.
-      this.realtime.emitToTienda(pedido.tiendaId, 'monitor.invalidado', { pedidoId });
-      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.REVIEWING,
-        estadoNuevo: EstadoPedido.PENDING_PAID,
-      });
-
-      return {
-        mensaje: `Surtido confirmado con ${cambios.length} cambio(s) aplicado(s)`,
-        estado: EstadoPedido.PENDING_PAID,
-        pedido: pedidoActualizado,
-        cambiosAplicados: cambios.length,
-      };
-    });
+    return {
+      mensaje: propuestaAceptada
+        ? `Surtido confirmado con ${cambios.length} cambio(s) aplicado(s)`
+        : 'Surtido completo confirmado',
+      estado: EstadoPedido.PENDING_PAID,
+      pedido: pedidoActualizado,
+      cambiosAplicados: cambios.length,
+    };
   }
 
   /**
@@ -419,65 +362,26 @@ export class SurtidoService {
    * crear sustituciones) sobre los items del pedido. Recalcula subtotal y
    * total. Helper extraído para que `confirmarSurtido` quede legible.
    *
-   * F12 (sep 2026): ahora también lo consume `PropuestaService` cuando el
-   * cliente ACEPTA la propuesta (o el admin la fuerza). Por eso es público.
+   * F13 (sep 2026): ya NO maneja sustituciones — el bodeguero perdió esa
+   * capacidad (es tarea del asesor de ventas, que arma una contrapropuesta
+   * completa). Solo cancela NO_DISPONIBLES y ajusta PARCIALES.
    *
    * Devuelve un array con la descripción de cada cambio aplicado (para el log).
    */
   async aplicarCambiosSurtido(
     tx: Prisma.TransactionClient,
-    pedido: { id: number; tiendaId: number },
+    pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
     itemsConFaltante: Array<{
       id: number;
       cantidad: number;
       cantidadSurtida: number;
       estadoSurtido: EstadoSurtido;
-      sustitucionPropuestaPrecioCOId: number | null;
       motivoSurtido: string | null;
     }>,
   ): Promise<string[]> {
     const cambios: string[] = [];
 
     for (const item of itemsConFaltante) {
-      // Sustitución: cancelar el original y crear uno nuevo con el PrecioCO propuesto.
-      if (item.sustitucionPropuestaPrecioCOId) {
-        const nuevoPco = await tx.precioCO.findUnique({
-          where: { id: item.sustitucionPropuestaPrecioCOId },
-          include: { producto: true, talla: true, color: true, corrida: true },
-        });
-        if (!nuevoPco) {
-          throw new NotFoundException(
-            `PrecioCO ${item.sustitucionPropuestaPrecioCOId} no existe`,
-          );
-        }
-        const cantidad = Math.max(1, item.cantidadSurtida || item.cantidad);
-        const subtotal = new Prisma.Decimal(nuevoPco.precio).mul(cantidad);
-
-        await tx.itemPedido.update({
-          where: { id: item.id },
-          data: { cancelada: true },
-        });
-        await tx.itemPedido.create({
-          data: {
-            pedidoId: pedido.id,
-            productoId: nuevoPco.productoId,
-            precioCOId: nuevoPco.id,
-            cantidad,
-            precioUnitario: nuevoPco.precio,
-            subtotal,
-            productoNombre: nuevoPco.producto.nombre,
-            productoCodigo: nuevoPco.producto.codigo,
-            corridaNombre: nuevoPco.corrida.nombre,
-            tallaNombre: nuevoPco.talla.nombre,
-            colorNombre: nuevoPco.color.nombre,
-            original: false,
-            cancelada: false,
-          },
-        });
-        cambios.push(`Sustitución aplicada en item #${item.id}`);
-        continue;
-      }
-
       // NO_DISPONIBLE: cancelar el item.
       if (item.estadoSurtido === EstadoSurtido.NO_DISPONIBLE) {
         await tx.itemPedido.update({
@@ -492,11 +396,11 @@ export class SurtidoService {
       if (item.estadoSurtido === EstadoSurtido.PARCIAL) {
         const nuevaCantidad = Math.max(0, item.cantidadSurtida);
         // F12: si la cantidad surtida es 0, el item se CANCELA (no queda
-        // activo con cantidad 0). Antes quedaba un item activo con 0 piezas.
+        // activo con cantidad 0).
         if (nuevaCantidad === 0) {
           await tx.itemPedido.update({
             where: { id: item.id },
-            data: { cancelada: true },
+            data: { cancelada: true, estadoSurtido: EstadoSurtido.NO_DISPONIBLE },
           });
           cambios.push(`Item #${item.id} cancelado (cantidad 0)`);
           continue;
@@ -504,15 +408,24 @@ export class SurtidoService {
         const itemActual = await tx.itemPedido.findUnique({ where: { id: item.id } });
         if (!itemActual) throw new NotFoundException(`Item ${item.id} no existe`);
         const nuevoSubtotal = new Prisma.Decimal(itemActual.precioUnitario).mul(nuevaCantidad);
+        // F13 (bug fix): reescribir `estadoSurtido` a COMPLETO. Antes se
+        // ajustaba la cantidad pero el item quedaba marcado PARCIAL para
+        // siempre, así que en la siguiente ronda `itemsConFaltante` lo volvía
+        // a levantar y `confirmarSurtido` encontraba la propuesta ACEPTADA de
+        // la ronda anterior → pasaba a pago sin aprobación nueva.
         await tx.itemPedido.update({
           where: { id: item.id },
-          data: { cantidad: nuevaCantidad, subtotal: nuevoSubtotal },
+          data: {
+            cantidad: nuevaCantidad,
+            subtotal: nuevoSubtotal,
+            estadoSurtido: EstadoSurtido.COMPLETO,
+          },
         });
         cambios.push(`Item #${item.id} ajustado a ${nuevaCantidad} piezas`);
       }
     }
 
-    // Recalcular subtotal y total del pedido con items no cancelados.
+    // Recalcular subtotal del pedido con items no cancelados.
     const itemsActuales = await tx.itemPedido.findMany({
       where: { pedidoId: pedido.id, cancelada: false },
     });
@@ -520,12 +433,16 @@ export class SurtidoService {
       (acc, i) => acc.plus(new Prisma.Decimal(i.subtotal)),
       new Prisma.Decimal(0),
     );
+    // F13 (bug fix): el total respeta descuento e impuestos del pedido. Antes
+    // se asignaba `total = subtotal`, borrando cualquier descuento aplicado.
+    const nuevoTotal = nuevoSubtotal
+      .minus(new Prisma.Decimal(pedido.descuento))
+      .plus(new Prisma.Decimal(pedido.impuestos));
     await tx.pedido.update({
       where: { id: pedido.id },
-      data: { subtotal: nuevoSubtotal, total: nuevoSubtotal },
+      data: { subtotal: nuevoSubtotal, total: nuevoTotal },
     });
 
-    void pedido; // (referencia por si se quiere usar en log)
     return cambios;
   }
 
@@ -548,13 +465,6 @@ export class SurtidoService {
   }
 
   // ---- helpers ----
-
-  /**
-   * Calcula los pedidos PENDING_REVIEW de la misma tienda que comparten items
-   * (por producto) con el pedido dado. F10 (ago 2026): delega en
-   * `rankearSimilares` (helper puro en core/similitud.util.ts) para no
-   * duplicar la lógica con `BodegaService.obtenerSurtirJuntos`.
-   */
   private async calcularSimilaresParaPedido(pedido: {
     id: number;
     tiendaId: number;
@@ -634,33 +544,5 @@ export class SurtidoService {
         'Si el estado es NO_DISPONIBLE, la cantidad surtida debe ser exactamente 0',
       );
     }
-  }
-
-  /**
-   * Encola el pedido para descarga a Firebird. Se llama desde
-   * confirmarSurtido (ambos caminos) DENTRO de la transacción, cuando el
-   * pedido acaba de pasar a PENDING_PAID con sus cantidades finales.
-   *
-   * El agente lo baja vía poll-pedidos y GRABAR_PEDIDOS genera el folio
-   * local (VFP), que se guarda en externalFolio en el ACK (doble folio:
-   * la web mantiene su numeroPedido, VFP el suyo).
-   *
-   * externalIdPEDIDOS determinista (1B + pedidoId): aunque el SQLite del
-   * agente se pierda, GRABAR_PEDIDOS recibe siempre el mismo ID y la SP lo
-   * trata como UPDATE (idempotente).
-   */
-  async encolarEnvioAFirebird(
-    tx: Prisma.TransactionClient,
-    pedidoId: number,
-  ): Promise<void> {
-    await tx.pedidoPendienteEnvio.create({
-      data: {
-        pedidoId,
-        estado: 'PENDIENTE',
-        // Offset 1B: los IDs Firebird típicos son <10M, así que 1B+id nube
-        // evita colisión con IDs locales reales.
-        externalIdPEDIDOS: 1_000_000_000 + pedidoId,
-      },
-    });
   }
 }

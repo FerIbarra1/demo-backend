@@ -213,8 +213,9 @@ export class ClienteHandler {
 
   // -------------------- VENDEDORES --------------------
 
+  // Recibe `evento` por la firma del dispatcher; VENDEDORES aún no se persiste.
   private async procesarVendedor(
-    evento: SyncEventoDto,
+    _evento: SyncEventoDto,
   ): Promise<{ ok: boolean; mensaje?: string }> {
     // VENDEDORES no tiene modelo dedicado en la nube. Se persiste sólo
     // como ExternalRef por si en el futuro se necesita mapear pedidos

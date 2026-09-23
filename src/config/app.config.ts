@@ -30,6 +30,11 @@ export default registerAs('app', () => ({
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
     // URL pública base (puede ser el endpoint del bucket o un CDN).
     publicUrlBase: process.env.AWS_S3_PUBLIC_URL || '',
+    // Endpoint custom para proveedores S3-compatibles (R2, MinIO, Spaces).
+    // Vacío = AWS.
+    endpoint: process.env.AWS_S3_ENDPOINT || '',
+    // true para MinIO y la mayoría de self-hosted; false para AWS/R2.
+    forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true',
   },
   smtp: {
     host: process.env.SMTP_HOST || 'localhost',

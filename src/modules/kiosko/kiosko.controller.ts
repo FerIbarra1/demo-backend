@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { KioskoService } from './kiosko.service';
 import { ActivarKioskoDto } from './dto/activar-kiosko.dto';
@@ -6,7 +6,7 @@ import { ActualizarKioskoDto } from './dto/actualizar-kiosko.dto';
 import { ListarKioskosQueryDto } from './dto/listar-kioskos-query.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { RolUsuario, EstadoKiosko } from '@prisma/client';
+import { RolUsuario } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
 
 @ApiTags('Kioskos')

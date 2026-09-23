@@ -6,15 +6,18 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { StorageService } from '../../imagenes/storage.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoAccessService } from './pedido-access.service';
 import { asignadoANombre } from './pedido-mapper';
+import { pausarReloj, reanudarReloj } from './atencion.util';
 import { CambiarEstadoDto } from '../admin/dto/cambiar-estado.dto';
 import { UserContext } from '../../../types/pedido.types';
 import {
   EstadoPedido,
   TipoNotificacion,
+  Prisma,
 } from '@prisma/client';
 
 /**
@@ -26,13 +29,25 @@ import {
  * (`POST /admin/pedidos/:id/marcar-pagado`). REVIEWING → PENDING_PAID es una
  * transición disparada por `SurtidoService.confirmarSurtido` (sin acción humana)
  * o por `PropuestaService` cuando el cliente acepta la propuesta.
+ *
+ * F13 (sep 2026): los arcos que salen de WAITING_CUSTOMER_APPROVAL se
+ * distinguen por DESTINO, no por valores nuevos de enum:
+ *
+ *   → PENDING_PAID   cliente APROBÓ una propuesta de BODEGA (o de VENTAS que
+ *                    no dejó items pendientes). Bodega ya verificó físicamente
+ *                    lo que propuso, no hay nada que confirmar.
+ *   → REVIEWING      cliente APROBÓ una propuesta de VENTAS y quedaron items
+ *                    nuevos por surtir. Vuelve a bodega SIN ASIGNAR.
+ *   → EN_ASESORIA    cliente pidió asesor (propuesta de bodega), o rechazó una
+ *                    propuesta de VENTAS y quiere re-negociar.
+ *   → CANCELLED      cliente rechazó una propuesta de BODEGA, o canceló
+ *                    explícitamente.
  */
 const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
   [EstadoPedido.PENDING_REVIEW]: [EstadoPedido.REVIEWING, EstadoPedido.CANCELLED],
   [EstadoPedido.REVIEWING]: [
     // REVIEWING → WAITING_CUSTOMER_APPROVAL: lo dispara PropuestaService
-    // cuando bodega envía una propuesta (hay faltantes). El pedido sigue
-    // asignado al bodeguero y el reloj de atención se pausa.
+    // cuando bodega envía una propuesta (hay faltantes).
     EstadoPedido.WAITING_CUSTOMER_APPROVAL,
     // REVIEWING → PENDING_PAID: lo dispara SurtidoService.confirmarSurtido
     // cuando la bodega cierra el surtido SIN faltantes. El pedido queda listo
@@ -40,13 +55,20 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
     EstadoPedido.PENDING_PAID,
     EstadoPedido.CANCELLED,
   ],
-  // F12 (sep 2026): WAITING_CUSTOMER_APPROVAL es un estado REAL. El cliente
-  // acepta (→ PENDING_PAID, aplica cambios) o rechaza (→ REVIEWING, re-trabaja).
-  // El admin puede forzar la aprobación (→ PENDING_PAID). El bodeguero puede
-  // liberar el pedido de vuelta a la cola (→ REVIEWING sin asignar) si el
-  // cliente no responde.
+  // F13: el cliente decide sobre una propuesta. El destino depende del origen
+  // de la propuesta y de la decisión — ver el comentario de arriba.
   [EstadoPedido.WAITING_CUSTOMER_APPROVAL]: [
     EstadoPedido.PENDING_PAID,
+    EstadoPedido.REVIEWING,
+    EstadoPedido.EN_ASESORIA,
+    EstadoPedido.CANCELLED,
+  ],
+  // F13: el pedido está en manos del asesor de ventas de la tienda. Sale de
+  // aquí cuando el vendedor manda una contrapropuesta (→ WAITING_CUSTOMER_
+  // APPROVAL), cuando determina que el pedido original estaba bien y lo
+  // devuelve a bodega (→ REVIEWING), o cuando se cancela.
+  [EstadoPedido.EN_ASESORIA]: [
+    EstadoPedido.WAITING_CUSTOMER_APPROVAL,
     EstadoPedido.REVIEWING,
     EstadoPedido.CANCELLED,
   ],
@@ -59,6 +81,53 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
   [EstadoPedido.COMPLETED]: [],
   [EstadoPedido.CANCELLED]: [],
 };
+
+/**
+ * F13 (sep 2026): opciones de `cambiarEstado`.
+ *
+ * Existen porque el flujo nuevo tiene arcos que NO se comportan como el
+ * original. El caso crítico es `asignacion`: el default histórico asignaba el
+ * pedido a quien transicionaba, lo cual es correcto cuando un bodeguero toma
+ * un pedido pero es un landmine cuando el CLIENTE aprueba una propuesta y el
+ * pedido vuelve a REVIEWING — quedaría asignado a un cliente, invisible en el
+ * monitor de bodega y bloqueado para todos los bodegueros.
+ */
+export interface CambiarEstadoOpts {
+  /**
+   * Qué hacer con `asignadoAId`/`asignadoAt`:
+   *   - 'caller'   → asignar a quien transiciona (comportamiento histórico).
+   *                  Es lo correcto cuando un bodeguero TOMA un pedido.
+   *   - 'limpiar'  → dejar sin asignar (el pedido vuelve a la cola).
+   *   - 'mantener' → no tocar la asignación actual.
+   *
+   * REQUERIDO cuando el destino es REVIEWING: no hay default seguro, porque
+   * 'caller' con un caller que no es bodeguero corrompe la asignación.
+   */
+  asignacion?: 'caller' | 'limpiar' | 'mantener';
+  /**
+   * Qué hacer con el reloj de atención del bodeguero:
+   *   - 'pausar'   → congelar el acumulado (la pelota es del cliente/ventas).
+   *   - 'reanudar' → arrancar un turno nuevo acumulando el tiempo previo.
+   *   - 'detener'  → congelar y marcar que ya no es tarea de bodega.
+   *   - 'mantener' → no tocar (default).
+   */
+  reloj?: 'pausar' | 'reanudar' | 'detener' | 'mantener';
+  /**
+   * Si true, encola el pedido a Firebird DENTRO de la misma transacción.
+   * Obligatorio para toda transición a PENDING_PAID: un pedido en ese estado
+   * sin fila en `PedidoPendienteEnvio` es invisible para el agente, nunca
+   * recibe folio y se queda atascado para siempre.
+   */
+  encolarFirebird?: boolean;
+  /**
+   * Efectos adicionales a ejecutar DENTRO de la transacción, después de
+   * escribir el estado. Se usa para aplicar cambios de items (propuesta
+   * aceptada) de forma atómica con la transición.
+   */
+  efectos?: (tx: Prisma.TransactionClient) => Promise<void>;
+  /** Emitir `monitor.invalidado` a la tienda (para que los monitores refresquen). */
+  invalidarMonitor?: boolean;
+}
 
 /**
  * Fuente única de verdad de la máquina de estados de un pedido.
@@ -84,22 +153,30 @@ export class PedidoStateService {
     private notifications: NotificationsService,
     private realtime: RealtimeService,
     private access: PedidoAccessService,
+    private readonly storage: StorageService,
   ) {}
 
   /**
    * Cambia el estado de un pedido validando la transición, registrando historial
-   * y ejecutando side-effects (timestamps, etc.).
+   * y ejecutando side-effects (timestamps, encolado a Firebird, etc.).
    *
-   * Público para que módulos hermanos (mostrador, paquetería futura) puedan
-   * orquestar transiciones sin reimplementar la lógica de historial/realtime/
-   * notificación. **No llamar directamente desde controllers** — usar los
-   * wrappers de dominio (`marcarEnviado`, `entregarEnMostrador`, etc.) que
+   * Público para que módulos hermanos (mostrador, ventas, paquetería futura)
+   * puedan orquestar transiciones sin reimplementar la lógica de historial/
+   * realtime/notificación. **No llamar directamente desde controllers** — usar
+   * los wrappers de dominio (`marcarEnviado`, `entregarEnMostrador`, etc.) que
    * aplican las validaciones de acceso correspondientes.
+   *
+   * F13: las `opts` existen porque el flujo nuevo tiene arcos que no se
+   * comportan como el original (ver `CambiarEstadoOpts`). Antes de F13 este
+   * método SIEMPRE asignaba el pedido al caller al ir a REVIEWING, lo cual es
+   * correcto para un bodeguero que toma un pedido pero corrompe la asignación
+   * cuando el caller es el cliente aprobando una propuesta.
    */
   async cambiarEstado(
     pedidoId: number,
     dto: CambiarEstadoDto,
     usuario: UserContext,
+    opts: CambiarEstadoOpts = {},
   ) {
     await this.access.cargarYValidar(pedidoId, usuario);
     return this.prisma.$transaction(async (tx) => {
@@ -116,16 +193,24 @@ export class PedidoStateService {
         );
       }
 
+      // F13: ir a REVIEWING sin decir qué hacer con la asignación es un bug
+      // latente (el pedido podría quedar asignado a un cliente). Exigimos
+      // que el caller sea explícito.
+      if (estadoNuevo === EstadoPedido.REVIEWING && !opts.asignacion) {
+        throw new BadRequestException(
+          'Transición a REVIEWING requiere opts.asignacion explícito ' +
+            "('caller' si un bodeguero lo toma, 'limpiar' si vuelve a la cola, " +
+            "'mantener' si se conserva la asignación actual).",
+        );
+      }
+
+      const ahora = new Date();
       const result = await tx.pedido.updateMany({
         where: { id: pedidoId, estado: estadoAnterior },
         data: {
           estado: estadoNuevo,
-          ...(estadoNuevo === EstadoPedido.REVIEWING && {
-            asignadoAId: usuario.userId,
-            asignadoAt: new Date(),
-            // F12: al tomar el pedido arranca el reloj de atención del bodeguero.
-            bodegaTurnoDesdeAt: new Date(),
-          }),
+          ...this.cambiosDeAsignacion(opts.asignacion, usuario, ahora),
+          ...this.cambiosDeReloj(opts.reloj, pedido, ahora),
         },
       });
       if (result.count !== 1) {
@@ -133,15 +218,27 @@ export class PedidoStateService {
           'El pedido cambió mientras se procesaba. Actualiza la pantalla e inténtalo de nuevo.',
         );
       }
+
+      // Efectos de dominio (ej. aplicar los items de una propuesta aceptada)
+      // en la MISMA transacción que la transición: si fallan, no queda un
+      // pedido en PENDING_PAID con items a medio aplicar.
+      if (opts.efectos) {
+        await opts.efectos(tx);
+      }
+
+      // F13: un pedido en PENDING_PAID sin fila en la cola de Firebird es
+      // invisible para el agente y se queda atascado para siempre. Se encola
+      // aquí, dentro de la tx, para que estado y cola sean atómicos.
+      if (opts.encolarFirebird) {
+        await this.encolarEnvioAFirebird(tx, pedidoId);
+      }
+
       const pedidoActualizado = await tx.pedido.findUnique({
         where: { id: pedidoId },
       });
       if (!pedidoActualizado) {
         throw new NotFoundException('Pedido no encontrado');
       }
-
-      // Al tomar un pedido (transición a REVIEWING) se asigna el bodeguero
-      // que lo está trabajando. Queda registrado para el monitor de bodega.
 
       await tx.historialPedido.create({
         data: {
@@ -168,6 +265,11 @@ export class PedidoStateService {
         estadoAnterior,
         estadoNuevo,
       });
+      // F13: los monitores (bodega/cajeros) no reaccionan a `pedido.estado`;
+      // necesitan este evento para recomputar slots y colas.
+      if (opts.invalidarMonitor) {
+        this.realtime.emitToTienda(pedido.tiendaId, 'monitor.invalidado', { pedidoId });
+      }
 
       // Notificar al cliente según el estado nuevo
       const notifTipo = this.notifTipoParaEstado(estadoNuevo);
@@ -184,6 +286,93 @@ export class PedidoStateService {
       }
 
       return pedidoActualizado;
+    });
+  }
+
+  /**
+   * F13: traduce `opts.asignacion` a los campos de asignación a escribir.
+   * Ver `CambiarEstadoOpts.asignacion` para la semántica de cada modo.
+   */
+  private cambiosDeAsignacion(
+    modo: CambiarEstadoOpts['asignacion'],
+    usuario: UserContext,
+    ahora: Date,
+  ): {
+    asignadoAId?: number | null;
+    asignadoAt?: Date | null;
+  } {
+    switch (modo) {
+      case 'caller':
+        return { asignadoAId: usuario.userId, asignadoAt: ahora };
+      case 'limpiar':
+        return { asignadoAId: null, asignadoAt: null };
+      case 'mantener':
+      case undefined:
+        return {};
+    }
+  }
+
+  /**
+   * F13: traduce `opts.reloj` a los campos del reloj de atención.
+   *
+   * 'pausar' y 'detener' escriben lo mismo (`pausarReloj` congela el acumulado
+   * y limpia `bodegaTurnoDesdeAt`); la diferencia es semántica para el caller:
+   * 'pausar' = la pelota es de otro y volverá a bodega; 'detener' = ya no es
+   * tarea de bodega nunca más (el reloj queda congelado).
+   */
+  private cambiosDeReloj(
+    modo: CambiarEstadoOpts['reloj'],
+    pedido: { tiempoAtencionBodegaMs: number; bodegaTurnoDesdeAt: Date | null },
+    ahora: Date,
+  ): {
+    tiempoAtencionBodegaMs?: number;
+    bodegaTurnoDesdeAt?: Date | null;
+  } {
+    const reloj = {
+      tiempoAtencionBodegaMs: pedido.tiempoAtencionBodegaMs,
+      bodegaTurnoDesdeAt: pedido.bodegaTurnoDesdeAt,
+    };
+    switch (modo) {
+      case 'pausar':
+      case 'detener':
+        return pausarReloj(reloj, ahora);
+      case 'reanudar':
+        return reanudarReloj(reloj, ahora);
+      case 'mantener':
+      case undefined:
+        return {};
+    }
+  }
+
+  /**
+   * F13: encola el pedido para descarga a Firebird.
+   *
+   * Se llama DENTRO de la transacción que pone el pedido en PENDING_PAID, para
+   * que estado y cola sean atómicos. `pedidoId` es @unique en
+   * `PedidoPendienteEnvio`, así que un encolado duplicado falla con P2002 —
+   * eso es intencional: significa que hay un camino que llega a PENDING_PAID
+   * dos veces, y queremos enterarnos en vez de duplicar el pedido en el ERP.
+   *
+   * El agente lo baja vía poll-pedidos y GRABAR_PEDIDOS genera el folio local
+   * (VFP), que se guarda en externalFolio en el ACK (doble folio: la web
+   * mantiene su numeroPedido, VFP el suyo).
+   *
+   * externalIdPEDIDOS determinista (1B + pedidoId): aunque el SQLite del
+   * agente se pierda, GRABAR_PEDIDOS recibe siempre el mismo ID y la SP lo
+   * trata como UPDATE (idempotente).
+   */
+  async encolarEnvioAFirebird(
+    tx: Prisma.TransactionClient,
+    pedidoId: number,
+  ): Promise<void> {
+    await tx.pedidoPendienteEnvio.create({
+      data: {
+        pedidoId,
+        estado: 'PENDIENTE',
+        // Offset 1B: los IDs Firebird típicos son <10M, así que 1B+id nube
+        // evita colisión con IDs locales reales.
+        externalIdPEDIDOS: 1_000_000_000 + pedidoId,
+      },
     });
   }
 
@@ -312,7 +501,15 @@ export class PedidoStateService {
                 imagenesProducto: { select: { url: true, colorId: true } },
               },
             },
-            precioCO: { select: { colorId: true } },
+            // F8 oct 2026: el hex del color se expone para que la UI del
+            // bodeguero muestre el chip de color en cada item del surtido.
+            // Antes sólo viajaba colorId; el cliente sólo veía el nombre.
+            precioCO: {
+              select: {
+                colorId: true,
+                color: { select: { hex: true } },
+              },
+            },
           },
         },
         tienda: true,
@@ -323,7 +520,12 @@ export class PedidoStateService {
         // REVIEWING sin asignar (devuelve null).
         asignadoA: { select: { id: true, nombre: true, apellido: true } },
         historial: { orderBy: { createdAt: 'asc' } },
-        mensajes: { orderBy: { createdAt: 'asc' } },
+        // F14: incluir el autor para poder aplanar `autorNombre` (el admin
+        // renderiza las burbujas del chat y antes salían sin nombre).
+        mensajes: {
+          orderBy: { createdAt: 'asc' },
+          include: { autor: { select: { id: true, nombre: true, rol: true } } },
+        },
         // F12: propuestas de ajuste (historial de negociación).
         propuestas: {
           orderBy: { enviadaAt: 'asc' },
@@ -344,16 +546,28 @@ export class PedidoStateService {
       )?.url;
       return {
         ...it,
-        productoImagen: imagenColor ?? it.producto?.imagenPrincipal ?? null,
+        productoImagen: this.storage.resolverImagen(
+          imagenColor ?? it.producto?.imagenPrincipal ?? null,
+        ),
       };
     }) as any;
     (pedido as any).asignadoANombre = asignadoANombre((pedido as any).asignadoA);
+    // F14: aplanar el nombre del autor de cada mensaje (mismo shape que
+    // `MessagesService.listar` y que el payload de `mensaje.creado`).
+    (pedido as any).mensajes = (pedido as any).mensajes.map((m: any) => ({
+      ...m,
+      autorNombre: m.autor?.nombre ?? null,
+    }));
     return pedido;
   }
 
   private notifTipoParaEstado(estado: EstadoPedido): TipoNotificacion | null {
     switch (estado) {
       case EstadoPedido.WAITING_CUSTOMER_APPROVAL: return TipoNotificacion.REVISION_PROPUESTA;
+      // F13: EN_ASESORIA no notifica aquí: el email ASESOR_SOLICITADO lo
+      // dispara PropuestaService (que conoce la nota del cliente y el origen
+      // de la propuesta), no la máquina de estados genérica.
+      case EstadoPedido.EN_ASESORIA: return null;
       // PENDING_PAID no notifica al cliente: el cambio lo ve por realtime/refresh
       // cuando bodega confirma el surtido o el cliente acepta la propuesta.
       case EstadoPedido.PAID: return TipoNotificacion.PAGO_CONFIRMADO;

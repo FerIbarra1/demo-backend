@@ -157,27 +157,36 @@ export class RealtimeGateway
     const data = client.data as SocketData | undefined;
     if (!data || !pedidoId) return;
 
-    try {
-      const pedido = await this.prisma.pedido.findUnique({
-        where: { id: pedidoId },
-        select: { id: true, usuarioId: true, tiendaId: true },
-      });
-      if (!pedido) return;
-
-      const esAdmin = data.rol === RolUsuario.ADMIN;
-      const esDueno = pedido.usuarioId === data.userId;
-      const esDeSuTienda = data.tiendaId != null && pedido.tiendaId === data.tiendaId;
-
-      if (esAdmin || esDueno || esDeSuTienda) {
-        await client.join(`pedido-${pedidoId}`);
-        this.logger.debug(
-          `WS ${client.id}: user=${data.userId} se unió a pedido-${pedidoId}`,
-        );
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.debug(`WS joinPedido ${pedidoId}: error (${msg})`);
+    if (await this.puedeVerPedido(client, pedidoId)) {
+      await client.join(`pedido-${pedidoId}`);
+      this.logger.debug(
+        `WS ${client.id}: user=${data.userId} se unió a pedido-${pedidoId}`,
+      );
     }
+  }
+
+  /**
+   * Reusado por `joinPedido`. Valida que el caller tenga
+   * derecho sobre el pedido: dueño, operador de la tienda, o admin global.
+   */
+  private async puedeVerPedido(
+    client: Socket,
+    pedidoId: number,
+  ): Promise<boolean> {
+    const data = client.data as SocketData | undefined;
+    if (!data) return false;
+
+    const pedido = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      select: { id: true, usuarioId: true, tiendaId: true },
+    });
+    if (!pedido) return false;
+
+    const esAdmin = data.rol === RolUsuario.ADMIN;
+    const esDueno = pedido.usuarioId === data.userId;
+    const esDeSuTienda =
+      data.tiendaId != null && pedido.tiendaId === data.tiendaId;
+    return esAdmin || esDueno || esDeSuTienda;
   }
 
   handleDisconnect(client: Socket) {

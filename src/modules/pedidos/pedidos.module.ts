@@ -16,6 +16,10 @@ import { MessagesController } from './messages/messages.controller';
 import { MessagesService } from './messages/messages.service';
 import { PropuestaController } from './propuesta/propuesta.controller';
 import { PropuestaService } from './propuesta/propuesta.service';
+import { VentasController } from './ventas/ventas.controller';
+import { VentasService } from './ventas/ventas.service';
+import { ReposicionController } from './reposicion/reposicion.controller';
+import { ReposicionService } from './reposicion/reposicion.service';
 import { PedidoAccessService } from './core/pedido-access.service';
 import { PedidoStateService } from './core/pedido-state.service';
 import { PedidoBusquedaController } from './core/pedido-busqueda.controller';
@@ -58,6 +62,8 @@ import { VentanillasModule } from '../ventanillas/ventanillas.module';
     AdminController,
     MessagesController,
     PropuestaController,
+    VentasController,
+    ReposicionController,
     PedidoBusquedaController,
   ],
   providers: [
@@ -70,6 +76,8 @@ import { VentanillasModule } from '../ventanillas/ventanillas.module';
     AdminService,
     MessagesService,
     PropuestaService,
+    VentasService,
+    ReposicionService,
     PedidoAccessService,
     PedidoStateService,
   ],
@@ -79,6 +87,8 @@ import { VentanillasModule } from '../ventanillas/ventanillas.module';
     MonitorService,
     SurtidoService,
     AdminService,
+    // F13: `mostrador` y otros módulos pueden necesitar consultar reposición.
+    ReposicionService,
   ],
 })
 export class PedidosModule {}

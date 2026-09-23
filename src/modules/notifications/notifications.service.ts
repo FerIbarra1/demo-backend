@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pedido, TipoNotificacion } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { StorageService } from '../imagenes/storage.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { MailService } from '../mail/mail.service';
 import { mailTemplates, mailSubjects } from '../mail/mail.templates';
 import { generarQrDataUrl } from '../pedidos/core/qr.util';
@@ -26,6 +28,8 @@ export class NotificationsService {
     private prisma: PrismaService,
     private mail: MailService,
     private config: ConfigService,
+    private readonly storage: StorageService,
+    private readonly configuracion: ConfiguracionService,
   ) {}
 
   /**
@@ -55,7 +59,7 @@ export class NotificationsService {
       this.prisma.tienda.findUnique({ where: { id: pedido.tiendaId } }),
     ]);
 
-    const logoUrl = this.config.get<string>('app.mail.logoUrl') ?? '';
+    const logoUrl = await this.configuracion.obtenerLogoUrl();
     const frontendUrl = this.config.get<string>('app.mail.frontendUrl') ?? '';
     const pedidoUrl = `${frontendUrl}/pedidos/${pedido.id}`;
     const ctx = { logoUrl, frontendUrl };
@@ -73,12 +77,14 @@ export class NotificationsService {
       tiendaTelefono: tienda?.telefono ?? undefined,
       items: items.map((it) => ({
         productoNombre: it.productoNombre,
+        productoCodigo: it.productoCodigo,
         tallaNombre: it.tallaNombre,
         colorNombre: it.colorNombre,
         cantidad: it.cantidad,
         precioUnitario: it.precioUnitario,
         subtotal: it.subtotal,
-        imagenUrl: it.producto?.imagenPrincipal ?? null,
+        // URL absoluta: un cliente de correo no puede resolver rutas relativas.
+        imagenUrl: this.storage.resolverImagen(it.producto?.imagenPrincipal),
       })),
     };
 
@@ -96,9 +102,25 @@ export class NotificationsService {
         break;
       case TipoNotificacion.REVISION_PROPUESTA:
         subject = mailSubjects.REVISION_PROPUESTA(pedido.numeroPedido);
-        // La propuesta puede o no traer un mensaje destacado del bodeguero.
-        // Aquí no lo extraemos del chat; el caller puede pasar un mensaje
-        // opcional vía `enviarPropuesta(pedido, mensaje)` si lo requiere.
+        template = mailTemplates.RevisionPropuesta({
+          pedido: pedidoData,
+          pedidoUrl,
+          ...ctx,
+        });
+        break;
+      // F13: el cliente pidió un asesor de ventas. Se le confirma que alguien
+      // lo contactará. (El aviso al equipo de ventas va por realtime/cola.)
+      case TipoNotificacion.ASESOR_SOLICITADO:
+        subject = mailSubjects.ASESOR_SOLICITADO(pedido.numeroPedido);
+        template = mailTemplates.RevisionPropuesta({
+          pedido: pedidoData,
+          pedidoUrl,
+          ...ctx,
+        });
+        break;
+      // F13: el asesor de ventas envió una contrapropuesta.
+      case TipoNotificacion.PROPUESTA_VENTAS:
+        subject = mailSubjects.PROPUESTA_VENTAS(pedido.numeroPedido);
         template = mailTemplates.RevisionPropuesta({
           pedido: pedidoData,
           pedidoUrl,
@@ -215,7 +237,7 @@ export class NotificationsService {
       this.prisma.tienda.findUnique({ where: { id: pedido.tiendaId } }),
     ]);
 
-    const logoUrl = this.config.get<string>('app.mail.logoUrl') ?? '';
+    const logoUrl = await this.configuracion.obtenerLogoUrl();
     const frontendUrl = this.config.get<string>('app.mail.frontendUrl') ?? '';
     const pedidoUrl = `${frontendUrl}/pedidos/${pedido.id}`;
 
@@ -236,12 +258,14 @@ export class NotificationsService {
       tiendaTelefono: tienda?.telefono ?? undefined,
       items: items.map((it) => ({
         productoNombre: it.productoNombre,
+        productoCodigo: it.productoCodigo,
         tallaNombre: it.tallaNombre,
         colorNombre: it.colorNombre,
         cantidad: it.cantidad,
         precioUnitario: it.precioUnitario,
         subtotal: it.subtotal,
-        imagenUrl: it.producto?.imagenPrincipal ?? null,
+        // URL absoluta: un cliente de correo no puede resolver rutas relativas.
+        imagenUrl: this.storage.resolverImagen(it.producto?.imagenPrincipal),
       })),
     };
 

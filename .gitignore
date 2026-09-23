@@ -78,3 +78,9 @@ test-results/
 # Debug
 *.heapsnapshot
 *.cpuprofile
+
+# Imágenes subidas en local (fallback sin S3). En prod viven en el bucket.
+/uploads/
+
+# Trazas de build de Next.js (el frontend es un repo aparte; no pertenecen aquí)
+/.next/

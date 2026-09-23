@@ -32,18 +32,31 @@ export class AuthController {
    * token sigue viajando en el body/header (lo necesita axios).
    */
   private setRefreshCookie(res: Response, refreshToken: string): void {
-    const secure = process.env.NODE_ENV === 'production';
+    // En producción el frontend (Vercel) y el backend viven en dominios
+    // distintos → la request de /auth/refresh es CROSS-SITE. SameSite=Lax no
+    // viaja en XHR cross-site, así que el refresh fallaría y el usuario se
+    // desloguearía ~1h tras el login. SameSite=None + Secure es lo correcto
+    // para cookies cross-site. En dev (localhost, same-site) se mantiene Lax.
+    const isProd = process.env.NODE_ENV === 'production';
     res.cookie(this.REFRESH_COOKIE, refreshToken, {
       httpOnly: true,
-      secure,
-      sameSite: 'lax',
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
       path: '/',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7d, igual que el refresh JWT
     });
   }
 
   private clearRefreshCookie(res: Response): void {
-    res.clearCookie(this.REFRESH_COOKIE, { path: '/' });
+    // Debe coincidir con los atributos del set (path/sameSite/secure), o el
+    // logout no borra la cookie en producción y la sesión queda "pegada".
+    const isProd = process.env.NODE_ENV === 'production';
+    res.clearCookie(this.REFRESH_COOKIE, {
+      path: '/',
+      httpOnly: true,
+      secure: true,
+      sameSite: isProd ? 'none' : 'lax',
+    });
   }
 
   @Public()
@@ -146,6 +159,9 @@ export class AuthController {
     RolUsuario.BODEGA,
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
+    RolUsuario.MOSTRADOR,
+    RolUsuario.CAJERO_MONITOR,
+    RolUsuario.VENTAS,
     RolUsuario.ADMIN,
   )
   @HttpCode(HttpStatus.OK)
@@ -167,6 +183,9 @@ export class AuthController {
     RolUsuario.BODEGA,
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
+    RolUsuario.MOSTRADOR,
+    RolUsuario.CAJERO_MONITOR,
+    RolUsuario.VENTAS,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -182,6 +201,9 @@ export class AuthController {
     RolUsuario.BODEGA,
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
+    RolUsuario.MOSTRADOR,
+    RolUsuario.CAJERO_MONITOR,
+    RolUsuario.VENTAS,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -200,6 +222,9 @@ export class AuthController {
     RolUsuario.BODEGA,
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
+    RolUsuario.MOSTRADOR,
+    RolUsuario.CAJERO_MONITOR,
+    RolUsuario.VENTAS,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -222,6 +247,7 @@ export class AuthController {
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
     RolUsuario.MOSTRADOR,
+    RolUsuario.VENTAS,
     RolUsuario.ADMIN,
   )
   @HttpCode(HttpStatus.OK)

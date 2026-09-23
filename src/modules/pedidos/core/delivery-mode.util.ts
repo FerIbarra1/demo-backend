@@ -4,10 +4,13 @@ import { CreatePedidoDto } from '../cliente/dto/create-pedido.dto';
 
 /**
  * F8 (jul 2026): resuelve el `modoEntrega` del pedido. Si el frontend lo
- * mandó, se usa. Si no, se infiere de los campos de envío/recogida que
- * llegaron y de si el pedido es de kiosko. Valida coherencia con el canal
- * (KIOSKO no puede tener dirección, etc.) y con los requisitos de cada
- * modo (DOMICILIO requiere paquetería O admin decide, etc.).
+ * mandó, se usa. Si no, se infiere de los campos de envío que llegaron y de
+ * si el pedido es de kiosko. Valida coherencia con el canal (KIOSKO no puede
+ * tener dirección, etc.) y con los requisitos de cada modo (DOMICILIO requiere
+ * paquetería O admin decide, etc.).
+ *
+ * sep 2026: RECOGER_TIENDA ya no pide fecha ni hora de recogida. El modo se
+ * elige explícitamente desde el checkout; no se infiere de ningún campo.
  */
 export function resolverModoEntrega(
   dto: CreatePedidoDto,
@@ -22,7 +25,6 @@ export function resolverModoEntrega(
     !!dto.shippingCodigoPostal?.trim() ||
     !!dto.shippingPaqueteria ||
     dto.dejarAdminDecidePaqueteria === true;
-  const tieneRecogida = !!dto.recogerProgramado;
 
   if (dto.modoEntrega) {
     modo = dto.modoEntrega;
@@ -30,11 +32,9 @@ export function resolverModoEntrega(
     modo = ModoEntrega.KIOSKO;
   } else if (tieneDireccion) {
     modo = ModoEntrega.DOMICILIO;
-  } else if (tieneRecogida) {
-    modo = ModoEntrega.RECOGER_TIENDA;
   } else {
     throw new BadRequestException(
-      'No se pudo determinar el modo de entrega. Especifica modoEntrega o proporciona dirección/horario de recogida.',
+      'No se pudo determinar el modo de entrega. Especifica modoEntrega o proporciona una dirección de envío.',
     );
   }
 
@@ -45,9 +45,9 @@ export function resolverModoEntrega(
         'Un pedido con modo de entrega KIOSKO requiere canalOrigen=KIOSKO',
       );
     }
-    if (tieneDireccion || tieneRecogida) {
+    if (tieneDireccion) {
       throw new BadRequestException(
-        'Pedidos de kiosko no pueden tener dirección de envío ni horario de recogida (siempre se recogen en tienda)',
+        'Pedidos de kiosko no pueden tener dirección de envío (siempre se recogen en tienda)',
       );
     }
   }
@@ -81,17 +81,12 @@ export function resolverModoEntrega(
   if (modo === ModoEntrega.RECOGER_TIENDA) {
     if (canalOrigenFinal === CanalOrigen.KIOSKO) {
       throw new BadRequestException(
-        'Pedidos de kiosko no pueden elegir horario de recogida (recogen directamente)',
-      );
-    }
-    if (!dto.recogerProgramado) {
-      throw new BadRequestException(
-        'Para recoger en tienda debes seleccionar un día y hora de recogida',
+        'Pedidos de kiosko no pueden elegir RECOGER_TIENDA (su modo es KIOSKO)',
       );
     }
     if (tieneDireccion) {
       throw new BadRequestException(
-        'No puedes tener dirección de envío y horario de recogida al mismo tiempo',
+        'No puedes tener dirección de envío y recoger en tienda al mismo tiempo',
       );
     }
   }

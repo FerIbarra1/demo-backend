@@ -23,7 +23,7 @@ import {
 } from '../core/pedido-limits';
 import { zonaKey } from '../core/zona.util';
 import { asignadoANombre } from '../core/pedido-mapper';
-import { tiempoAtencionEn } from '../core/atencion.util';
+import { tiempoAtencionEn, pausarReloj } from '../core/atencion.util';
 import type {
   SurtirJuntosPedidoDto,
   LoteSurtirJuntosDto,
@@ -229,6 +229,13 @@ export class BodegaService {
       pedidoId,
       { nuevoEstado: EstadoPedido.REVIEWING, observacion: 'Pedido tomado por bodega' },
       usuario,
+      {
+        // F13: el bodeguero que toma el pedido queda asignado y su reloj de
+        // atención arranca.
+        asignacion: 'caller',
+        reloj: 'reanudar',
+        invalidarMonitor: true,
+      },
     );
 
     this.realtime.emitToTienda(pedido.tiendaId, 'pedido.asignado', {
@@ -253,28 +260,39 @@ export class BodegaService {
       );
     }
 
-    // F12: se puede liberar desde REVIEWING (caso normal) o desde
-    // WAITING_CUSTOMER_APPROVAL (cliente no respondió, bodeguero lo suelta a la
-    // cola). En ambos casos el pedido vuelve a REVIEWING sin asignar y el reloj
-    // de atención se reanuda (sigue siendo tarea de bodega).
-    const liberable =
-      pedido.estado === EstadoPedido.REVIEWING ||
-      pedido.estado === EstadoPedido.WAITING_CUSTOMER_APPROVAL;
-    if (!liberable) {
+    // F13: solo se puede liberar desde REVIEWING. El branch de
+    // WAITING_CUSTOMER_APPROVAL se eliminó porque en el flujo nuevo el pedido
+    // se desasigna al enviar la propuesta, así que nadie puede ser "el
+    // bodeguero asignado" de un pedido en ese estado — era código inalcanzable.
+    if (pedido.estado !== EstadoPedido.REVIEWING) {
       throw new BadRequestException(
-        `Sólo se puede liberar un pedido en REVIEWING o esperando cliente (actual: ${pedido.estado})`,
+        `Sólo se puede liberar un pedido en REVIEWING (actual: ${pedido.estado})`,
       );
     }
 
     return this.prisma.$transaction(async (tx) => {
+      // F13 (bug fix): al liberar, el tiempo del turno transcurrido se
+      // ACUMULA antes de reiniciar. Antes se ponía `new Date()` sin guardar el
+      // tramo, así que el tiempo que el bodeguero ya había trabajado el
+      // pedido se perdía. El reloj queda pausado; arranca de nuevo cuando
+      // alguien retome el pedido (ver `tomarPedido`).
+      const reloj = await tx.pedido.findUnique({
+        where: { id: pedidoId },
+        select: { tiempoAtencionBodegaMs: true, bodegaTurnoDesdeAt: true },
+      });
       const pedidoActualizado = await tx.pedido.update({
         where: { id: pedidoId },
         data: {
           estado: EstadoPedido.REVIEWING,
           asignadoAId: null,
           asignadoAt: null,
-          // F12: al liberar, el reloj sigue corriendo (es tarea de bodega).
-          bodegaTurnoDesdeAt: new Date(),
+          ...pausarReloj(
+            {
+              tiempoAtencionBodegaMs: reloj?.tiempoAtencionBodegaMs ?? 0,
+              bodegaTurnoDesdeAt: reloj?.bodegaTurnoDesdeAt ?? null,
+            },
+            new Date(),
+          ),
         },
       });
       await tx.historialPedido.create({
@@ -282,10 +300,7 @@ export class BodegaService {
           pedidoId,
           estadoAnterior: pedido.estado,
           estadoNuevo: EstadoPedido.REVIEWING,
-          observacion:
-            pedido.estado === EstadoPedido.WAITING_CUSTOMER_APPROVAL
-              ? `Pedido liberado por ${usuario.nombre} (cliente no respondió la propuesta)`
-              : `Pedido liberado por ${usuario.nombre}`,
+          observacion: `Pedido liberado por ${usuario.nombre}`,
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
         },
@@ -433,7 +448,6 @@ export class BodegaService {
     if (ranked.length === 0) return [];
 
     // 4) Hidratar detalle para los N pedidos que pasaron el umbral.
-    const rankedIds = new Set(ranked.map((r) => r.id));
     const candidatosDetalle = new Map(candidatos.map((c) => [c.id, c]));
 
     // Mapa productoId → nombre para enriquecer items compartidos sin un join extra.
@@ -450,7 +464,7 @@ export class BodegaService {
     const [productos, colores] = await Promise.all([
       this.prisma.producto.findMany({
         where: { id: { in: Array.from(productoIds) } },
-        select: { id: true, nombre: true },
+        select: { id: true, nombre: true, codigo: true },
       }),
       this.prisma.color.findMany({
         where: { id: { in: Array.from(colorIds) } },
@@ -458,6 +472,7 @@ export class BodegaService {
       }),
     ]);
     const productoNombreById = new Map(productos.map((p) => [p.id, p.nombre]));
+    const productoCodigoById = new Map(productos.map((p) => [p.id, p.codigo]));
     const colorById = new Map(colores.map((c) => [c.id, c]));
 
     // Mapa zona (productoId:colorId) → con qué pedidos del bodeguero la comparten.
@@ -489,6 +504,7 @@ export class BodegaService {
         itemsCompartidos.push({
           productoId: it.productoId,
           productoNombre: productoNombreById.get(it.productoId) ?? '(producto)',
+          productoCodigo: productoCodigoById.get(it.productoId) ?? '',
           cantidad: it.cantidad,
           colorId: color?.id ?? null,
           colorNombre: color?.nombre ?? null,
@@ -579,7 +595,7 @@ export class BodegaService {
     const [productos, colores] = await Promise.all([
       this.prisma.producto.findMany({
         where: { id: { in: Array.from(productoIds) } },
-        select: { id: true, nombre: true },
+        select: { id: true, nombre: true, codigo: true },
       }),
       this.prisma.color.findMany({
         where: { id: { in: Array.from(colorIds) } },
@@ -587,6 +603,7 @@ export class BodegaService {
       }),
     ]);
     const productoNombreById = new Map(productos.map((p) => [p.id, p.nombre]));
+    const productoCodigoById = new Map(productos.map((p) => [p.id, p.codigo]));
     const colorById = new Map(colores.map((c) => [c.id, c]));
 
     return clusters.map((c) => ({
@@ -599,6 +616,7 @@ export class BodegaService {
         return {
           productoId: pn,
           productoNombre: productoNombreById.get(pn) ?? '(producto)',
+          productoCodigo: productoCodigoById.get(pn) ?? '',
           colorId: !isNaN(cn) ? cn : null,
           colorNombre: color?.nombre ?? null,
           colorHex: color?.hex ?? null,
@@ -698,7 +716,9 @@ export class BodegaService {
           };
           zonasMap.set(key, zona);
         }
-        zona.items.push({
+        // Tras el guard de arriba, zona es no-undefined (TS no narrow across closures).
+        const zonaActual = zona as ZonaLoteDto;
+        zonaActual.items.push({
           itemId: it.id,
           pedidoId: p.id,
           numeroPedido: p.numeroPedido,

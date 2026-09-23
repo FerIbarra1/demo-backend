@@ -20,6 +20,7 @@ import { RevisionPropuesta } from './templates/RevisionPropuesta';
 
 export interface ItemPedidoSnapshot {
   productoNombre: string;
+  productoCodigo: string;
   tallaNombre: string;
   colorNombre: string;
   cantidad: number;
@@ -111,8 +112,9 @@ export const mailSubjects = {
   BIENVENIDA: '¡Bienvenido a PTM! Tu cuenta está lista',
   RESET_PASSWORD: 'Recupera tu contraseña de PTM',
   PEDIDO_RECIBIDO: (n: string) => `Recibimos tu pedido ${n}`,
-  REVISION_PROPUESTA: (n: string) =>
-    `Tu pedido ${n} tiene una propuesta del bodeguero`,
+  // F13: la propuesta puede venir de bodega (faltantes) o del asesor de ventas
+  // (contrapropuesta negociada). El subject es neutro para cubrir ambos.
+  REVISION_PROPUESTA: (n: string) => `Tu pedido ${n} tiene una propuesta`,
   REVISION_APROBADA: (n: string) => `Tu pedido ${n} fue aprobado`,
   REVISION_RECHAZADA: (n: string) => `Tu pedido ${n} fue rechazado`,
   PAGO_CONFIRMADO: (n: string) => `Pago confirmado de tu pedido ${n}`,
@@ -120,5 +122,11 @@ export const mailSubjects = {
   ENTREGADO: (n: string) => `Tu pedido ${n} fue entregado`,
   CANCELADO: (n: string) => `Tu pedido ${n} fue cancelado`,
   MENSAJE_BODEGUERO: (n: string) =>
-    `El bodeguero te ha enviado un mensaje sobre tu pedido ${n}`,
+    `Tu asesor de ventas te ha enviado un mensaje sobre tu pedido ${n}`,
+  // F13: el cliente pidió un asesor de ventas desde una propuesta.
+  ASESOR_SOLICITADO: (n: string) =>
+    `Un asesor de ventas atenderá tu pedido ${n}`,
+  // F13: el asesor envió una contrapropuesta.
+  PROPUESTA_VENTAS: (n: string) =>
+    `Tu asesor de ventas tiene una propuesta para el pedido ${n}`,
 };

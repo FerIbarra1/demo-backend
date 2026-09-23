@@ -15,8 +15,8 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { KioskoModule } from './modules/kiosko/kiosko.module';
 import { MostradorModule } from './modules/mostrador/mostrador.module';
 import { SyncModule } from './modules/sync/sync.module';
-import { VentanillasModule } from './modules/ventanillas/ventanillas.module';
 import { ImagenesModule } from './modules/imagenes/imagenes.module';
+import { ConfiguracionModule } from './modules/configuracion/configuracion.module';
 import { UsuariosModule } from './modules/usuarios/usuarios.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -42,6 +42,8 @@ import { Reflector } from '@nestjs/core';
     MostradorModule,
     // Imágenes de productos (panel ADMIN): subida a S3 + gestión.
     ImagenesModule,
+    // Configuración editable desde el panel ADMIN (logo de los correos).
+    ConfiguracionModule,
     // Gestión de usuarios (panel ADMIN): empleados + clientes.
     UsuariosModule,
     // F11 (ago 2026): gestión de ventanillas físicas del módulo de cajeros.

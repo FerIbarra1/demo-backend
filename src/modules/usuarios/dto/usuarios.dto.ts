@@ -11,6 +11,7 @@ export const ROLES_EMPLEADO = [
   RolUsuario.CAJERO,
   RolUsuario.CAJERO_MONITOR,
   RolUsuario.MOSTRADOR,
+  RolUsuario.VENTAS,
 ] as const;
 
 export class CrearUsuarioDto {

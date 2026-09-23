@@ -13,7 +13,6 @@ import {
   ActualizarUsuarioDto,
   AdminResetPasswordDto,
   ListarUsuariosQueryDto,
-  ROLES_EMPLEADO,
 } from './dto/usuarios.dto';
 
 /**

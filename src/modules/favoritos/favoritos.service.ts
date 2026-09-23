@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { StorageService } from '../imagenes/storage.service';
 
 /**
  * Servicio de favoritos.
@@ -14,7 +15,10 @@ import { PrismaService } from '../../prisma/prisma.service';
 export class FavoritosService {
   private readonly logger = new Logger(FavoritosService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private readonly storage: StorageService,
+  ) {}
 
   /**
    * Devuelve los productos favoritos del usuario con el detalle necesario
@@ -115,8 +119,8 @@ export class FavoritosService {
           codigo: p.codigo,
           nombre: p.nombre,
           descripcion: p.descripcion,
-          imagenPrincipal: p.imagenPrincipal,
-          imagenes: p.imagenes,
+          imagenPrincipal: this.storage.resolverImagen(p.imagenPrincipal),
+          imagenes: this.storage.resolverImagenes(p.imagenes),
           categoria: p.categoria,
           subcategoria: p.subcategoria,
           activo: p.activo,

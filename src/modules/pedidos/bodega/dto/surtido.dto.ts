@@ -2,9 +2,15 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { EstadoSurtido } from '@prisma/client';
 
+/**
+ * F13 (sep 2026): el bodeguero SOLO reporta existencia. Se eliminó
+ * `nuevoPrecioCOId` (la sustitución de producto/color/talla): proponer
+ * variantes o productos distintos es tarea del asesor de ventas, que arma
+ * una contrapropuesta completa al cliente.
+ */
 export class MarcarSurtidoItemDto {
   @ApiProperty({
-    description: 'Cantidad realmente surtida (0 si no hay stock)',
+    description: 'Cantidad realmente surtida (0 si no hay)',
     minimum: 0,
   })
   @IsInt()
@@ -26,12 +32,4 @@ export class MarcarSurtidoItemDto {
   @IsOptional()
   @IsString()
   motivo?: string;
-
-  @ApiPropertyOptional({
-    description:
-      'PrecioCO sustituto cuando el bodeguero eligió otra variante (otra talla/color u otro producto) en la quick option. Se persiste en ItemPedido.sustitucionPropuestaPrecioCOId. El backend valida que pertenezca a la misma tienda del pedido.',
-  })
-  @IsOptional()
-  @IsInt()
-  nuevoPrecioCOId?: number;
 }

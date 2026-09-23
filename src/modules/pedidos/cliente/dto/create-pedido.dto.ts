@@ -11,7 +11,6 @@ import {
   MaxLength,
   Matches,
   IsBoolean,
-  IsDateString,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
@@ -69,7 +68,7 @@ export class CreatePedidoDto {
   @ApiPropertyOptional({
     enum: ModoEntrega,
     description:
-      'Modo de entrega. Si se omite, el backend lo infiere: KIOSKO si canalOrigen=KIOSKO, DOMICILIO si hay dirección, RECOGER_TIENDA si hay recogerProgramado.',
+      'Modo de entrega. Si se omite, el backend lo infiere: KIOSKO si canalOrigen=KIOSKO, DOMICILIO si hay dirección.',
   })
   @IsOptional()
   @IsEnum(ModoEntrega)
@@ -115,15 +114,6 @@ export class CreatePedidoDto {
   @IsOptional()
   @IsBoolean()
   dejarAdminDecidePaqueteria?: boolean;
-
-  // Recogida (sólo RECOGER_TIENDA; kiosko no usa)
-  @ApiPropertyOptional({
-    description:
-      'Fecha+hora exactas en que el cliente pasará a recoger. Requerido si modoEntrega=RECOGER_TIENDA. Validado con isValidPickupSlot.',
-  })
-  @IsOptional()
-  @IsDateString()
-  recogerProgramado?: string;
 
   // Notas libres del cliente
   @ApiPropertyOptional()

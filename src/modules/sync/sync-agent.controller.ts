@@ -4,12 +4,11 @@ import {
   Get,
   Body,
   Query,
-  Param,
   UseGuards,
   Headers,
   BadRequestException,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ApiKeyGuard } from '../../common/guards/api-key.guard';
 import { ApiKeyAuth } from '../../common/decorators/api-key.decorator';
 import { SkipThrottle } from '@nestjs/throttler';

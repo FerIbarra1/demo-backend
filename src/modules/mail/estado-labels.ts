@@ -8,7 +8,8 @@ import { EstadoPedido } from '@prisma/client';
 export const ESTADO_PEDIDO_LABELS: Record<EstadoPedido, string> = {
   PENDING_REVIEW: 'Recibido · en cola de revisión',
   REVIEWING: 'En revisión por bodega',
-  WAITING_CUSTOMER_APPROVAL: 'Propuesta del bodeguero pendiente de tu aprobación',
+  WAITING_CUSTOMER_APPROVAL: 'Propuesta pendiente de tu aprobación',
+  EN_ASESORIA: 'Con un asesor de ventas',
   PENDING_PAID: 'Pendiente de pago',
   PAID: 'Pago confirmado',
   SHIPPED: 'Enviado · en camino',

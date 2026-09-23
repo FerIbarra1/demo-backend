@@ -8,6 +8,7 @@ import cookieParser from 'cookie-parser';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AppModule } from './app.module';
+import { StorageService } from './modules/imagenes/storage.service';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -27,8 +28,23 @@ async function bootstrap() {
     );
   }
 
-  // Configuración de seguridad
-  app.use(helmet());
+  // Configuración de seguridad.
+  // El fallback local de imágenes (/files/) se sirve desde OTRO origen (el
+  // frontend corre en otro puerto), así que la política por defecto de helmet
+  // (Cross-Origin-Resource-Policy: same-origin + CSP img-src 'self') lo bloquea
+  // y las imágenes subidas en dev nunca se ven. Se relaja sólo para /files/:
+  // son assets estáticos públicos, no respuestas de API.
+  app.use(
+    helmet({
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+      contentSecurityPolicy: {
+        directives: {
+          ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+          'img-src': ["'self'", 'data:', 'blob:', 'https:'],
+        },
+      },
+    }),
+  );
   app.use(compression());
   // Parsear cookies (necesario para leer el refresh token httpOnly).
   app.use(cookieParser());
@@ -81,6 +97,10 @@ async function bootstrap() {
 
   // Puerto
   const port = configService.get<number>('app.port') || 3000;
+
+  // Comprobar el storage al arrancar: un bucket mal configurado debe verse en
+  // los logs del deploy, no en el primer intento de subida del admin.
+  await app.get(StorageService).verificarConexion();
 
   await app.listen(port);
 

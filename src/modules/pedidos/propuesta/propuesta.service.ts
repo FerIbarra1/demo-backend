@@ -9,7 +9,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { PedidoStateService } from '../core/pedido-state.service';
-import { SurtidoService } from '../bodega/surtido.service';
+import { ReposicionService } from '../reposicion/reposicion.service';
 import { UserContext } from '../../../types/pedido.types';
 import {
   EstadoPedido,
@@ -17,148 +17,192 @@ import {
   RolUsuario,
   Prisma,
 } from '@prisma/client';
-import { CrearPropuestaDto, ResponderPropuestaDto } from './dto/propuesta.dto';
-import { pausarReloj, reanudarReloj } from '../core/atencion.util';
+import {
+  CrearPropuestaDto,
+  ResponderPropuestaDto,
+  DecisionPropuesta,
+} from './dto/propuesta.dto';
 
 /**
- * F12 (sep 2026): flujo de propuesta/contrapropuesta entre bodega y cliente.
+ * F12/F13 (sep 2026): flujo de propuesta/contrapropuesta entre el negocio y
+ * el cliente.
  *
- * Cuando faltan productos, el bodeguero envía una propuesta de ajuste. El
- * pedido pasa a WAITING_CUSTOMER_APPROVAL y el reloj de atención se PAUSA
- * (la pelota es del cliente). El cliente acepta o rechaza. Solo al ACEPTAR,
- * bodega aplica los cambios y libera a PENDING_PAID. Si rechaza, vuelve a
- * REVIEWING para re-trabajar.
+ * Hay DOS orígenes de propuesta, y las decisiones legales del cliente
+ * dependen del origen:
  *
- * La propuesta se ATA AL PEDIDO, no al bodeguero: si el bodeguero la libera
- * a la cola, la propuesta persiste y la respuesta del cliente se aplica al
- * pedido sin importar quién esté asignado.
+ *   BODEGA  — el bodeguero verificó existencia y reporta hay todo / hay menos
+ *             / no hay. Decisiones: APROBAR | RECHAZAR | CONTACTAR_ASESOR.
+ *   VENTAS  — el asesor de ventas negoció por chat y propone productos,
+ *             cantidades o variantes distintas. Decisiones:
+ *             APROBAR | RECHAZAR | CANCELAR_PEDIDO.
+ *
+ * Qué pasa con cada decisión:
+ *   APROBAR (bodega)  → aplica los cambios y va DIRECTO a PENDING_PAID.
+ *                       Bodega ya verificó físicamente lo que propuso.
+ *   APROBAR (ventas)  → aplica los cambios y vuelve a REVIEWING SIN ASIGNAR,
+ *                       porque el vendedor propuso productos que nadie
+ *                       verificó en el anaquel.
+ *   RECHAZAR (bodega) → CANCELLED + lista de reposición.
+ *   RECHAZAR (ventas) → vuelve a EN_ASESORIA para re-negociar (el chat sigue).
+ *   CONTACTAR_ASESOR  → la propuesta de bodega queda SUPERADA y el pedido pasa
+ *                       a EN_ASESORIA (cola del asesor de la tienda).
+ *   CANCELAR_PEDIDO   → CANCELLED + lista de reposición.
+ *
+ * La propuesta se ATA AL PEDIDO, no al autor: si el bodeguero la libera a la
+ * cola, la propuesta persiste y la respuesta del cliente se aplica al pedido
+ * sin importar quién esté asignado.
  */
 @Injectable()
 export class PropuestaService {
   private readonly logger = new Logger(PropuestaService.name);
+
+  /**
+   * F13: qué decisiones puede tomar el cliente según quién propuso. Se
+   * valida server-side porque el frontend no es de confianza — un cliente
+   * podría mandar `CANCELAR_PEDIDO` sobre una propuesta de bodega, o
+   * `CONTACTAR_ASESOR` sobre una de ventas (que ya está en asesoría).
+   */
+  private static readonly DECISIONES_POR_ORIGEN: Record<RolUsuario, DecisionPropuesta[]> = {
+    [RolUsuario.BODEGA]: ['APROBAR', 'RECHAZAR', 'CONTACTAR_ASESOR'],
+    [RolUsuario.VENTAS]: ['APROBAR', 'RECHAZAR', 'CANCELAR_PEDIDO'],
+    // El resto de roles no crean propuestas; el mapa se completa para que
+    // TypeScript exija revisarlo si se agrega un rol nuevo.
+    [RolUsuario.CLIENTE]: [],
+    [RolUsuario.BODEGA_MONITOR]: [],
+    [RolUsuario.CAJERO]: [],
+    [RolUsuario.CAJERO_MONITOR]: [],
+    [RolUsuario.MOSTRADOR]: [],
+    [RolUsuario.ADMIN]: ['APROBAR', 'RECHAZAR', 'CONTACTAR_ASESOR', 'CANCELAR_PEDIDO'],
+  };
 
   constructor(
     private prisma: PrismaService,
     private realtime: RealtimeService,
     private access: PedidoAccessService,
     private state: PedidoStateService,
-    private surtido: SurtidoService,
+    private reposicion: ReposicionService,
   ) {}
 
   /**
-   * Bodega envía una propuesta de ajuste. El pedido debe estar en REVIEWING
-   * y asignado al bodeguero (o admin). Transiciona a WAITING_CUSTOMER_APPROVAL
-   * y PAUSA el reloj de atención.
+   * Envía una propuesta al cliente.
    *
-   * Si ya existe una propuesta PENDIENTE, se rechaza (no se pueden apilar).
+   * - BODEGA: requiere estar asignado al pedido y que esté en REVIEWING.
+   * - VENTAS: requiere que el pedido esté en EN_ASESORIA (o ya en
+   *   WAITING_CUSTOMER_APPROVAL re-negociando).
+   *
+   * El pedido pasa a WAITING_CUSTOMER_APPROVAL y el reloj de atención se
+   * DETIENE (el pedido sale de bodega; antes se pausaba pero seguía asignado).
+   * `asignadoAId` se limpia para liberar el slot del bodeguero.
+   *
+   * Si ya existe una propuesta PENDIENTE, se rechaza. Además de este chequeo,
+   * hay un índice único parcial en BD que cierra la carrera entre dos envíos
+   * concurrentes (ahora posibles: BODEGA y VENTAS pueden proponer).
    */
   async enviarPropuesta(
     pedidoId: number,
     dto: CrearPropuestaDto,
     usuario: UserContext,
   ) {
+    const esVentas = usuario.rol === RolUsuario.VENTAS;
+    const esBodega = usuario.rol === RolUsuario.BODEGA;
+
+    if (!esVentas && !esBodega && usuario.rol !== RolUsuario.ADMIN) {
+      throw new BadRequestException(
+        'Sólo bodega o el asesor de ventas pueden enviar propuestas.',
+      );
+    }
+
     await this.access.cargarYValidar(pedidoId, usuario, {
-      requiereAsignacionBodega: true,
+      // El bodeguero solo propone sobre pedidos que él tiene asignados.
+      // El vendedor atiende la cola de su tienda, sin asignación 1:1.
+      requiereAsignacionBodega: esBodega,
     });
 
     if (dto.items.length === 0) {
       throw new BadRequestException('La propuesta debe tener al menos un item.');
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
-      if (!pedido) throw new NotFoundException('Pedido no encontrado');
+    // F13: el total NUNCA se confía al cliente del API. Ahora que ventas
+    // propone productos con precios, un vendedor podría mandar `total: 0` y el
+    // cliente aprobaría un número distinto al que se le cobra. Se recalcula
+    // desde los items.
+    const totalCalculado = dto.items.reduce(
+      (acc, it) => acc + (it.subtotalNuevo ?? it.subtotal),
+      0,
+    );
 
-      if (pedido.estado !== EstadoPedido.REVIEWING) {
-        throw new BadRequestException(
-          `Sólo se puede enviar una propuesta en estado REVIEWING (actual: ${pedido.estado})`,
-        );
-      }
+    const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
+    if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
-      // No apilar propuestas pendientes.
-      const pendiente = await tx.pedidoPropuesta.findFirst({
-        where: { pedidoId, estado: EstadoPropuesta.PENDIENTE },
-      });
-      if (pendiente) {
-        throw new ConflictException(
-          'Ya existe una propuesta pendiente de respuesta del cliente. Espera a que responda o cancélala.',
-        );
-      }
-
-      const ahora = new Date();
-
-      const propuesta = await tx.pedidoPropuesta.create({
-        data: {
-          pedidoId,
-          estado: EstadoPropuesta.PENDIENTE,
-          items: dto.items as unknown as Prisma.InputJsonValue,
-          total: new Prisma.Decimal(dto.total),
-          nota: dto.nota ?? null,
-          creadaPorId: usuario.userId,
-          enviadaAt: ahora,
-        },
-      });
-
-      // Transicionar a WAITING_CUSTOMER_APPROVAL y pausar el reloj.
-      // Mantener asignadoAId: el pedido sigue en "mis pedidos" del bodeguero.
-      await tx.pedido.update({
-        where: { id: pedidoId },
-        data: {
-          estado: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-          ...pausarReloj(
-            {
-              tiempoAtencionBodegaMs: pedido.tiempoAtencionBodegaMs,
-              bodegaTurnoDesdeAt: pedido.bodegaTurnoDesdeAt,
-            },
-            ahora,
-          ),
-        },
-      });
-
-      await tx.historialPedido.create({
-        data: {
-          pedidoId,
-          estadoAnterior: EstadoPedido.REVIEWING,
-          estadoNuevo: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-          observacion: `Propuesta enviada al cliente (${dto.items.length} item(s), total $${dto.total})`,
-          usuarioId: usuario.userId,
-          usuarioNombre: usuario.nombre,
-        },
-      });
-
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.REVIEWING,
-        estadoNuevo: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-        asignadoAId: pedido.asignadoAId,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.REVIEWING,
-        estadoNuevo: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-      });
-      this.realtime.emitToUser(pedido.usuarioId, 'propuesta.enviada', {
-        pedidoId,
-        propuestaId: propuesta.id,
-      });
-
-      this.logger.log(
-        `Pedido ${pedidoId}: propuesta #${propuesta.id} enviada → WAITING_CUSTOMER_APPROVAL`,
+    const estadosPermitidos: EstadoPedido[] = esVentas
+      ? [EstadoPedido.EN_ASESORIA, EstadoPedido.WAITING_CUSTOMER_APPROVAL]
+      : [EstadoPedido.REVIEWING];
+    if (!estadosPermitidos.includes(pedido.estado)) {
+      throw new BadRequestException(
+        `No se puede enviar una propuesta desde el estado ${pedido.estado}.`,
       );
+    }
 
-      return propuesta;
+    const pendiente = await this.prisma.pedidoPropuesta.findFirst({
+      where: { pedidoId, estado: EstadoPropuesta.PENDIENTE },
+      select: { id: true },
     });
+    if (pendiente) {
+      throw new ConflictException(
+        'Ya existe una propuesta pendiente de respuesta del cliente. Espera a que responda.',
+      );
+    }
+
+    const propuesta = await this.prisma.pedidoPropuesta.create({
+      data: {
+        pedidoId,
+        estado: EstadoPropuesta.PENDIENTE,
+        items: dto.items as unknown as Prisma.InputJsonValue,
+        total: new Prisma.Decimal(totalCalculado),
+        nota: dto.nota ?? null,
+        creadaPorId: usuario.userId,
+        creadaPorRol: usuario.rol,
+      },
+    });
+
+    // Transicionar a WAITING_CUSTOMER_APPROVAL. El reloj se DETIENE y el
+    // pedido se libera: el bodeguero ya no puede accionar nada.
+    await this.state.cambiarEstado(
+      pedidoId,
+      {
+        nuevoEstado: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+        observacion: esVentas
+          ? `Propuesta del asesor de ventas enviada al cliente (${dto.items.length} item(s))`
+          : `Propuesta de bodega enviada al cliente (${dto.items.length} item(s))`,
+      },
+      usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        invalidarMonitor: true,
+      },
+    );
+
+    // Aviso al cliente por realtime (el email lo manda la máquina de estados
+    // al entrar a WAITING_CUSTOMER_APPROVAL).
+    this.realtime.emitToUser(pedido.usuarioId, 'propuesta.enviada', {
+      pedidoId,
+      propuestaId: propuesta.id,
+      origen: usuario.rol,
+    });
+
+    this.logger.log(
+      `Pedido ${pedidoId}: propuesta #${propuesta.id} de ${usuario.rol} enviada → WAITING_CUSTOMER_APPROVAL`,
+    );
+
+    return propuesta;
   }
 
   /**
-   * Cliente responde a una propuesta: ACEPTAR o RECHAZAR.
-   * - ACEPTAR: la propuesta queda ACEPTADA y el pedido vuelve a REVIEWING.
-   *   El bodeguero termina de surtir y confirma (confirmarSurtido), que es
-   *   cuando se aplican los cambios y se encola a Firebird (PENDING_PAID).
-   *   NO se encola aquí: el pedido aún no está en pendiente de pago.
-   * - RECHAZAR: vuelve a REVIEWING (reanuda reloj) para que bodega re-trabaje.
+   * El cliente responde a una propuesta. La decisión debe ser legal para el
+   * ORIGEN de la propuesta (ver `DECISIONES_POR_ORIGEN`).
    *
-   * Solo el cliente dueño del pedido puede responder.
+   * Sólo el cliente dueño del pedido puede responder.
    */
   async responderPropuesta(
     pedidoId: number,
@@ -166,151 +210,662 @@ export class PropuestaService {
     dto: ResponderPropuestaDto,
     usuario: UserContext,
   ) {
-    // El cliente debe ser el dueño del pedido.
     await this.access.cargarYValidar(pedidoId, usuario);
 
-    return this.prisma.$transaction(async (tx) => {
-      const propuesta = await tx.pedidoPropuesta.findFirst({
-        where: { id: propuestaId, pedidoId },
-      });
-      if (!propuesta) {
-        throw new NotFoundException('Propuesta no encontrada');
-      }
-      if (propuesta.estado !== EstadoPropuesta.PENDIENTE) {
-        throw new ConflictException(
-          `Esta propuesta ya fue respondida (estado: ${propuesta.estado})`,
-        );
-      }
-
-      const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
-      if (!pedido) throw new NotFoundException('Pedido no encontrado');
-      if (pedido.estado !== EstadoPedido.WAITING_CUSTOMER_APPROVAL) {
-        throw new BadRequestException(
-          `El pedido no está esperando aprobación (actual: ${pedido.estado})`,
-        );
-      }
-
-      const ahora = new Date();
-
-      if (dto.decision === 'ACEPTAR') {
-        // El cliente acepta: la propuesta queda ACEPTADA y el pedido vuelve a
-        // REVIEWING para que el bodeguero termine de surtir y confirme. Los
-        // cambios se aplican en confirmarSurtido (no aquí).
-        await tx.pedidoPropuesta.update({
-          where: { id: propuestaId },
-          data: {
-            estado: EstadoPropuesta.ACEPTADA,
-            respondidaAt: ahora,
-            notaCliente: dto.nota ?? null,
-          },
-        });
-
-        await tx.pedido.update({
-          where: { id: pedidoId },
-          data: {
-            estado: EstadoPedido.REVIEWING,
-            // Mantener asignadoAId: el bodeguero que la envió la retoma.
-            ...reanudarReloj(
-              {
-                tiempoAtencionBodegaMs: pedido.tiempoAtencionBodegaMs,
-                bodegaTurnoDesdeAt: pedido.bodegaTurnoDesdeAt,
-              },
-              ahora,
-            ),
-          },
-        });
-
-        await tx.historialPedido.create({
-          data: {
-            pedidoId,
-            estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-            estadoNuevo: EstadoPedido.REVIEWING,
-            observacion: `Cliente aceptó la propuesta #${propuestaId}. Bodega puede confirmar el surtido.`,
-            usuarioId: usuario.userId,
-            usuarioNombre: usuario.nombre,
-          },
-        });
-
-        this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
-          id: pedidoId,
-          estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-          estadoNuevo: EstadoPedido.REVIEWING,
-          asignadoAId: pedido.asignadoAId,
-        });
-        this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-          id: pedidoId,
-          estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-          estadoNuevo: EstadoPedido.REVIEWING,
-        });
-
-        this.logger.log(
-          `Pedido ${pedidoId}: cliente aceptó propuesta #${propuestaId} → REVIEWING (bodega confirma)`,
-        );
-
-        return {
-          mensaje: 'Propuesta aceptada. El bodeguero puede confirmar el surtido.',
-          estado: EstadoPedido.REVIEWING,
-          propuestaId,
-        };
-      }
-
-      // RECHAZAR: volver a REVIEWING, reanudar reloj.
-      await tx.pedidoPropuesta.update({
-        where: { id: propuestaId },
-        data: {
-          estado: EstadoPropuesta.RECHAZADA,
-          respondidaAt: ahora,
-          notaCliente: dto.nota ?? null,
-        },
-      });
-
-      await tx.pedido.update({
-        where: { id: pedidoId },
-        data: {
-          estado: EstadoPedido.REVIEWING,
-          // Mantener asignadoAId: el bodeguero que la envió la retoma.
-          ...reanudarReloj(
-            {
-              tiempoAtencionBodegaMs: pedido.tiempoAtencionBodegaMs,
-              bodegaTurnoDesdeAt: pedido.bodegaTurnoDesdeAt,
-            },
-            ahora,
-          ),
-        },
-      });
-
-      await tx.historialPedido.create({
-        data: {
-          pedidoId,
-          estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-          estadoNuevo: EstadoPedido.REVIEWING,
-          observacion: `Cliente rechazó la propuesta #${propuestaId}${dto.nota ? `: ${dto.nota}` : ''}`,
-          usuarioId: usuario.userId,
-          usuarioNombre: usuario.nombre,
-        },
-      });
-
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-        estadoNuevo: EstadoPedido.REVIEWING,
-        asignadoAId: pedido.asignadoAId,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-        estadoNuevo: EstadoPedido.REVIEWING,
-      });
-
-      this.logger.log(
-        `Pedido ${pedidoId}: cliente rechazó propuesta #${propuestaId} → REVIEWING`,
+    const propuesta = await this.prisma.pedidoPropuesta.findFirst({
+      where: { id: propuestaId, pedidoId },
+    });
+    if (!propuesta) throw new NotFoundException('Propuesta no encontrada');
+    if (propuesta.estado !== EstadoPropuesta.PENDIENTE) {
+      throw new ConflictException(
+        `Esta propuesta ya fue respondida (estado: ${propuesta.estado})`,
       );
+    }
 
+    const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
+    if (!pedido) throw new NotFoundException('Pedido no encontrado');
+    if (pedido.estado !== EstadoPedido.WAITING_CUSTOMER_APPROVAL) {
+      throw new BadRequestException(
+        `El pedido no está esperando aprobación (actual: ${pedido.estado})`,
+      );
+    }
+
+    // F13: validar que la decisión sea legal para el origen de la propuesta.
+    const legales = PropuestaService.DECISIONES_POR_ORIGEN[propuesta.creadaPorRol];
+    if (!legales.includes(dto.decision)) {
+      throw new BadRequestException(
+        `La decisión ${dto.decision} no aplica a una propuesta de ${propuesta.creadaPorRol}. ` +
+          `Opciones válidas: ${legales.join(', ')}.`,
+      );
+    }
+
+    const ahora = new Date();
+    const esDeBodega = propuesta.creadaPorRol === RolUsuario.BODEGA;
+
+    const resultado = await (async () => {
+      switch (dto.decision) {
+        case 'APROBAR':
+          return esDeBodega
+            ? this.aprobarPropuestaBodega(pedido, propuesta, dto, usuario, ahora)
+            : this.aprobarPropuestaVentas(pedido, propuesta, dto, usuario, ahora);
+
+        case 'RECHAZAR':
+          return esDeBodega
+            ? this.rechazarPropuestaBodega(pedido, propuesta, dto, usuario, ahora)
+            : this.rechazarPropuestaVentas(pedido, propuesta, dto, usuario, ahora);
+
+        case 'CONTACTAR_ASESOR':
+          return this.contactarAsesor(pedido, propuesta, dto, usuario, ahora);
+
+        case 'CANCELAR_PEDIDO':
+          return this.cancelarPorPropuesta(pedido, propuesta, dto, usuario, ahora);
+      }
+    })();
+
+    // F14: avisar al asesor (y a la tienda) que el cliente ya respondió. Sin
+    // esto el asesor no se entera hasta que recargue a mano, y en el caso de
+    // "Quiero ajustes" queda esperando una respuesta que ya llegó.
+    const estadoFinal = await this.prisma.pedidoPropuesta.findUnique({
+      where: { id: propuestaId },
+      select: { estado: true },
+    });
+    const payload = {
+      pedidoId,
+      propuestaId,
+      decision: dto.decision,
+      estado: estadoFinal?.estado ?? null,
+    };
+    this.realtime.emitToPedido(pedidoId, 'propuesta.respondida', payload);
+    this.realtime.emitToTienda(pedido.tiendaId, 'propuesta.respondida', payload);
+
+    return resultado;
+  }
+
+  /**
+   * Cliente APROBÓ una propuesta de BODEGA: aplica los cambios y va DIRECTO a
+   * PENDING_PAID. El bodeguero ya verificó físicamente lo que propuso, así que
+   * no hay nada que confirmar después.
+   */
+  private async aprobarPropuestaBodega(
+    pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
+    propuesta: { id: number },
+    dto: { nota?: string },
+    usuario: UserContext,
+    ahora: Date,
+  ) {
+    const pedidoCompleto = await this.prisma.pedido.findUnique({
+      where: { id: pedido.id },
+      include: { items: true },
+    });
+    if (!pedidoCompleto) throw new NotFoundException('Pedido no encontrado');
+
+    const itemsConFaltante = pedidoCompleto.items.filter(
+      (i) =>
+        !i.cancelada &&
+        (i.estadoSurtido === 'PARCIAL' || i.estadoSurtido === 'NO_DISPONIBLE'),
+    );
+
+    let cambios: string[] = [];
+    await this.state.cambiarEstado(
+      pedido.id,
+      {
+        nuevoEstado: EstadoPedido.PENDING_PAID,
+        observacion: `Cliente aprobó la propuesta #${propuesta.id} de bodega — pendiente de pago`,
+      },
+      usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        encolarFirebird: true,
+        invalidarMonitor: true,
+        efectos: async (tx) => {
+          await tx.pedidoPropuesta.update({
+            where: { id: propuesta.id },
+            data: {
+              estado: EstadoPropuesta.ACEPTADA,
+              respondidaAt: ahora,
+              notaCliente: dto.nota ?? null,
+              consumidaAt: ahora,
+            },
+          });
+          cambios = await this.aplicarCambiosDeBodega(tx, pedido, itemsConFaltante);
+        },
+      },
+    );
+
+    this.logger.log(
+      `Pedido ${pedido.id}: cliente aprobó propuesta #${propuesta.id} de bodega → PENDING_PAID`,
+    );
+
+    return {
+      mensaje: 'Propuesta aprobada. Tu pedido pasa a pago.',
+      estado: EstadoPedido.PENDING_PAID,
+      propuestaId: propuesta.id,
+      cambiosAplicados: cambios.length,
+    };
+  }
+
+  /**
+   * Cliente APROBÓ una propuesta de VENTAS: aplica los cambios y devuelve el
+   * pedido a bodega SIN ASIGNAR, porque el vendedor propuso productos que
+   * nadie verificó en el anaquel.
+   *
+   * Optimización: si al aplicar no queda ningún item PENDIENTE de surtir, va
+   * directo a PENDING_PAID (no tiene sentido rebotar por bodega).
+   */
+  private async aprobarPropuestaVentas(
+    pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
+    propuesta: { id: number; items: Prisma.JsonValue },
+    dto: { nota?: string },
+    usuario: UserContext,
+    ahora: Date,
+  ) {
+    const pedidoCompleto = await this.prisma.pedido.findUnique({
+      where: { id: pedido.id },
+      include: { items: true },
+    });
+    if (!pedidoCompleto) throw new NotFoundException('Pedido no encontrado');
+
+    let quedanPendientes = false;
+    let cambios: string[] = [];
+
+    await this.state.cambiarEstado(
+      pedido.id,
+      {
+        nuevoEstado: EstadoPedido.REVIEWING,
+        observacion: `Cliente aprobó la propuesta #${propuesta.id} del asesor de ventas — vuelve a bodega a surtir`,
+      },
+      usuario,
+      {
+        // CRÍTICO: el caller es el CLIENTE. Con 'caller' el pedido quedaría
+        // asignado a él, invisible en el monitor y bloqueado para todo
+        // bodeguero. Debe volver a la cola sin asignar.
+        asignacion: 'limpiar',
+        // La pelota vuelve a bodega: el reloj se reanuda acumulando lo previo.
+        reloj: 'reanudar',
+        invalidarMonitor: true,
+        efectos: async (tx) => {
+          await tx.pedidoPropuesta.update({
+            where: { id: propuesta.id },
+            data: {
+              estado: EstadoPropuesta.ACEPTADA,
+              respondidaAt: ahora,
+              notaCliente: dto.nota ?? null,
+              consumidaAt: ahora,
+            },
+          });
+          const r = await this.aplicarPropuestaDeVentas(
+            tx,
+            pedido,
+            propuesta.items as unknown as ItemPropuestaJson[],
+            pedidoCompleto.items,
+          );
+          cambios = r.cambios;
+          quedanPendientes = r.quedanPendientes;
+        },
+      },
+    );
+
+    // Si no quedó nada por surtir, no hay razón para que bodega lo revise:
+    // pasa directo a pago. Se hace en una segunda transición porque el
+    // encolado a Firebird solo aplica al llegar a PENDING_PAID.
+    if (!quedanPendientes) {
+      await this.state.cambiarEstado(
+        pedido.id,
+        {
+          nuevoEstado: EstadoPedido.PENDING_PAID,
+          observacion:
+            'Propuesta de ventas aplicada sin items pendientes de surtir — pendiente de pago',
+        },
+        usuario,
+        {
+          asignacion: 'limpiar',
+          reloj: 'detener',
+          encolarFirebird: true,
+          invalidarMonitor: true,
+        },
+      );
+      this.logger.log(
+        `Pedido ${pedido.id}: propuesta #${propuesta.id} de ventas aplicada sin pendientes → PENDING_PAID`,
+      );
       return {
-        mensaje: 'Propuesta rechazada. El pedido volvió a revisión.',
-        estado: EstadoPedido.REVIEWING,
-        propuestaId,
+        mensaje: 'Propuesta aprobada. Tu pedido pasa a pago.',
+        estado: EstadoPedido.PENDING_PAID,
+        propuestaId: propuesta.id,
+        cambiosAplicados: cambios.length,
       };
+    }
+
+    this.logger.log(
+      `Pedido ${pedido.id}: cliente aprobó propuesta #${propuesta.id} de ventas → REVIEWING (bodega surte)`,
+    );
+
+    return {
+      mensaje: 'Propuesta aprobada. Bodega surtirá los productos nuevos.',
+      estado: EstadoPedido.REVIEWING,
+      propuestaId: propuesta.id,
+      cambiosAplicados: cambios.length,
+    };
+  }
+
+  /**
+   * Cliente RECHAZÓ una propuesta de BODEGA: el pedido se cancela y sus
+   * productos entran a la lista de reposición de bodega.
+   */
+  private async rechazarPropuestaBodega(
+    pedido: { id: number; tiendaId: number },
+    propuesta: { id: number },
+    dto: { nota?: string },
+    usuario: UserContext,
+    ahora: Date,
+  ) {
+    await this.state.cambiarEstado(
+      pedido.id,
+      {
+        nuevoEstado: EstadoPedido.CANCELLED,
+        observacion: `Cliente rechazó la propuesta #${propuesta.id} de bodega${dto.nota ? `: ${dto.nota}` : ''}`,
+      },
+      usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        invalidarMonitor: true,
+        efectos: async (tx) => {
+          await tx.pedidoPropuesta.update({
+            where: { id: propuesta.id },
+            data: {
+              estado: EstadoPropuesta.RECHAZADA,
+              respondidaAt: ahora,
+              notaCliente: dto.nota ?? null,
+            },
+          });
+          await this.reposicion.crearDesdePedido(tx, pedido.id, dto.nota);
+        },
+      },
+    );
+
+    this.logger.log(
+      `Pedido ${pedido.id}: cliente rechazó propuesta #${propuesta.id} de bodega → CANCELLED + reposición`,
+    );
+
+    return {
+      mensaje: 'Propuesta rechazada. Tu pedido fue cancelado.',
+      estado: EstadoPedido.CANCELLED,
+      propuestaId: propuesta.id,
+    };
+  }
+
+  /**
+   * Cliente RECHAZÓ una propuesta de VENTAS: el pedido vuelve a EN_ASESORIA
+   * para que el asesor re-negocie. El chat sigue vivo.
+   */
+  private async rechazarPropuestaVentas(
+    pedido: { id: number; tiendaId: number },
+    propuesta: { id: number },
+    dto: { nota?: string },
+    usuario: UserContext,
+    ahora: Date,
+  ) {
+    await this.state.cambiarEstado(
+      pedido.id,
+      {
+        nuevoEstado: EstadoPedido.EN_ASESORIA,
+        observacion: `Cliente rechazó la propuesta #${propuesta.id} del asesor — sigue en asesoría${dto.nota ? `: ${dto.nota}` : ''}`,
+      },
+      usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        invalidarMonitor: true,
+        efectos: async (tx) => {
+          await tx.pedidoPropuesta.update({
+            where: { id: propuesta.id },
+            data: {
+              estado: EstadoPropuesta.RECHAZADA,
+              respondidaAt: ahora,
+              notaCliente: dto.nota ?? null,
+            },
+          });
+        },
+      },
+    );
+
+    this.logger.log(
+      `Pedido ${pedido.id}: cliente rechazó propuesta #${propuesta.id} de ventas → EN_ASESORIA`,
+    );
+
+    return {
+      mensaje: 'Propuesta rechazada. El asesor te contactará con otras opciones.',
+      estado: EstadoPedido.EN_ASESORIA,
+      propuestaId: propuesta.id,
+    };
+  }
+
+  /**
+   * Cliente pidió un asesor de ventas desde una propuesta de BODEGA: la
+   * propuesta queda SUPERADA (sin efecto) y el pedido entra a la cola del
+   * asesor de la tienda.
+   */
+  private async contactarAsesor(
+    pedido: { id: number; tiendaId: number; usuarioId: number },
+    propuesta: { id: number },
+    dto: { nota?: string },
+    usuario: UserContext,
+    ahora: Date,
+  ) {
+    await this.state.cambiarEstado(
+      pedido.id,
+      {
+        nuevoEstado: EstadoPedido.EN_ASESORIA,
+        observacion: `Cliente pidió asesor de ventas${dto.nota ? `: ${dto.nota}` : ''}`,
+      },
+      usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        invalidarMonitor: true,
+        efectos: async (tx) => {
+          // La propuesta de bodega queda sin efecto: el cliente ya no decide
+          // sobre ella, va a negociar con el asesor.
+          await tx.pedidoPropuesta.update({
+            where: { id: propuesta.id },
+            data: {
+              estado: EstadoPropuesta.SUPERADA,
+              respondidaAt: ahora,
+              notaCliente: dto.nota ?? null,
+            },
+          });
+          await tx.pedido.update({
+            where: { id: pedido.id },
+            data: {
+              asesorSolicitadoAt: ahora,
+              asesorSolicitudNota: dto.nota ?? null,
+            },
+          });
+        },
+      },
+    );
+
+    // Avisar al equipo de ventas de la tienda por realtime (la cola se
+    // refresca sola; el evento es para que suene/avise si están conectados).
+    this.realtime.emitToTienda(pedido.tiendaId, 'asesor.solicitado', {
+      pedidoId: pedido.id,
+    });
+
+    this.logger.log(
+      `Pedido ${pedido.id}: cliente pidió asesor → EN_ASESORIA (propuesta #${propuesta.id} SUPERADA)`,
+    );
+
+    return {
+      mensaje: 'Un asesor de ventas te contactará en breve.',
+      estado: EstadoPedido.EN_ASESORIA,
+      propuestaId: propuesta.id,
+    };
+  }
+
+  /**
+   * Cliente CANCELÓ el pedido desde una propuesta de VENTAS: se cancela y sus
+   * productos entran a la lista de reposición.
+   */
+  private async cancelarPorPropuesta(
+    pedido: { id: number; tiendaId: number },
+    propuesta: { id: number },
+    dto: { nota?: string },
+    usuario: UserContext,
+    ahora: Date,
+  ) {
+    await this.state.cambiarEstado(
+      pedido.id,
+      {
+        nuevoEstado: EstadoPedido.CANCELLED,
+        observacion: `Cliente canceló el pedido durante la asesoría${dto.nota ? `: ${dto.nota}` : ''}`,
+      },
+      usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        invalidarMonitor: true,
+        efectos: async (tx) => {
+          await tx.pedidoPropuesta.update({
+            where: { id: propuesta.id },
+            data: {
+              estado: EstadoPropuesta.RECHAZADA,
+              respondidaAt: ahora,
+              notaCliente: dto.nota ?? null,
+            },
+          });
+          await this.reposicion.crearDesdePedido(tx, pedido.id, dto.nota);
+        },
+      },
+    );
+
+    this.logger.log(
+      `Pedido ${pedido.id}: cliente canceló desde propuesta #${propuesta.id} de ventas → CANCELLED + reposición`,
+    );
+
+    return {
+      mensaje: 'Pedido cancelado.',
+      estado: EstadoPedido.CANCELLED,
+      propuestaId: propuesta.id,
+    };
+  }
+
+  /**
+   * Aplica los cambios de una propuesta de BODEGA: cancela NO_DISPONIBLES y
+   * ajusta PARCIALES. Delega en `SurtidoService.aplicarCambiosSurtido` para
+   * no duplicar la lógica de recálculo de totales.
+   */
+  private async aplicarCambiosDeBodega(
+    tx: Prisma.TransactionClient,
+    pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
+    itemsConFaltante: Array<{
+      id: number;
+      cantidad: number;
+      cantidadSurtida: number;
+      estadoSurtido: 'PENDIENTE' | 'PARCIAL' | 'COMPLETO' | 'NO_DISPONIBLE';
+      motivoSurtido: string | null;
+    }>,
+  ): Promise<string[]> {
+    const cambios: string[] = [];
+    for (const item of itemsConFaltante) {
+      if (item.estadoSurtido === 'NO_DISPONIBLE') {
+        await tx.itemPedido.update({
+          where: { id: item.id },
+          data: { cancelada: true },
+        });
+        cambios.push(`Item #${item.id} cancelado (no disponible)`);
+        continue;
+      }
+      if (item.estadoSurtido === 'PARCIAL') {
+        const nuevaCantidad = Math.max(0, item.cantidadSurtida);
+        if (nuevaCantidad === 0) {
+          await tx.itemPedido.update({
+            where: { id: item.id },
+            data: { cancelada: true, estadoSurtido: 'NO_DISPONIBLE' },
+          });
+          cambios.push(`Item #${item.id} cancelado (cantidad 0)`);
+          continue;
+        }
+        const itemActual = await tx.itemPedido.findUnique({ where: { id: item.id } });
+        if (!itemActual) throw new NotFoundException(`Item ${item.id} no existe`);
+        const nuevoSubtotal = new Prisma.Decimal(itemActual.precioUnitario).mul(nuevaCantidad);
+        await tx.itemPedido.update({
+          where: { id: item.id },
+          data: {
+            cantidad: nuevaCantidad,
+            subtotal: nuevoSubtotal,
+            estadoSurtido: 'COMPLETO',
+          },
+        });
+        cambios.push(`Item #${item.id} ajustado a ${nuevaCantidad} piezas`);
+      }
+    }
+    await this.recalcularTotales(tx, pedido);
+    return cambios;
+  }
+
+  /**
+   * Aplica una propuesta de VENTAS sobre los items del pedido. La propuesta es
+   * un BORRADOR: nada tocó `ItemPedido` hasta este momento.
+   *
+   * Reglas:
+   *   - 'completo'      → no toca nada (el bodeguero ya lo verificó).
+   *   - 'parcial'       → ajusta la cantidad del item existente.
+   *   - 'no-disponible' → cancela el item.
+   *   - 'cambio'        → cancela el original y crea uno nuevo (PENDIENTE).
+   *   - 'agregado'      → crea una línea nueva (PENDIENTE).
+   *
+   * Los items que la propuesta no menciona conservan el `estadoSurtido` que el
+   * bodeguero ya había verificado.
+   *
+   * Devuelve `quedanPendientes`: true si algún item quedó por surtir, lo que
+   * determina si el pedido vuelve a bodega o va directo a pago.
+   */
+  private async aplicarPropuestaDeVentas(
+    tx: Prisma.TransactionClient,
+    pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
+    items: ItemPropuestaJson[],
+    itemsActuales: Array<{ id: number; precioUnitario: Prisma.Decimal }>,
+  ): Promise<{ cambios: string[]; quedanPendientes: boolean }> {
+    const cambios: string[] = [];
+    const idsActuales = new Set(itemsActuales.map((i) => i.id));
+
+    for (const it of items) {
+      // 'completo' no requiere acción: bodega ya confirmó existencia.
+      if (it.tipo === 'completo') continue;
+
+      // Items nuevos: 'agregado' (tempId negativo) o 'cambio' (reemplaza uno).
+      const esNuevo = it.tipo === 'agregado' || it.tipo === 'cambio';
+      if (esNuevo) {
+        if (!it.precioCOId) {
+          throw new BadRequestException(
+            `El item "${it.producto}" (${it.tipo}) requiere precioCOId para poder aplicarse.`,
+          );
+        }
+        const pco = await tx.precioCO.findUnique({
+          where: { id: it.precioCOId },
+          include: { producto: true, talla: true, color: true, corrida: true },
+        });
+        if (!pco) {
+          throw new NotFoundException(`PrecioCO ${it.precioCOId} no existe`);
+        }
+        if (pco.tiendaId !== pedido.tiendaId) {
+          throw new BadRequestException(
+            `El producto "${it.producto}" pertenece a otra tienda.`,
+          );
+        }
+
+        // Si es un cambio, cancelar el item original.
+        if (it.tipo === 'cambio' && idsActuales.has(it.itemId)) {
+          await tx.itemPedido.update({
+            where: { id: it.itemId },
+            data: { cancelada: true },
+          });
+        }
+
+        const cantidad = Math.max(1, it.cantidadNueva ?? it.cantidad);
+        await tx.itemPedido.create({
+          data: {
+            pedidoId: pedido.id,
+            productoId: pco.productoId,
+            precioCOId: pco.id,
+            cantidad,
+            cantidadOriginal: cantidad,
+            precioUnitario: pco.precio,
+            subtotal: new Prisma.Decimal(pco.precio).mul(cantidad),
+            productoNombre: pco.producto.nombre,
+            productoCodigo: pco.producto.codigo,
+            corridaNombre: pco.corrida.nombre,
+            tallaNombre: pco.talla.nombre,
+            colorNombre: pco.color.nombre,
+            original: false,
+            cancelada: false,
+            // PENDIENTE: nadie ha verificado que este producto exista en el
+            // anaquel. Por eso el pedido vuelve a bodega.
+            estadoSurtido: 'PENDIENTE',
+            cantidadSurtida: 0,
+          },
+        });
+        cambios.push(
+          it.tipo === 'cambio'
+            ? `Item #${it.itemId} cambiado por "${pco.producto.nombre}"`
+            : `Producto "${pco.producto.nombre}" agregado (${cantidad} pzas)`,
+        );
+        continue;
+      }
+
+      // Items existentes que la propuesta modifica.
+      if (!idsActuales.has(it.itemId)) continue;
+
+      if (it.tipo === 'no-disponible') {
+        await tx.itemPedido.update({
+          where: { id: it.itemId },
+          data: { cancelada: true, estadoSurtido: 'NO_DISPONIBLE', cantidadSurtida: 0 },
+        });
+        cambios.push(`Item #${it.itemId} quitado del pedido`);
+        continue;
+      }
+
+      if (it.tipo === 'parcial') {
+        const nuevaCantidad = Math.max(0, it.cantidadNueva ?? it.cantidad);
+        const actual = itemsActuales.find((i) => i.id === it.itemId);
+        if (!actual) continue;
+        if (nuevaCantidad === 0) {
+          await tx.itemPedido.update({
+            where: { id: it.itemId },
+            data: { cancelada: true, estadoSurtido: 'NO_DISPONIBLE', cantidadSurtida: 0 },
+          });
+          cambios.push(`Item #${it.itemId} quitado del pedido`);
+          continue;
+        }
+        await tx.itemPedido.update({
+          where: { id: it.itemId },
+          data: {
+            cantidad: nuevaCantidad,
+            subtotal: new Prisma.Decimal(actual.precioUnitario).mul(nuevaCantidad),
+            // El bodeguero ya había verificado este item; solo cambió la
+            // cantidad, así que sigue COMPLETO (no vuelve a bodega).
+            estadoSurtido: 'COMPLETO',
+            cantidadSurtida: nuevaCantidad,
+          },
+        });
+        cambios.push(`Item #${it.itemId} ajustado a ${nuevaCantidad} piezas`);
+      }
+    }
+
+    await this.recalcularTotales(tx, pedido);
+
+    // ¿Quedó algo por surtir? Solo los items PENDIENTE (los nuevos de
+    // 'cambio'/'agregado') requieren que bodega los verifique.
+    const pendientesRestantes = await tx.itemPedido.count({
+      where: { pedidoId: pedido.id, cancelada: false, estadoSurtido: 'PENDIENTE' },
+    });
+
+    return { cambios, quedanPendientes: pendientesRestantes > 0 };
+  }
+
+  /**
+   * Recalcula subtotal y total del pedido desde sus items activos, respetando
+   * descuento e impuestos.
+   */
+  private async recalcularTotales(
+    tx: Prisma.TransactionClient,
+    pedido: { id: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
+  ): Promise<void> {
+    const items = await tx.itemPedido.findMany({
+      where: { pedidoId: pedido.id, cancelada: false },
+      select: { subtotal: true },
+    });
+    const subtotal = items.reduce(
+      (acc, i) => acc.plus(new Prisma.Decimal(i.subtotal)),
+      new Prisma.Decimal(0),
+    );
+    const total = subtotal
+      .minus(new Prisma.Decimal(pedido.descuento))
+      .plus(new Prisma.Decimal(pedido.impuestos));
+    await tx.pedido.update({
+      where: { id: pedido.id },
+      data: { subtotal, total },
     });
   }
 
@@ -327,86 +882,44 @@ export class PropuestaService {
       throw new BadRequestException('Sólo un admin puede forzar la aprobación.');
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const propuesta = await tx.pedidoPropuesta.findFirst({
-        where: { id: propuestaId, pedidoId },
-      });
-      if (!propuesta) throw new NotFoundException('Propuesta no encontrada');
-      if (propuesta.estado !== EstadoPropuesta.PENDIENTE) {
-        throw new ConflictException('La propuesta ya fue respondida.');
-      }
-
-      const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
-      if (!pedido) throw new NotFoundException('Pedido no encontrado');
-      if (pedido.estado !== EstadoPedido.WAITING_CUSTOMER_APPROVAL) {
-        throw new BadRequestException(
-          `El pedido no está esperando aprobación (actual: ${pedido.estado})`,
-        );
-      }
-
-      const ahora = new Date();
-
-      // El admin fuerza la aprobación: la propuesta queda ACEPTADA y el pedido
-      // vuelve a REVIEWING para que el bodeguero confirme el surtido. Los
-      // cambios se aplican en confirmarSurtido (no aquí). No se encola a
-      // Firebird hasta que el pedido pase a PENDING_PAID.
-      await tx.pedidoPropuesta.update({
-        where: { id: propuestaId },
-        data: {
-          estado: EstadoPropuesta.ACEPTADA,
-          respondidaAt: ahora,
-          forzadaPorId: usuario.userId,
-          forzadaAt: ahora,
-        },
-      });
-
-      await tx.pedido.update({
-        where: { id: pedidoId },
-        data: {
-          estado: EstadoPedido.REVIEWING,
-          ...reanudarReloj(
-            {
-              tiempoAtencionBodegaMs: pedido.tiempoAtencionBodegaMs,
-              bodegaTurnoDesdeAt: pedido.bodegaTurnoDesdeAt,
-            },
-            ahora,
-          ),
-        },
-      });
-
-      await tx.historialPedido.create({
-        data: {
-          pedidoId,
-          estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-          estadoNuevo: EstadoPedido.REVIEWING,
-          observacion: `Aprobación forzada por admin (${usuario.nombre}) sin respuesta del cliente. Bodega puede confirmar el surtido.`,
-          usuarioId: usuario.userId,
-          usuarioNombre: usuario.nombre,
-        },
-      });
-
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-        estadoNuevo: EstadoPedido.REVIEWING,
-        asignadoAId: pedido.asignadoAId,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-        estadoNuevo: EstadoPedido.REVIEWING,
-      });
-
-      this.logger.log(
-        `Pedido ${pedidoId}: aprobación forzada por admin ${usuario.nombre} (propuesta #${propuestaId}) → REVIEWING`,
-      );
-
-      return {
-        mensaje: 'Aprobación forzada. El bodeguero puede confirmar el surtido.',
-        estado: EstadoPedido.REVIEWING,
-        propuestaId,
-      };
+    const propuesta = await this.prisma.pedidoPropuesta.findFirst({
+      where: { id: propuestaId, pedidoId },
     });
+    if (!propuesta) throw new NotFoundException('Propuesta no encontrada');
+    if (propuesta.estado !== EstadoPropuesta.PENDIENTE) {
+      throw new ConflictException('La propuesta ya fue respondida.');
+    }
+
+    const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
+    if (!pedido) throw new NotFoundException('Pedido no encontrado');
+    if (pedido.estado !== EstadoPedido.WAITING_CUSTOMER_APPROVAL) {
+      throw new BadRequestException(
+        `El pedido no está esperando aprobación (actual: ${pedido.estado})`,
+      );
+    }
+
+    const ahora = new Date();
+    const esDeBodega = propuesta.creadaPorRol === RolUsuario.BODEGA;
+
+    // Se reutiliza la misma lógica que la aprobación del cliente, marcando
+    // quién la forzó para que quede en auditoría.
+    await this.prisma.pedidoPropuesta.update({
+      where: { id: propuestaId },
+      data: { forzadaPorId: usuario.userId, forzadaAt: ahora },
+    });
+
+    const resultado = esDeBodega
+      ? await this.aprobarPropuestaBodega(pedido, propuesta, {}, usuario, ahora)
+      : await this.aprobarPropuestaVentas(pedido, propuesta, {}, usuario, ahora);
+
+    this.logger.log(
+      `Pedido ${pedidoId}: aprobación forzada por admin ${usuario.nombre} (propuesta #${propuestaId})`,
+    );
+
+    return {
+      ...resultado,
+      mensaje: `Aprobación forzada. ${resultado.mensaje}`,
+    };
   }
 
   /**
@@ -423,4 +936,31 @@ export class PropuestaService {
       },
     });
   }
+}
+
+/**
+ * Shape del JSON de `PedidoPropuesta.items` (mismo que el frontend
+ * `lib/propuesta.ts`). Se declara aquí porque el backend lo lee al aplicar
+ * una propuesta de ventas — antes este JSON se guardaba pero nunca se leía.
+ */
+export interface ItemPropuestaJson {
+  itemId: number;
+  tipo: 'completo' | 'cambio' | 'no-disponible' | 'parcial' | 'agregado';
+  producto: string;
+  variante: string;
+  productoImagen?: string | null;
+  cantidad: number;
+  precioUnitario: number;
+  subtotal: number;
+  productoOriginal?: string;
+  varianteOriginal?: string;
+  cantidadOriginal?: number;
+  productoNuevo?: string;
+  varianteNueva?: string;
+  cantidadNueva?: number;
+  precioUnitarioNuevo?: number;
+  subtotalNuevo?: number;
+  tempId?: number;
+  productoId?: number;
+  precioCOId?: number;
 }

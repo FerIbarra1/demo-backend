@@ -1,5 +1,3 @@
-import { EstadoPedido } from '@prisma/client';
-
 /**
  * F12 (sep 2026): reloj de atención del bodeguero.
  *
@@ -54,13 +52,4 @@ export function reanudarReloj(reloj: RelojAtencion, ahora: Date): RelojAtencion 
     tiempoAtencionBodegaMs: reloj.tiempoAtencionBodegaMs,
     bodegaTurnoDesdeAt: ahora,
   };
-}
-
-/**
- * Estados en los que el reloj de atención está CORRIENDO (es tarea del
- * bodeguero). En cualquier otro estado (WAITING_CUSTOMER_APPROVAL, o ya
- * fuera de bodega) el reloj está pausado o detenido.
- */
-export function relojCorreEn(estado: EstadoPedido): boolean {
-  return estado === EstadoPedido.PENDING_REVIEW || estado === EstadoPedido.REVIEWING;
 }

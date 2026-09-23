@@ -6,7 +6,7 @@ const prisma = new PrismaClient();
 // ============================================
 // CONFIGURACIÓN DE PRODUCTOS POR IMÁGENES
 // ============================================
-// Las imágenes están en: public/products/
+// Las imágenes viven en S3 (ver getImagenUrl más abajo).
 // Formato: {modelo}-{color}-{num-img}.webp
 // Ejemplo: C0200-caribe-1.webp
 //
@@ -105,6 +105,8 @@ async function limpiarBaseDeDatos() {
   // F12 (sep 2026): las propuestas y la cola de envío a Firebird referencian
   // a pedidos — borrarlas antes de pedidos.
   await prisma.pedidoPropuesta.deleteMany({});
+  // F13: la reposición referencia pedidos — borrarla antes.
+  await prisma.pedidoReposicion.deleteMany({});
   await prisma.pedidoPendienteEnvio.deleteMany({});
   await prisma.itemPedido.deleteMany({});
   await prisma.historialPedido.deleteMany({});
@@ -126,10 +128,10 @@ async function limpiarBaseDeDatos() {
   await prisma.externalRef.deleteMany({});
   await prisma.favorito.deleteMany({});
   // kiosko tiene FK activado_por_id → usuarios. Hay que borrarlo ANTES.
-  // F11 (ago 2026): tabla kioskos no existe todavía en la BD (modelo en
-  // schema.prisma sin migración que la cree). Comento el deleteMany para
-  // no romper el seed; re-activar cuando se cree la migración de kioskos.
-  // await prisma.kiosko.deleteMany({});
+  // F13 (sep 2026): reactivado. El comentario anterior decía que la tabla no
+  // existía, pero se crea desde la migración init — el seed dejaba kioskos
+  // huérfanos apuntando a usuarios borrados.
+  await prisma.kiosko.deleteMany({});
   await prisma.usuario.deleteMany({});
   await prisma.tienda.deleteMany({});
 
@@ -148,6 +150,7 @@ async function limpiarBaseDeDatos() {
   await prisma.$executeRaw`ALTER SEQUENCE "historial_pedidos_id_seq" RESTART WITH 1`;
   // F12 (sep 2026): secuencias de propuestas y cola de envío a Firebird.
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_propuestas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "pedidos_reposicion_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_pendientes_envio_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_mensajes_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "notificaciones_id_seq" RESTART WITH 1`;
@@ -164,12 +167,37 @@ async function limpiarBaseDeDatos() {
   console.log('  ✓ Base de datos limpiada\n');
 }
 
-// Devuelve ruta relativa para evitar problemas de CORS
+// Las imágenes viven en S3 desde sep 2026. El seed escribe la KEY de storage
+// (no una URL): el borde de la API la resuelve con StorageService.resolverImagen.
+//
+// Antes escribía `/products/${archivo}`, una ruta relativa a public/ del
+// frontend. Esa carpeta ya no existe, así que esas rutas daban 404.
+//
+// El seed NO sube los archivos: asume que ya están en el bucket. Para subirlos
+// usa `pnpm migrar:imagenes` (lee los .webp del repo del frontend).
 function getImagenUrl(nombreArchivo: string): string {
-  return `/products/${nombreArchivo}`;
+  return `productos/seed/${nombreArchivo}`;
 }
 
 async function main() {
+  // El seed hace deleteMany sobre ~25 tablas (pedidos reales incluidos) y
+  // reinicia secuencias. Es una herramienta de desarrollo: correrlo contra
+  // producción destruye datos y, tras migrar a S3, deja las imágenes del admin
+  // huérfanas en el bucket.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'El seed es destructivo y no puede ejecutarse con NODE_ENV=production.',
+    );
+  }
+  // Segunda guardia: si DATABASE_URL no apunta a localhost, es una BD remota.
+  const dbUrl = process.env.DATABASE_URL || '';
+  if (!/localhost|127\.0\.0\.1/.test(dbUrl)) {
+    throw new Error(
+      'El seed sólo puede ejecutarse contra una base de datos local. ' +
+        'DATABASE_URL no apunta a localhost.',
+    );
+  }
+
   console.log('🌱 Iniciando seed de datos...\n');
 
   // ========== LIMPIAR TODO PRIMERO ==========
@@ -261,6 +289,20 @@ async function main() {
       nombre: 'Usuario',
       apellido: 'Cajero',
       rol: RolUsuario.CAJERO,
+      tiendaId: tiendaMexicali.id,
+      activo: true,
+    },
+  });
+
+  // F13 (sep 2026): asesor de ventas. Uno por tienda; atiende la cola de
+  // pedidos que los clientes escalan desde una propuesta de bodega.
+  const usuarioVentas = await prisma.usuario.create({
+    data: {
+      email: 'ventas@puntotextil.com',
+      password: passwordHash,
+      nombre: 'Usuario',
+      apellido: 'Ventas',
+      rol: RolUsuario.VENTAS,
       tiendaId: tiendaMexicali.id,
       activo: true,
     },
@@ -574,6 +616,7 @@ async function main() {
   console.log('  admin@puntotextil.com');
   console.log('  bodega@puntotextil.com              (Mexicali)');
   console.log('  cajero@puntotextil.com              (Mexicali)');
+  console.log('  ventas@puntotextil.com              (Mexicali, rol VENTAS)');
   console.log('  mostrador@puntotextil.com           (Mexicali)');
   console.log('  cliente@puntotextil.com');
   console.log('  monitor.mexicali@puntotextil.com    (TV monitor Mexicali, rol BODEGA_MONITOR)');
