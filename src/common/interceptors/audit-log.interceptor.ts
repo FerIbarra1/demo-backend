@@ -39,6 +39,14 @@ export class AuditLogInterceptor implements NestInterceptor {
     if (url.includes('/api/docs') || url.includes('/api/health')) {
       return next.handle();
     }
+    // PR3 (kiosko-profesional): saltamos también los heartbeats del kiosko.
+    // Un kiosko activo late cada 60s — sin este filtro, una tablet que
+    // esté 24h en pantalla mete 1440 filas/día a log_actividades con
+    // usuarioId=null. Sin valor de auditoría: el heartbeat ya persiste
+    // `kioskos.ultimo_heartbeat` que es lo que alimenta el dashboard.
+    if (/\/kiosko\/\d+\/heartbeat$/.test(url)) {
+      return next.handle();
+    }
 
     const user = req.user;
     const usuarioId = user?.userId ?? null;

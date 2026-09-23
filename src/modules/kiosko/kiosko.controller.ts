@@ -1,5 +1,6 @@
 import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query, Headers, UnauthorizedException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { KioskoService } from './kiosko.service';
 import { ActivarKioskoDto } from './dto/activar-kiosko.dto';
 import { ActualizarKioskoDto } from './dto/actualizar-kiosko.dto';
@@ -38,6 +39,10 @@ export class KioskoController {
   @Post(':id/heartbeat')
   @ApiOperation({ summary: 'Heartbeat del kiosko (público, requiere X-Kiosko-Token)' })
   @ApiHeader({ name: 'X-Kiosko-Token', required: true, description: 'Device token del kiosko (devuelto UNA vez al activarlo)' })
+  // PR3: 60 req/min/IP. Suficiente para una tablet que late cada 60s +
+  // overhead de reintentos al cambiar de red; corta a un atacante que
+  // intenta forzar IDs en este endpoint público.
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
   async heartbeat(
     @Param('id', ParseIntPipe) id: number,
     @Headers('x-kiosko-token') deviceToken?: string,

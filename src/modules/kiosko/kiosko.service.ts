@@ -94,6 +94,12 @@ export class KioskoService {
 
   /**
    * Desactiva un kiosko. NO elimina pedidos históricos (trazabilidad).
+   *
+   * PR3 (kiosko-profesional): idempotente. Si ya estaba INACTIVO,
+   * devolvemos la fila actual sin error. Antes lanzaba 400, lo que
+   * rompía el caso "admin hace click en Desactivar dos veces" y el
+   * caso "kiosko recién creado por el admin está INACTIVO y el botón
+   * Desactivar salta error sin haberlo desactivado antes".
    */
   async desactivar(kioskoId: number, adminUserId: number) {
     const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
@@ -101,7 +107,11 @@ export class KioskoService {
       throw new NotFoundException('Kiosko no encontrado');
     }
     if (kiosko.estado === EstadoKiosko.INACTIVO) {
-      throw new BadRequestException('El kiosko ya está inactivo');
+      // Idempotente: devolver la fila actual sin re-marcar timestamps.
+      return this.prisma.kiosko.findUniqueOrThrow({
+        where: { id: kioskoId },
+        include: this.includeCompleto,
+      });
     }
 
     const actualizado = await this.prisma.kiosko.update({
