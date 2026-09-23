@@ -315,15 +315,43 @@ export class KioskoPairingService {
   }
 
   /**
-   * Purga de solicitudes vencidas. Se llama en cada `solicitar()` (barata y sin
+   * Purga de solicitudes terminales. Se llama en cada `solicitar()` (barata y sin
    * cron): mantiene la tabla acotada sin agregar infraestructura.
+   *
+   * Privacidad: las filas RECLAMADO, CANCELADO y EXPIRADO se conservan 30 días
+   * tras su terminación — esto cubre cualquier auditoría de "¿alguien
+   * vinculó una tablet a este kiosko?" — y luego se purgan. PENDIENTE se
+   * purga por TTL directamente (se quedó sin respuesta).
    */
+  private static readonly RETENCION_TERMINAL_MS = 30 * 24 * 60 * 60 * 1000;
+
   async purgarVencidas(): Promise<void> {
-    const corte = new Date(Date.now() - KioskoPairingService.TTL_MS);
+    const ahora = new Date();
+    const corteExpiradas = new Date(ahora.getTime() - KioskoPairingService.TTL_MS);
+    const corteTerminales = new Date(
+      ahora.getTime() - KioskoPairingService.RETENCION_TERMINAL_MS,
+    );
     await this.prisma.kioskoPairing.deleteMany({
       where: {
-        createdAt: { lt: corte },
-        estado: { in: [KioskoPairingEstado.EXPIRADO, KioskoPairingEstado.CANCELADO] },
+        OR: [
+          // PENDIENTE que nadie aprobó y ya pasó su TTL.
+          {
+            createdAt: { lt: corteExpiradas },
+            estado: KioskoPairingEstado.PENDIENTE,
+          },
+          // RECLAMADO / CANCELADO / EXPIRADO: ya no se usan, pero los
+          // retenemos 30 días para auditoría antes de borrarlos.
+          {
+            updatedAt: { lt: corteTerminales },
+            estado: {
+              in: [
+                KioskoPairingEstado.RECLAMADO,
+                KioskoPairingEstado.CANCELADO,
+                KioskoPairingEstado.EXPIRADO,
+              ],
+            },
+          },
+        ],
       },
     });
   }

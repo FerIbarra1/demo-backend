@@ -953,9 +953,13 @@ model KioskoPairing {
 
   expiraAt  DateTime @map("expira_at")
   createdAt DateTime @default(now()) @map("created_at")
+  /// Se actualiza con cada cambio de estado. Permite retener un tiempo las
+  /// filas terminales (RECLAMADO, CANCELADO, EXPIRADO) y luego purgarlas.
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   @@index([estado, expiraAt])
   @@index([kioskoId])
+  @@index([estado, updatedAt])
   @@map("kiosko_pairings")
 }
 
