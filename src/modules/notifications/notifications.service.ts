@@ -7,6 +7,7 @@ import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { MailService } from '../mail/mail.service';
 import { mailTemplates, mailSubjects } from '../mail/mail.templates';
 import { generarQrDataUrl } from '../pedidos/core/qr.util';
+import { firmarLlegoQr } from '../pedidos/core/qr-llegada.util';
 
 /**
  * Servicio orquestador de notificaciones al cliente.
@@ -241,7 +242,19 @@ export class NotificationsService {
     const frontendUrl = this.config.get<string>('app.mail.frontendUrl') ?? '';
     const pedidoUrl = `${frontendUrl}/pedidos/${pedido.id}`;
 
-    const qrDataUrl = await generarQrDataUrl(externalFolio);
+    // PR8 (kiosko-profesional): QR firmado con HMAC (no folio plano).
+    // Antes codificaba el externalFolio en claro, lo que permitía a
+    // cualquiera con foto del recibo avisar llegada. Ahora el QR
+    // apunta a este pedido + tienda + lleva firma criptográfica que
+    // valida el kiosko. Multi-uso: el cliente puede presentar el mismo
+    // QR varias veces (el server aplica idempotencia 60s).
+    const kioskoQrSecret = this.config.get<string>('app.kioskoQrSecret') ?? '';
+    const qrLlegoToken = kioskoQrSecret
+      ? firmarLlegoQr(pedido.id, pedido.tiendaId, kioskoQrSecret)
+      : null;
+    const qrDataUrl = qrLlegoToken
+      ? await generarQrDataUrl(qrLlegoToken)
+      : await generarQrDataUrl(externalFolio);
 
     const pedidoData = {
       pedidoId: pedido.id,
