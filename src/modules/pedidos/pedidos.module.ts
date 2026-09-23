@@ -47,7 +47,14 @@ import { KioskoModule } from '../kiosko/kiosko.module';
  *     `PedidoStateService.cambiarEstado` y `PedidoAccessService`.
  */
 @Module({
-  imports: [NotificationsModule, MailModule, VentanillasModule, KioskoModule],
+  imports: [
+    NotificationsModule,
+    MailModule,
+    VentanillasModule,
+    // F2 PR2: cliente.service.ts usa kioskoService.validarDeviceToken.
+    // F7 PR7: cliente.service.ts usa kioskoLlegada.anunciarLlegada.
+    KioskoModule,
+  ],
   controllers: [
     ClienteController,
     // IMPORTANTE: BodegaMonitorController (ruta fija `bodega/pedidos/monitor`)

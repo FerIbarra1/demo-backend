@@ -33,13 +33,35 @@ export class MostradorService {
    * Pedidos de la tienda del usuario listos para entregar (PAID o SHIPPED).
    * Paginado y ordenados por fecha de pago ascendente: los más antiguos
    * primero (FIFO) para evitar que se queden en cola mucho tiempo.
+   *
+   * PR7: si `orden === 'esperando'` (default), los pedidos con aviso
+   * de llegada activo (`llegadaAnunciadaAt IS NOT NULL AND
+   * llegadaDescartadaAt IS NULL`) van PRIMERO, FIFO entre ellos. El
+   * resto mantiene el orden por fechaPago. Sin este orden, el badge
+   * "EN TIENDA" en el mostrador pierde sentido — el operador no sabría
+   * cuál de los 10 pedidos PAID es el que tiene al cliente esperando.
    */
-  async obtenerPedidosListos(tiendaId: number, pagina = 1, limite = 20) {
+  async obtenerPedidosListos(
+    tiendaId: number,
+    pagina = 1,
+    limite = 20,
+    orden: 'esperando' | 'pago' = 'esperando',
+  ) {
     const skip = (pagina - 1) * limite;
     const where: Prisma.PedidoWhereInput = {
       tiendaId,
       estado: { in: [EstadoPedido.PAID, EstadoPedido.SHIPPED] },
     };
+    const orderBy: Prisma.PedidoOrderByWithRelationInput[] =
+      orden === 'esperando'
+        ? [
+            // nullsLast simula "avisados primero, resto después".
+            { llegadaAnunciadaAt: { sort: 'asc', nulls: 'last' } },
+            { fechaPago: 'asc' },
+            { id: 'asc' },
+          ]
+        : [{ fechaPago: 'asc' }, { id: 'asc' }];
+
     const [pedidos, total] = await Promise.all([
       this.prisma.pedido.findMany({
         where,
@@ -48,15 +70,25 @@ export class MostradorService {
           tienda: true,
           usuario: { select: { nombre: true, telefono: true, email: true } },
         },
-        orderBy: [{ fechaPago: 'asc' }, { id: 'asc' }],
+        orderBy,
         skip,
         take: limite,
       }),
       this.prisma.pedido.count({ where }),
     ]);
 
+    // Anotar `esperandoDesdeMin` para que la UI del mostrador pueda
+    // mostrar "EN TIENDA · hace 2 min" sin recalcular en cliente.
+    const ahora = Date.now();
+    const data = pedidos.map((p) => ({
+      ...p,
+      esperandoDesdeMin: p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
+        ? Math.max(0, Math.floor((ahora - p.llegadaAnunciadaAt.getTime()) / 60_000))
+        : null,
+    }));
+
     return {
-      data: pedidos,
+      data,
       meta: {
         total,
         pagina,

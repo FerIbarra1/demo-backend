@@ -28,6 +28,22 @@ async function bootstrap() {
     );
   }
 
+  // PR7 (kiosko-profesional): kioskoQrSecret es OBLIGATORIO. Sin él, los
+  // QRs de "avisar llegada" no se pueden firmar y el flujo queda roto.
+  // Sin fallback por la misma razón que jwtSecret: un secreto débil
+  // permite falsificar QRs y reclamar pedidos ajenos.
+  const kioskoQrSecret = configService.get<string>('app.kioskoQrSecret');
+  if (!kioskoQrSecret) {
+    throw new Error(
+      'KIOSKO_QR_SECRET es obligatorio. Genera uno con: openssl rand -base64 48',
+    );
+  }
+  if (kioskoQrSecret.length < 32) {
+    throw new Error(
+      'KIOSKO_QR_SECRET debe tener al menos 32 caracteres. Genera uno con: openssl rand -base64 48',
+    );
+  }
+
   // Configuración de seguridad.
   // El fallback local de imágenes (/files/) se sirve desde OTRO origen (el
   // frontend corre en otro puerto), así que la política por defecto de helmet

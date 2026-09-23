@@ -13,6 +13,16 @@ datasource db {
   directUrl = env("DIRECT_DATABASE_URL")
 }
 
+// PR7 (sep 2026): canal por el que se anunció la llegada a tienda. Es
+// ORTOGONAL al estado del pedido (la llegada puede ocurrir en cualquier
+// estado). Ver Pedido.llegadaAnunciadaAt.
+enum CanalLlegada {
+  QR
+  FOLIO
+  WEB
+  MOSTRADOR
+}
+
 // ==================== ENUMS ====================
 
 enum RolUsuario {
@@ -219,6 +229,8 @@ model Usuario {
   favoritos           Favorito[]
   kioskosActivados    Kiosko[]             @relation("KioskoActivador")
   kioskosDesactivados Kiosko[]             @relation("KioskoDesactivador")
+  // PR7 (sep 2026): operador que descartó avisos de llegada en mostrador.
+  llegadasDescartadas  Pedido[]             @relation("PedidoLlegadaDescartada")
   passwordResetTokens PasswordResetToken[]
   refreshTokens       RefreshToken[]
   // F11 (ago 2026): ventanilla física donde trabaja el cajero (1:1 nullable).
@@ -530,6 +542,31 @@ model Pedido {
   // F13: nota libre del cliente al pedir asesor (qué quiere negociar).
   asesorSolicitudNota String?  @map("asesor_solicitud_nota") @db.Text
 
+  // PR7 (sep 2026): aviso de "el cliente ya está en tienda" para pedidos
+  // web que se recogerán en mostrador. Es una señal de cola, NO un
+  // estado del pedido (puede ocurrir en REVIEWING, PENDING_PAID, PAID,
+  // SHIPPED, etc.). Decisión: columnas y no estado, porque es ortogonal
+  // al ciclo de vida. Ver kiosko-llegada.service.ts para el flujo.
+  //
+  // - llegadaAnunciadaAt: PRIMER aviso (mide espera real del cliente).
+  // - llegadaUltimoAvisoAt: ÚLTIMO aviso (frescura del badge en mostrador).
+  // - llegadaAnunciadaCount: cuántos avisos lleva (anti-spam).
+  // - llegadaAnunciadaCanal: QR | FOLIO | WEB | MOSTRADOR.
+  // - llegadaAnunciadaKioskoId: si vino del kiosko, qué kiosko.
+  // - llegadaAnunciadaPor: snapshot del nombre del kiosko u operador
+  //   (NO FK: si el kiosko se borra, el texto sigue legible para
+  //   auditoría).
+  // - llegadaDescartadaAt + PorId: cuando el mostrador descarta un
+  //   aviso falso (cliente se fue sin recoger, etc.).
+  llegadaAnunciadaAt       DateTime?     @map("llegada_anunciada_at")
+  llegadaUltimoAvisoAt     DateTime?     @map("llegada_ultimo_aviso_at")
+  llegadaAnunciadaCount    Int           @default(0) @map("llegada_anunciada_count")
+  llegadaAnunciadaCanal    CanalLlegada? @map("llegada_anunciada_canal")
+  llegadaAnunciadaKioskoId Int?          @map("llegada_anunciada_kiosko_id")
+  llegadaAnunciadaPor      String?       @map("llegada_anunciada_por") @db.VarChar(60)
+  llegadaDescartadaAt      DateTime?     @map("llegada_descartada_at")
+  llegadaDescartadaPorId   Int?          @map("llegada_descartada_por_id")
+
   // F15 (sep 2026): marcas de agua de lectura del chat (modelo WhatsApp/Telegram).
   //   * Por LADO, no por usuario (hay UN asesor por tienda, así que "tienda leyó" es la
   //     unidad correcta; si algún día hay varios asesores por tienda, migrar a una tabla
@@ -555,9 +592,14 @@ model Pedido {
   // Relaciones
   usuario        Usuario                  @relation("PedidoCliente", fields: [usuarioId], references: [id])
   tienda         Tienda                   @relation(fields: [tiendaId], references: [id])
-  kiosko         Kiosko?                  @relation(fields: [kioskoId], references: [id], onDelete: SetNull)
+  kiosko         Kiosko?                  @relation("PedidoKioskoOrigen", fields: [kioskoId], references: [id], onDelete: SetNull)
+  // PR7 (sep 2026): kiosko que AVISÓ la llegada (no necesariamente el
+  // kiosko que creó el pedido). Cuando llega vía el kiosko del cliente,
+  // esta FK se popula; cuando llega por web/app, queda null.
+  kioskoLlegada  Kiosko?                  @relation("PedidoKioskoLlegada", fields: [llegadaAnunciadaKioskoId], references: [id], onDelete: SetNull)
   asignadoA      Usuario?                 @relation("PedidoBodeguero", fields: [asignadoAId], references: [id], onDelete: SetNull)
   cajeroAsignado Usuario?                 @relation("PedidoCajero", fields: [cajeroAsignadoId], references: [id], onDelete: SetNull)
+  llegadaDescartadaPor Usuario?           @relation("PedidoLlegadaDescartada", fields: [llegadaDescartadaPorId], references: [id], onDelete: SetNull)
   items          ItemPedido[]
   historial      HistorialPedido[]
   actividades    LogActividad[]
@@ -577,6 +619,11 @@ model Pedido {
   @@index([estado, canalOrigen])
   @@index([asignadoAId])
   @@index([kioskoId])
+  // PR7 (sep 2026): mostrar pedidos con aviso de llegada primero,
+  // FIFO entre los que llevan más tiempo esperando. El WHERE se
+  // implementa como índice parcial en la migración SQL porque
+  // Prisma no soporta @@index.where.
+  @@index([tiendaId, llegadaAnunciadaAt])
   @@map("pedidos")
 }
 
@@ -840,7 +887,10 @@ model Kiosko {
   tienda         Tienda   @relation(fields: [tiendaId], references: [id])
   activadoPor    Usuario  @relation("KioskoActivador", fields: [activadoPorId], references: [id])
   desactivadoPor Usuario? @relation("KioskoDesactivador", fields: [desactivadoPorId], references: [id])
-  pedidos        Pedido[]
+  pedidos        Pedido[]  @relation("PedidoKioskoOrigen")
+  // PR7 (sep 2026): pedidos donde ESTE kiosko anunció la llegada (no
+  // donde se crearon).
+  pedidosLlegada Pedido[]  @relation("PedidoKioskoLlegada")
 
   @@unique([tiendaId, nombre])
   @@index([tiendaId, estado])
@@ -987,6 +1037,9 @@ model PedidoPendienteEnvio {
   // pedidos_pendientes_envio cuando crece.
   @@index([estado, nextAttemptAt, leaseUntil], map: "pedidos_pendientes_envio_claim_idx")
   @@index([leaseToken], map: "pedidos_pendientes_envio_lease_token_idx")
+  // PR7 (sep 2026): índice en externalFolio para que la búsqueda de
+  // kiosko-llegada no haga seq scan cuando crezca el histórico.
+  @@index([externalFolio])
   @@map("pedidos_pendientes_envio")
 }
 

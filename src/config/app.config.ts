@@ -10,6 +10,11 @@ export default registerAs('app', () => ({
   jwtSecret: process.env.JWT_SECRET,
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '1h',
   jwtRefreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+  // PR7 (kiosko-profesional): secreto HMAC para tokens QR de "avisar
+  // llegada". NUNCA compartir con JWT_SECRET — un secreto comprometido
+  // debe invalidar solo una familia de tokens. Sin fallback: si falta,
+  // los QRs no se firman y la app aborta al arranque.
+  kioskoQrSecret: process.env.KIOSKO_QR_SECRET,
   // API key del agente externo (Firebird). Sin fallback: si no está definida,
   // ApiKeyGuard rechaza toda petición del agente.
   agentApiKey: process.env.AGENT_API_KEY,

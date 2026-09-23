@@ -50,6 +50,20 @@ export class ClienteController {
     );
   }
 
+  // PR7 (kiosko-profesional): avisar llegada desde la app/web del
+  // cliente. Crea la misma señal de cola que el kiosko pero autenticado
+  // por el JWT del dueño del pedido.
+  @Post(':id/anunciar-llegada')
+  @ApiOperation({
+    summary: 'Cliente avisa que llegó a la tienda a recoger su pedido',
+  })
+  async anunciarLlegada(
+    @Param('id', ParseIntPipe) pedidoId: number,
+    @CurrentUser('userId') userId: number,
+  ) {
+    return this.clienteService.anunciarLlegada(pedidoId, userId);
+  }
+
   @Get('mis-pedidos')
   @ApiOperation({ summary: 'Obtener mis pedidos' })
   @ApiQuery({ name: 'pagina', required: false, type: Number })

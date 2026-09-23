@@ -49,11 +49,19 @@ export class MostradorController {
   @ApiQuery({ name: 'tiendaId', required: false, type: Number })
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
+  @ApiQuery({
+    name: 'orden',
+    required: false,
+    enum: ['esperando', 'pago'],
+    description:
+      'esperando (default): avisos de llegada primero. pago: solo FIFO por fechaPago.',
+  })
   async listarListos(
     @CurrentUser() user: any,
     @Query('tiendaId') tiendaId?: string,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
+    @Query('orden') orden?: 'esperando' | 'pago',
   ) {
     // ADMIN puede ver todas las tiendas; el resto, sólo la suya.
     const tienda =
@@ -64,6 +72,7 @@ export class MostradorController {
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
+      orden ?? 'esperando',
     );
   }
 

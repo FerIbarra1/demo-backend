@@ -12,6 +12,7 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
 import { KioskoService } from '../../kiosko/kiosko.service';
+import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
 import { UserContext } from '../../../types/pedido.types';
 import {
@@ -40,6 +41,7 @@ export class ClienteService {
     private state: PedidoStateService,
     private readonly storage: StorageService,
     private readonly kioskoService: KioskoService,
+    private readonly kioskoLlegada: KioskoLlegadaService,
   ) {}
 
   async crearPedido(
@@ -371,5 +373,39 @@ export class ClienteService {
       { nuevoEstado: EstadoPedido.CANCELLED, observacion: 'Cancelado por el cliente' },
       usuario,
     );
+  }
+
+  // PR7: el cliente avisa llegada desde la app/web autenticado. Como
+  // ya validamos `usuarioId === user.userId` en el controller, el
+  // service solo valida estado y modo de entrega. La lógica de
+  // escritura + realtime vive en KioskoLlegadaService (mismo path
+  // que kiosko) pero sin requerir X-Kiosko-Id/X-Kiosko-Token.
+  async anunciarLlegada(pedidoId: number, usuarioId: number) {
+    const pedido = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      select: {
+        id: true,
+        estado: true,
+        modoEntrega: true,
+        tiendaId: true,
+        usuarioId: true,
+      },
+    });
+    if (!pedido || pedido.usuarioId !== usuarioId) {
+      throw new NotFoundException('Pedido no encontrado');
+    }
+    if (
+      pedido.modoEntrega !== ModoEntrega.RECOGER_TIENDA &&
+      pedido.modoEntrega !== ModoEntrega.KIOSKO
+    ) {
+      throw new BadRequestException('Este pedido no es para recoger en tienda');
+    }
+    if (
+      pedido.estado === EstadoPedido.COMPLETED ||
+      pedido.estado === EstadoPedido.CANCELLED
+    ) {
+      throw new BadRequestException('El pedido ya no acepta avisos de llegada');
+    }
+    return this.kioskoLlegada.confirmarDesdeCliente(pedidoId);
   }
 }
