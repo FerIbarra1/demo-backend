@@ -4,6 +4,13 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ActivarKioskoDto } from './dto/activar-kiosko.dto';
 import { ActualizarKioskoDto } from './dto/actualizar-kiosko.dto';
 import { EstadoKiosko, Prisma } from '@prisma/client';
+import { calcularSaludKiosko, resumirSalud } from './kiosko-salud';
+
+/**
+ * Por qué falló la validación del device token. Ver
+ * `validarDeviceTokenConMotivo`.
+ */
+export type MotivoTokenInvalido = 'SIN_TOKEN' | 'TOKEN_INVALIDO' | 'KIOSKO_INACTIVO';
 
 /**
  * Servicio del módulo kiosko.
@@ -275,16 +282,36 @@ export class KioskoService {
   /**
    * Lista kioskos con filtros opcionales.
    */
+  /**
+   * Lista kioskos con su estado de SALUD derivado.
+   *
+   * La salud se calcula aquí (no en el frontend) para que todos los clientes
+   * coincidan y el panel no tenga que re-derivar reglas. Distingue
+   * explícitamente "el admin lo apagó" de "la tablet se cayó": son problemas
+   * con soluciones distintas y confundirlos hacía que el admin no supiera si
+   * actuar o no.
+   */
   async listar(filtros?: { tiendaId?: number; estado?: EstadoKiosko }) {
     const where: Prisma.KioskoWhereInput = {};
     if (filtros?.tiendaId) where.tiendaId = filtros.tiendaId;
     if (filtros?.estado) where.estado = filtros.estado;
 
-    return this.prisma.kiosko.findMany({
+    const kioskos = await this.prisma.kiosko.findMany({
       where,
       include: this.includeCompleto,
       orderBy: [{ tiendaId: 'asc' }, { nombre: 'asc' }],
     });
+
+    const ahora = Date.now();
+    const conSalud = kioskos.map((k) => ({
+      ...k,
+      salud: calcularSaludKiosko(k, ahora),
+    }));
+
+    return {
+      kioskos: conSalud,
+      resumen: resumirSalud(conSalud),
+    };
   }
 
   /**
@@ -379,13 +406,41 @@ export class KioskoService {
    * en cliente.service.ts).
    */
   async validarDeviceToken(kioskoId: number, tokenPlano: string | undefined): Promise<boolean> {
-    if (!tokenPlano || typeof tokenPlano !== 'string') return false;
+    const resultado = await this.validarDeviceTokenConMotivo(kioskoId, tokenPlano);
+    return resultado.valido;
+  }
+
+  /**
+   * Igual que `validarDeviceToken`, pero distingue POR QUÉ falló.
+   *
+   * El booleano colapsaba tres causas que el cliente necesita separar:
+   *  - `SIN_TOKEN`: la tablet no mandó el header.
+   *  - `TOKEN_INVALIDO`: mandó uno que no coincide con el hash guardado.
+   *  - `KIOSKO_INACTIVO`: el token es correcto, pero el admin apagó el kiosko.
+   *
+   * Las dos primeras son fallos de credenciales (401); la tercera es un
+   * conflicto de estado (409). Sin esta distinción el frontend mostraba
+   * "token inválido" a un operador cuyo kiosko simplemente estaba apagado.
+   *
+   * Nota de seguridad: el orden de las comprobaciones importa. Se verifica
+   * el token ANTES de revelar el estado del kiosko, para que un atacante
+   * que enumera IDs no pueda usar el código de respuesta como oráculo de
+   * qué kioskos existen y están activos.
+   */
+  async validarDeviceTokenConMotivo(
+    kioskoId: number,
+    tokenPlano: string | undefined,
+  ): Promise<{ valido: boolean; motivo?: MotivoTokenInvalido }> {
+    if (!tokenPlano || typeof tokenPlano !== 'string') {
+      return { valido: false, motivo: 'SIN_TOKEN' };
+    }
     const kiosko = await this.prisma.kiosko.findUnique({
       where: { id: kioskoId },
       select: { deviceTokenHash: true, estado: true },
     });
-    if (!kiosko || kiosko.estado !== EstadoKiosko.ACTIVO) return false;
-    if (!kiosko.deviceTokenHash) return false;
+    if (!kiosko) return { valido: false, motivo: 'TOKEN_INVALIDO' };
+    if (!kiosko.deviceTokenHash) return { valido: false, motivo: 'TOKEN_INVALIDO' };
+
     const hashDado = this.hashDeviceToken(tokenPlano);
     // timingSafeEqual requiere buffers del mismo largo. Si el hash guardado
     // está malformado por alguna razón, comparamos con un buffer de ceros
@@ -395,9 +450,15 @@ export class KioskoService {
       a = Buffer.from(hashDado, 'hex');
       b = Buffer.from(kiosko.deviceTokenHash, 'hex');
     } catch {
-      return false;
+      return { valido: false, motivo: 'TOKEN_INVALIDO' };
     }
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+    if (a.length !== b.length) return { valido: false, motivo: 'TOKEN_INVALIDO' };
+    if (!timingSafeEqual(a, b)) return { valido: false, motivo: 'TOKEN_INVALIDO' };
+
+    // Token correcto: ahora sí es seguro revelar el estado.
+    if (kiosko.estado !== EstadoKiosko.ACTIVO) {
+      return { valido: false, motivo: 'KIOSKO_INACTIVO' };
+    }
+    return { valido: true };
   }
 }

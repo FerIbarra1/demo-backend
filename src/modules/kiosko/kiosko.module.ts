@@ -8,6 +8,7 @@ import {
 import { KioskoLlegadaService } from './kiosko-llegada.service';
 import { KioskoService } from './kiosko.service';
 import { KioskoPairingService } from './kiosko-pairing.service';
+import { KioskoAlertasWorker } from './kiosko-alertas.worker';
 import { RealtimeModule } from '../realtime/realtime.module';
 
 @Module({
@@ -18,7 +19,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
     KioskoLlegadaController,
     PedidoLlegoQrController,
   ],
-  providers: [KioskoService, KioskoLlegadaService, KioskoPairingService],
+  providers: [KioskoService, KioskoLlegadaService, KioskoPairingService, KioskoAlertasWorker],
   exports: [KioskoService, KioskoLlegadaService, KioskoPairingService],
 })
 export class KioskoModule {}
