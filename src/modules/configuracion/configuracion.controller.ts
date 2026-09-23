@@ -2,9 +2,11 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Delete,
   UploadedFile,
   UseInterceptors,
+  Body,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
@@ -12,7 +14,8 @@ import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes } from '@nestjs/swagg
 import { RolUsuario } from '@prisma/client';
 import { ConfiguracionService } from './configuracion.service';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { LIMITE_LOGO_BYTES } from './configuracion.constants';
+import { Public } from '../../common/decorators/public.decorator';
+import { LIMITE_LOGO_BYTES, LIMITE_KIOSKO_IDLE_BYTES } from './configuracion.constants';
 
 @ApiTags('Configuración del sitio (Admin)')
 @ApiBearerAuth()
@@ -56,5 +59,75 @@ export class ConfiguracionController {
   })
   eliminarLogo() {
     return this.configuracion.eliminarLogo();
+  }
+
+  // ============================================================
+  // PR5 (kiosko-profesional): branding del kiosko desde admin.
+  // Imágenes del slideshow + copy. Las imágenes viven en S3 con prefijo
+  // kiosko/idle/, las claves se persisten como JSON array en
+  // configuracion_sitio.valor con clave kiosko_idle_media.
+  // ============================================================
+
+  @Put('kiosko')
+  @ApiOperation({
+    summary: 'Actualiza el copy del kiosko (título, subtítulo, slideMs, appDownloadUrl)',
+  })
+  actualizarBrandingKiosko(
+    @Body() body: {
+      titulo?: string;
+      subtitulo?: string;
+      slideMs?: number;
+      appDownloadUrl?: string;
+    },
+  ) {
+    return this.configuracion
+      .actualizarBrandingKiosko(body)
+      .then(() => this.configuracion.obtenerBrandingKiosko());
+  }
+
+  @Post('kiosko/media')
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: 'Sube una imagen al slideshow del kiosko (JPG/PNG/WEBP, máx 5 MB)',
+  })
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: LIMITE_KIOSKO_IDLE_BYTES, files: 1, fields: 2 },
+    }),
+  )
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async subirMediaKiosko(@UploadedFile() file: Express.Multer.File) {
+    return this.configuracion.subirMediaKioskoImagen(file);
+  }
+
+  @Delete('kiosko/media/:key')
+  @ApiOperation({ summary: 'Elimina una imagen del slideshow del kiosko' })
+  async eliminarMediaKiosko(@Body() body: { key: string }) {
+    await this.configuracion.eliminarMediaKioskoImagen(body.key);
+    return { ok: true };
+  }
+}
+
+// ============================================================
+// PR5: endpoint PÚBLICO que consume la pantalla IDLE del kiosko.
+// Sin auth — solo expone URLs públicas ya cacheables por CDN.
+// ============================================================
+
+@ApiTags('Configuración del sitio (público)')
+@Controller('configuracion')
+export class ConfiguracionPublicController {
+  constructor(private readonly configuracion: ConfiguracionService) {}
+
+  @Public()
+  @Get('kiosko')
+  @ApiOperation({
+    summary: 'Branding público del kiosko (idle screen)',
+    description: 'Público. Lo consume /kiosko/idle en cada montaje.',
+  })
+  // PR5: limit alto porque la tablet puede llamar en cada reload. Pero
+  // no queremos abuso: 120 req/min/IP es generoso y corta a un script.
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  brandingKiosko() {
+    return this.configuracion.obtenerBrandingKiosko();
   }
 }

@@ -1101,7 +1101,10 @@ model RealtimeEventOutbox {
 model ConfiguracionSitio {
   id        Int      @id @default(autoincrement())
   clave     String   @unique @db.VarChar(50)
-  valor     String   @db.VarChar(500)
+  // PR5 (kiosko-profesional): ahora TEXT para soportar JSON arrays de
+  // keys S3 (kiosko_idle_media con varias imágenes). El logo individual
+  // cabe en 500, pero un array de keys no.
+  valor     String   @db.Text
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

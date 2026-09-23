@@ -1,5 +1,8 @@
 import { Global, Module } from '@nestjs/common';
-import { ConfiguracionController } from './configuracion.controller';
+import {
+  ConfiguracionController,
+  ConfiguracionPublicController,
+} from './configuracion.controller';
 import { ConfiguracionService } from './configuracion.service';
 
 /**
@@ -8,7 +11,7 @@ import { ConfiguracionService } from './configuracion.service';
  */
 @Global()
 @Module({
-  controllers: [ConfiguracionController],
+  controllers: [ConfiguracionController, ConfiguracionPublicController],
   providers: [ConfiguracionService],
   exports: [ConfiguracionService],
 })

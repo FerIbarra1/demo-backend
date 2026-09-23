@@ -4,7 +4,17 @@ import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../imagenes/storage.service';
 import { detectarMimeImagen } from '../imagenes/validar-imagen.util';
-import { LIMITE_LOGO_BYTES, CLAVE_LOGO } from './configuracion.constants';
+import {
+  LIMITE_LOGO_BYTES,
+  CLAVE_LOGO,
+  CLAVE_KIOSKO_IDLE_MEDIA,
+  CLAVE_KIOSKO_IDLE_TITULO,
+  CLAVE_KIOSKO_IDLE_SUBTITULO,
+  CLAVE_KIOSKO_IDLE_SLIDE_MS,
+  CLAVE_APP_DOWNLOAD_URL,
+  PREFIJO_KIOSKO_IDLE,
+  LIMITE_KIOSKO_IDLE_BYTES,
+} from './configuracion.constants';
 
 /**
  * Configuración editable desde el panel ADMIN (tabla `configuracion_sitio`).
@@ -131,5 +141,173 @@ export class ConfiguracionService {
     await this.storage.eliminarImagen(fila.valor);
 
     return { mensaje: 'Logo eliminado', ...(await this.obtenerLogo()) };
+  }
+
+  // ============================================================
+  // PR5 (kiosko-profesional): branding configurable desde admin.
+  // Métodos genéricos sobre `configuracion_sitio` para cualquier clave.
+  // Mantienen un único patrón de upsert/delete; el controller decide
+  // qué hacer con el valor.
+  // ============================================================
+
+  /**
+   * Lee el valor de una clave. Devuelve `null` si no existe.
+   */
+  async obtenerPorClave(clave: string): Promise<string | null> {
+    const fila = await this.prisma.configuracionSitio.findUnique({
+      where: { clave },
+      select: { valor: true },
+    });
+    return fila?.valor ?? null;
+  }
+
+  /**
+   * Upsert de una clave. Si ya existía, actualiza el valor y updatedAt.
+   */
+  async setPorClave(clave: string, valor: string): Promise<void> {
+    await this.prisma.configuracionSitio.upsert({
+      where: { clave },
+      create: { clave, valor },
+      update: { valor },
+    });
+  }
+
+  /**
+   * Elimina una clave por nombre. Idempotente: si no existe, no falla.
+   */
+  async eliminarPorClave(clave: string): Promise<void> {
+    await this.prisma.configuracionSitio.deleteMany({ where: { clave } });
+  }
+
+  /**
+   * PR5: devuelve el bundle completo de branding del kiosko para la
+   * pantalla idle. Lo consume el endpoint público (sin auth) — solo
+   * expone URLs públicas ya cacheables por CDN.
+   */
+  async obtenerBrandingKiosko(): Promise<{
+    media: Array<{ url: string; key: string }>;
+    titulo: string;
+    subtitulo: string;
+    slideMs: number;
+    appDownloadUrl: string;
+  }> {
+    const [mediaRaw, titulo, subtitulo, slideMsRaw, appDownloadUrl] = await Promise.all([
+      this.obtenerPorClave(CLAVE_KIOSKO_IDLE_MEDIA),
+      this.obtenerPorClave(CLAVE_KIOSKO_IDLE_TITULO),
+      this.obtenerPorClave(CLAVE_KIOSKO_IDLE_SUBTITULO),
+      this.obtenerPorClave(CLAVE_KIOSKO_IDLE_SLIDE_MS),
+      this.obtenerPorClave(CLAVE_APP_DOWNLOAD_URL),
+    ]);
+
+    let media: Array<{ url: string; key: string }> = [];
+    if (mediaRaw) {
+      try {
+        const keys = JSON.parse(mediaRaw) as string[];
+        media = keys
+          .map((k) => ({ url: this.storage.resolverImagen(k) ?? '', key: k }))
+          .filter((m) => m.url);
+      } catch {
+        // JSON corrupto → array vacío. La tablet verá el fallback de
+        // branding (gradiente + texto).
+        this.logger.warn(`kiosko_idle_media no es JSON válido: ${mediaRaw.slice(0, 80)}`);
+      }
+    }
+
+    return {
+      media,
+      titulo: titulo ?? 'Tu pedido, en 3 toques',
+      subtitulo: subtitulo ?? 'Pide desde aquí y recoge en barra. Sin filas, sin esperas.',
+      slideMs: slideMsRaw ? Math.max(2000, parseInt(slideMsRaw, 10) || 7000) : 7000,
+      appDownloadUrl: appDownloadUrl ?? '',
+    };
+  }
+
+  /**
+   * PR5: sube una imagen al slideshow del kiosko. La key se añade
+   * automáticamente al array `kiosko_idle_media` (y se persiste tras
+   * la subida exitosa — si falla el upload, no queda una key rota).
+   */
+  async subirMediaKioskoImagen(file: Express.Multer.File): Promise<{ url: string; key: string }> {
+    if (!file?.buffer || file.buffer.length === 0) {
+      throw new BadRequestException('No se recibió ningún archivo');
+    }
+    if (file.size > LIMITE_KIOSKO_IDLE_BYTES) {
+      throw new BadRequestException(
+        `La imagen supera el tamaño máximo de ${LIMITE_KIOSKO_IDLE_BYTES / 1024 / 1024} MB`,
+      );
+    }
+    const mimeReal = detectarMimeImagen(file.buffer);
+    if (!mimeReal) {
+      throw new BadRequestException(
+        'El archivo no es una imagen válida. Usa JPG, PNG o WEBP.',
+      );
+    }
+    file.mimetype = mimeReal;
+    const ext = mimeReal === 'image/png' ? '.png' : mimeReal === 'image/webp' ? '.webp' : '.jpg';
+    const key = `${PREFIJO_KIOSKO_IDLE}${randomUUID()}${ext}`;
+
+    const keyGuardada = await this.storage.subirImagen(file, key);
+
+    // Append al array existente.
+    const raw = await this.obtenerPorClave(CLAVE_KIOSKO_IDLE_MEDIA);
+    let arr: string[] = [];
+    if (raw) {
+      try {
+        arr = JSON.parse(raw);
+      } catch {
+        arr = [];
+      }
+    }
+    arr.push(keyGuardada);
+    await this.setPorClave(CLAVE_KIOSKO_IDLE_MEDIA, JSON.stringify(arr));
+
+    const url = this.storage.resolverImagen(keyGuardada) ?? '';
+    return { url, key: keyGuardada };
+  }
+
+  /**
+   * PR5: elimina una imagen del slideshow. Quita la key del array
+   * persistido Y borra el archivo de S3.
+   */
+  async eliminarMediaKioskoImagen(key: string): Promise<void> {
+    if (!key.startsWith(PREFIJO_KIOSKO_IDLE)) {
+      throw new BadRequestException('Key no pertenece al kiosko');
+    }
+    const raw = await this.obtenerPorClave(CLAVE_KIOSKO_IDLE_MEDIA);
+    if (raw) {
+      let arr: string[] = [];
+      try {
+        arr = JSON.parse(raw);
+      } catch {
+        arr = [];
+      }
+      const nueva = arr.filter((k) => k !== key);
+      await this.setPorClave(CLAVE_KIOSKO_IDLE_MEDIA, JSON.stringify(nueva));
+    }
+    await this.storage.eliminarImagen(key);
+  }
+
+  /**
+   * PR5: actualiza el copy del kiosko (título, subtítulo, slideMs,
+   * appDownloadUrl). Cualquier campo undefined se ignora.
+   */
+  async actualizarBrandingKiosko(input: {
+    titulo?: string;
+    subtitulo?: string;
+    slideMs?: number;
+    appDownloadUrl?: string;
+  }): Promise<void> {
+    if (input.titulo !== undefined) {
+      await this.setPorClave(CLAVE_KIOSKO_IDLE_TITULO, input.titulo);
+    }
+    if (input.subtitulo !== undefined) {
+      await this.setPorClave(CLAVE_KIOSKO_IDLE_SUBTITULO, input.subtitulo);
+    }
+    if (input.slideMs !== undefined) {
+      await this.setPorClave(CLAVE_KIOSKO_IDLE_SLIDE_MS, String(input.slideMs));
+    }
+    if (input.appDownloadUrl !== undefined) {
+      await this.setPorClave(CLAVE_APP_DOWNLOAD_URL, input.appDownloadUrl);
+    }
   }
 }
