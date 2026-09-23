@@ -26,6 +26,7 @@ import { PedidoBusquedaController } from './core/pedido-busqueda.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../mail/mail.module';
 import { VentanillasModule } from '../ventanillas/ventanillas.module';
+import { KioskoModule } from '../kiosko/kiosko.module';
 
 /**
  * Módulo de Pedidos.
@@ -46,7 +47,7 @@ import { VentanillasModule } from '../ventanillas/ventanillas.module';
  *     `PedidoStateService.cambiarEstado` y `PedidoAccessService`.
  */
 @Module({
-  imports: [NotificationsModule, MailModule, VentanillasModule],
+  imports: [NotificationsModule, MailModule, VentanillasModule, KioskoModule],
   controllers: [
     ClienteController,
     // IMPORTANTE: BodegaMonitorController (ruta fija `bodega/pedidos/monitor`)

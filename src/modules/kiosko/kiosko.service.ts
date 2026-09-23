@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException, Logger } from '@nestjs/common';
+import { randomBytes, createHash, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ActivarKioskoDto } from './dto/activar-kiosko.dto';
 import { ActualizarKioskoDto } from './dto/actualizar-kiosko.dto';
@@ -60,12 +61,23 @@ export class KioskoService {
       );
     }
 
+    // PR2 (kiosko-profesional): al activar un kiosko generamos su
+    // `deviceToken` (token de larga vida, sha256-hash en BD, claro solo
+    // devuelto al admin UNA VEZ). La tablet lo guarda en localStorage y
+    // lo manda en `X-Kiosko-Token` para probar que es ella. Sin este
+    // token, el header `X-Kiosko-Id` solo prueba que alguien conoce un
+    // kioskoId adivinado.
+    const deviceTokenPlain = this.generarDeviceTokenPlano();
+    const deviceTokenHash = this.hashDeviceToken(deviceTokenPlain);
+
     const creado = await this.prisma.kiosko.create({
       data: {
         tiendaId: dto.tiendaId,
         nombre: dto.nombre,
         estado: EstadoKiosko.INACTIVO,
         activadoPorId: adminUserId,
+        deviceTokenHash,
+        deviceTokenCreadoAt: new Date(),
         // primerConexionAt queda null: se setea en el primer heartbeat.
         // ultimoHeartbeat queda null: la tablet aún no se conectó.
       },
@@ -74,7 +86,10 @@ export class KioskoService {
     this.logger.log(
       `Kiosko ${creado.id} dado de alta por admin ${adminUserId} (pendiente de primera conexión)`,
     );
-    return creado;
+    // Devolvemos el kiosko + el token en claro. El controller decide si
+    // exponerlo en la API pública (lo exponemos solo en alta/regenerar,
+    // nunca en listar/obtener).
+    return { ...creado, deviceTokenPlain };
   }
 
   /**
@@ -288,5 +303,91 @@ export class KioskoService {
       activadoPor: { select: { id: true, nombre: true, apellido: true, email: true } },
       desactivadoPor: { select: { id: true, nombre: true, apellido: true, email: true } },
     } satisfies Prisma.KioskoInclude;
+  }
+
+  /**
+   * PR2 (kiosko-profesional): genera un token opaco de larga vida.
+   * 32 bytes random → base64url (43 chars). El hash se persiste; el
+   * claro se devuelve UNA sola vez al admin y nunca vuelve a salir.
+   */
+  private generarDeviceTokenPlano(): string {
+    return randomBytes(32).toString('base64url');
+  }
+
+  /**
+   * PR2: hashea el token con SHA-256. La BD guarda solo el hash; el
+   * admin lo pega en la tablet y la tablet lo manda en cada request.
+   */
+  private hashDeviceToken(tokenPlano: string): string {
+    return createHash('sha256').update(tokenPlano).digest('hex');
+  }
+
+  /**
+   * PR2: regenera el device token de un kiosko existente. El anterior
+   * queda invalidado al instante — la tablet vieja deja de poder mandar
+   * heartbeat hasta que el admin le pegue el nuevo token.
+   *
+   * Pensado para:
+   *  - kioskos legacy (device_token_hash IS NULL tras la migración) que
+   *    necesitan un token para empezar a operar;
+   *  - tablets comprometidas / robadas: el admin regenera desde el panel
+   *    y la tablet atacante queda bloqueada.
+   */
+  async regenerarDeviceToken(kioskoId: number, adminUserId: number): Promise<{ kiosko: any; deviceTokenPlain: string }> {
+    const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
+    if (!kiosko) {
+      throw new NotFoundException('Kiosko no encontrado');
+    }
+
+    const deviceTokenPlain = this.generarDeviceTokenPlano();
+    const deviceTokenHash = this.hashDeviceToken(deviceTokenPlain);
+
+    const actualizado = await this.prisma.kiosko.update({
+      where: { id: kioskoId },
+      data: {
+        deviceTokenHash,
+        deviceTokenCreadoAt: new Date(),
+      },
+      include: this.includeCompleto,
+    });
+    this.logger.log(
+      `Device token regenerado para kiosko ${kioskoId} por admin ${adminUserId}`,
+    );
+    return { kiosko: actualizado, deviceTokenPlain };
+  }
+
+  /**
+   * PR2: validación constante-tiempo del `X-Kiosko-Token` enviado por
+   * la tablet. Devuelve true solo si:
+   *  - el kiosko existe;
+   *  - está ACTIVO;
+   *  - el hash guardado coincide con el del token enviado.
+   *
+   * Falla silenciosa (false) si el kiosko no tiene token (legacy) — la
+   * política es que TODO kiosko debe tener device token; los legacy
+   * deben regenerar antes de poder operar (ver validarKioskoParaPedido
+   * en cliente.service.ts).
+   */
+  async validarDeviceToken(kioskoId: number, tokenPlano: string | undefined): Promise<boolean> {
+    if (!tokenPlano || typeof tokenPlano !== 'string') return false;
+    const kiosko = await this.prisma.kiosko.findUnique({
+      where: { id: kioskoId },
+      select: { deviceTokenHash: true, estado: true },
+    });
+    if (!kiosko || kiosko.estado !== EstadoKiosko.ACTIVO) return false;
+    if (!kiosko.deviceTokenHash) return false;
+    const hashDado = this.hashDeviceToken(tokenPlano);
+    // timingSafeEqual requiere buffers del mismo largo. Si el hash guardado
+    // está malformado por alguna razón, comparamos con un buffer de ceros
+    // del largo correcto y devolvemos false (mismo tiempo de respuesta).
+    let a: Buffer, b: Buffer;
+    try {
+      a = Buffer.from(hashDado, 'hex');
+      b = Buffer.from(kiosko.deviceTokenHash, 'hex');
+    } catch {
+      return false;
+    }
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
   }
 }

@@ -11,6 +11,7 @@ import { NotificationsService } from '../../notifications/notifications.service'
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
+import { KioskoService } from '../../kiosko/kiosko.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
 import { UserContext } from '../../../types/pedido.types';
 import {
@@ -38,6 +39,7 @@ export class ClienteService {
     private realtime: RealtimeService,
     private state: PedidoStateService,
     private readonly storage: StorageService,
+    private readonly kioskoService: KioskoService,
   ) {}
 
   async crearPedido(
@@ -45,6 +47,12 @@ export class ClienteService {
     usuario: UserContext & { tiendaIdHeader?: number },
     idempotencyKey?: string,
     kioskoIdHeader?: number,
+    /**
+     * PR2 (kiosko-profesional): device token enviado por la tablet en
+     * `X-Kiosko-Token`. Sin él, no se acepta un kioskoId del header —
+     * cerrar el bug "cualquier cliente puede mentir que es kiosko".
+     */
+    kioskoDeviceToken?: string,
   ) {
     // Idempotencia: si llega la misma key, devolver el pedido existente
     if (idempotencyKey) {
@@ -85,7 +93,9 @@ export class ClienteService {
     // KIOSKO: si el frontend manda X-Kiosko-Id, validamos contra BD y
     // forzamos canalOrigen=KIOSKO. Defensa en profundidad: un kiosko no
     // puede mentir sobre su origen porque validamos que exista, esté
-    // ACTIVO y pertenezca a esta tienda.
+    // ACTIVO, pertenezca a esta tienda Y que el `X-Kiosko-Token` enviado
+    // coincida con el hash guardado (PR2 — antes bastaba con saber el
+    // kioskoId, que es SERIAL enumerable).
     let kioskoIdFinal: number | null = null;
     let canalOrigenFinal: CanalOrigen = dto.canalOrigen ?? CanalOrigen.WEB;
 
@@ -96,6 +106,18 @@ export class ClienteService {
       if (!kiosko) {
         throw new BadRequestException(
           'Kiosko inválido o inactivo para esta tienda',
+        );
+      }
+      // Validar device token (timing-safe en el service).
+      const tokenValido = await this.kioskoService.validarDeviceToken(
+        kioskoIdHeader,
+        kioskoDeviceToken,
+      );
+      if (!tokenValido) {
+        // Mismo mensaje genérico para "no tiene token" y "token incorrecto"
+        // — no queremos leak de "existe vs token mal".
+        throw new BadRequestException(
+          'Kiosko sin device token configurado o token inválido',
         );
       }
       kioskoIdFinal = kiosko.id;

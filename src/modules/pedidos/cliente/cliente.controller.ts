@@ -30,12 +30,14 @@ export class ClienteController {
   @ApiHeader({ name: 'Idempotency-Key', required: false, description: 'UUID opcional para evitar duplicados' })
   @ApiHeader({ name: 'X-Tienda-Id', required: false, description: 'Tienda activa del cliente (override de la tienda del usuario)' })
   @ApiHeader({ name: 'X-Kiosko-Id', required: false, description: 'ID del kiosko si el pedido se origina en una tablet de tienda (fuerza canalOrigen=KIOSKO)' })
+  @ApiHeader({ name: 'X-Kiosko-Token', required: false, description: 'Device token del kiosko. OBLIGATORIO si X-Kiosko-Id viene presente (PR2).' })
   async crearPedido(
     @Body() dto: CreatePedidoDto,
     @CurrentUser() user: any,
     @Headers('idempotency-key') idempotencyKey?: string,
     @Headers('x-tienda-id') tiendaIdHeader?: string,
     @Headers('x-kiosko-id') kioskoIdHeader?: string,
+    @Headers('x-kiosko-token') kioskoDeviceToken?: string,
   ) {
     const tiendaIdHeaderNum = tiendaIdHeader ? parseInt(tiendaIdHeader, 10) : undefined;
     const kioskoIdHeaderNum = kioskoIdHeader ? parseInt(kioskoIdHeader, 10) : undefined;
@@ -44,6 +46,7 @@ export class ClienteController {
       { ...user, tiendaIdHeader: tiendaIdHeaderNum },
       idempotencyKey,
       Number.isFinite(kioskoIdHeaderNum) ? kioskoIdHeaderNum : undefined,
+      kioskoDeviceToken,
     );
   }
 

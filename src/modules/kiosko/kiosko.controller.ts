@@ -1,5 +1,5 @@
-import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query, Headers, UnauthorizedException } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
 import { KioskoService } from './kiosko.service';
 import { ActivarKioskoDto } from './dto/activar-kiosko.dto';
 import { ActualizarKioskoDto } from './dto/actualizar-kiosko.dto';
@@ -27,13 +27,25 @@ export class KioskoController {
 
   /**
    * Público: la tablet hace ping cada 60s con su kioskoId (que ya conoce
-   * desde el endpoint anterior). No requiere auth porque la "auth" del
-   * kiosko es justamente saber su kioskoId activo.
+   * desde el endpoint anterior) Y su `X-Kiosko-Token` (device secret que
+   * el admin le pegó al activarla). Sin el token, el endpoint rechaza con
+   * 401 — antes bastaba con saber el kioskoId, que es SERIAL enumerable.
+   *
+   * Validamos dentro del service (no en un Guard) para mantener la
+   * trazabilidad del flujo INACTIVO→ACTIVO en una sola transacción.
    */
   @Public()
   @Post(':id/heartbeat')
-  @ApiOperation({ summary: 'Heartbeat del kiosko (público)' })
-  heartbeat(@Param('id', ParseIntPipe) id: number) {
+  @ApiOperation({ summary: 'Heartbeat del kiosko (público, requiere X-Kiosko-Token)' })
+  @ApiHeader({ name: 'X-Kiosko-Token', required: true, description: 'Device token del kiosko (devuelto UNA vez al activarlo)' })
+  async heartbeat(
+    @Param('id', ParseIntPipe) id: number,
+    @Headers('x-kiosko-token') deviceToken?: string,
+  ) {
+    const valido = await this.kioskoService.validarDeviceToken(id, deviceToken);
+    if (!valido) {
+      throw new UnauthorizedException('X-Kiosko-Token inválido o kiosko sin token configurado');
+    }
     return this.kioskoService.heartbeat(id);
   }
 
@@ -85,5 +97,29 @@ export class KioskoController {
     @CurrentUser('userId') adminUserId: number,
   ) {
     return this.kioskoService.actualizar(id, dto, adminUserId);
+  }
+
+  /**
+   * PR2 (kiosko-profesional): regenera el device token. El nuevo token
+   * en claro se devuelve UNA sola vez en la respuesta. El admin debe
+   * copiarlo y pegarlo en la tablet antes de cerrar el modal.
+   *
+   * Casos:
+   *  - Kiosko legacy sin token (device_token_hash IS NULL) que necesita
+   *    uno para poder mandar heartbeat.
+   *  - Tablet comprometida/robada: el admin invalida el anterior y la
+   *    tablet atacante queda bloqueada en el siguiente heartbeat.
+   */
+  @Post(':id/regenerar-token')
+  @Roles(RolUsuario.ADMIN)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Regenera el device token del kiosko (Admin). Devuelve el token en claro UNA vez.',
+  })
+  async regenerarToken(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser('userId') adminUserId: number,
+  ) {
+    return this.kioskoService.regenerarDeviceToken(id, adminUserId);
   }
 }

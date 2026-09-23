@@ -824,6 +824,15 @@ model Kiosko {
   // (estado=INACTIVO + primerConexionAt IS NULL) vs "Inactivo · desactivado"
   // (estado=INACTIVO + primerConexionAt IS NOT NULL).
   primerConexionAt DateTime?    @map("primer_conexion_at")
+  // PR2 (kiosko-profesional, sep 2026): identidad de dispositivo.
+  // Hash SHA-256 del token que el admin pega en la tablet al activarla.
+  // Se exige vía header `X-Kiosko-Token` en heartbeat y en crear pedido
+  // para impedir spoofing de X-Kiosko-Id (que es SERIAL y enumerable).
+  // El token en claro NUNCA se persiste — solo se retorna al admin una vez.
+  // NULL = kiosko activado antes de este cambio (legacy); el admin debe
+  // regenerar para que el dispositivo pueda operar.
+  deviceTokenHash     String?   @unique @map("device_token_hash") @db.VarChar(64)
+  deviceTokenCreadoAt DateTime? @map("device_token_creado_at")
   createdAt        DateTime     @default(now()) @map("created_at")
   updatedAt        DateTime     @updatedAt @map("updated_at")
 
