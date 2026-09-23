@@ -96,6 +96,10 @@ export class FavoritosService {
       const list = variantesPorProducto.get(pco.productoId) ?? [];
       list.push({
         id: pco.id,
+        // Clave canónica de la variante viva. Sin ella, el frontend no puede
+        // agregar el producto al carrito desde /favoritos: el carrito se
+        // indexa por `precioCOId`, no por `id`.
+        precioCOId: pco.id,
         corrida: pco.corrida.nombre,
         talla: pco.talla.nombre,
         color: pco.color.nombre,
