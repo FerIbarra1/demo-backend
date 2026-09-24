@@ -1,17 +1,11 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { EstadoPedido, CanalOrigen } from '@prisma/client';
-import { minutosEntre, calcularUrgencia } from '../core/urgencia.util';
-
-/**
- * Umbrales de antigüedad (en minutos) para el monitor de cajeros.
- * 0=normal · 1=aviso · 2=alerta · 3=crítico
- */
-const UMBRALES_TIENDA = [4, 7, 10];
+import { EstadoPedido, ModoEntrega } from '@prisma/client';
+import { minutosEntre } from '../core/urgencia.util';
 
 /**
  * Monitor de ventanillas (jun 2026): snapshot por VENTANILLA (1, 2, 3…)
- * de la tienda, con sus pedidos KIOSKO en PENDING_PAID asignados y la cola
+ * de la tienda, con sus pedidos en PENDING_PAID asignados y la cola
  * sin asignar ("Turnos siguientes").
  *
  * F11 (ago 2026): cada ventanilla tiene un número físico (1..N) definido
@@ -19,6 +13,14 @@ const UMBRALES_TIENDA = [4, 7, 10];
  * que matchea con el `cajeroId` de la ventanilla. Si la ventanilla no tiene
  * cajero asignado (libre), aparece igual con `cajeroId: null` y
  * `pedidosAsignados: 0`.
+ *
+ * F16 (sep 2026): dos cambios de fondo.
+ *   1. Ya NO filtra por canal. Antes solo veía pedidos KIOSKO, y con el flujo
+ *      nuevo los web también llegan a caja (mostrador los libera). Se excluyen
+ *      los pedidos a DOMICILIO, que no se cobran en ventanilla.
+ *   2. Ya NO calcula urgencia (decisión D13). En caja el pedido espera al
+ *      CLIENTE, no al revés: marcar "crítico" un pedido cuyo cliente aún no
+ *      llega es ruido. Los relojes de urgencia viven solo en bodega.
  *
  * El TV consume este endpoint cada 5s y muestra ventanillas + cola.
  */
@@ -73,7 +75,8 @@ export class CajeroMonitorService {
               where: {
                 estado: EstadoPedido.PENDING_PAID,
                 cajeroAsignadoId: v.cajeroId,
-                canalOrigen: CanalOrigen.KIOSKO,
+                // F16: sin filtro de canal (los web también se cobran aquí).
+                modoEntrega: { not: ModoEntrega.DOMICILIO },
               },
               select: {
                 id: true,
@@ -94,8 +97,8 @@ export class CajeroMonitorService {
             id: p.id,
             numeroPedido: p.numeroPedido,
             cajeroAsignadoAt: p.cajeroAsignadoAt ? p.cajeroAsignadoAt.toISOString() : null,
+            // Dato informativo, NO urgencia (decisión D13).
             minutosEnCola: minutos,
-            nivelUrgencia: calcularUrgencia(minutos, UMBRALES_TIENDA) as 0 | 1 | 2 | 3,
             cajeroAsignadoNombre: v.cajero
               ? `${v.cajero.nombre}${v.cajero.apellido ? ' ' + v.cajero.apellido : ''}`
               : null,
@@ -116,12 +119,14 @@ export class CajeroMonitorService {
       }),
     );
 
-    // 2) Cola sin asignar (PENDING_PAID + canalOrigen KIOSKO + cajeroAsignadoId null)
+    // 2) Cola sin asignar (PENDING_PAID + cajeroAsignadoId null).
+    // F16: sin filtro de canal; se excluyen los domicilio (no se cobran en
+    // ventanilla).
     const colaRaw = await this.prisma.pedido.findMany({
       where: {
         tiendaId,
         estado: EstadoPedido.PENDING_PAID,
-        canalOrigen: CanalOrigen.KIOSKO,
+        modoEntrega: { not: ModoEntrega.DOMICILIO },
         cajeroAsignadoId: null,
       },
       select: {
@@ -138,8 +143,8 @@ export class CajeroMonitorService {
         id: p.id,
         numeroPedido: p.numeroPedido,
         cajeroAsignadoAt: null,
+        // Dato informativo, NO urgencia (decisión D13).
         minutosEnCola: minutos,
-        nivelUrgencia: calcularUrgencia(minutos, UMBRALES_TIENDA) as 0 | 1 | 2 | 3,
         cajeroAsignadoNombre: null,
       };
     });
@@ -155,7 +160,10 @@ export class CajeroMonitorService {
         cajerosLogueados: ventanillas.length,
         colaSinAsignar: colaSinAsignar.length,
         totalEnCaja,
-        alertasCriticas: colaSinAsignar.filter((p) => p.minutosEnCola >= 10).length,
+        // F16: `alertasCriticas` se eliminó (decisión D13). Contaba pedidos
+        // con más de 10 min en cola, pero en caja el pedido espera al CLIENTE:
+        // un pedido esperando no es un problema del cajero, y marcar urgencia
+        // ahí era ruido. Los relojes de urgencia viven solo en bodega.
       },
       colaSinAsignar,
     };

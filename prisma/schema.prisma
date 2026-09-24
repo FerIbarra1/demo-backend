@@ -32,6 +32,11 @@ enum RolUsuario {
   CAJERO
   CAJERO_MONITOR
   MOSTRADOR
+  // F16 (sep 2026): TV de la pared del mostrador. Solo LEE la cola y muestra
+  // la alerta cuando el operador manda a llamar a un cliente — no puede
+  // liberar, ajustar ni cancelar. Por eso es un rol propio y no reusa
+  // MOSTRADOR: la pantalla de pared no debe tener permisos de operador.
+  MOSTRADOR_MONITOR
   // F13 (sep 2026): asesor de ventas. Uno por tienda, SIN asignación 1:1 —
   // ve la cola de pedidos que el cliente escaló desde una propuesta de bodega.
   // Tiene el chat con el cliente (el bodeguero ya no lo tiene) y arma la
@@ -48,6 +53,21 @@ enum EstadoPedido {
   // propuesta del vendedor y quiere re-negociar. El pedido sale de la cola
   // de bodega y entra a la cola de VENTAS de su tienda.
   EN_ASESORIA
+  // F16 (sep 2026): el pedido pasó por mostrador ANTES de pagar. Bodega ya
+  // verificó físicamente los productos y el pedido está apartado, esperando
+  // que el cliente lo revise en tienda. Es el "pedido retenido" del negocio,
+  // ahora explícito en el modelo.
+  //
+  // Por qué un estado y no una columna sobre PENDING_PAID: con una columna,
+  // CADA query del cajero tendría que acordarse de filtrarla, y un solo
+  // filtro olvidado manda a un cliente a pagar antes de que mostrador le
+  // muestre su pedido. Con estado propio, un pedido no liberado es
+  // estructuralmente invisible para el pago.
+  //
+  // Salidas: PENDING_PAID (liberar — aquí se encola a Firebird),
+  //          REVIEWING (ajustar — el cliente cambió algo, bodega re-surte),
+  //          CANCELLED (cancelar + lista de reposición).
+  EN_MOSTRADOR
   PENDING_PAID
   PAID
   SHIPPED
@@ -109,6 +129,10 @@ enum CanalNotificacion {
 
 enum TipoNotificacion {
   PEDIDO_RECIBIDO
+  // F16 (sep 2026): el pedido quedó apartado en tienda esperando que el cliente
+  // lo revise antes de pagar (estado EN_MOSTRADOR). Antes no se notificaba y el
+  // cliente debía presentarse en tienda sin haber recibido aviso.
+  LISTO_EN_TIENDA
   REVISION_PROPUESTA
   REVISION_APROBADA
   REVISION_RECHAZADA
@@ -562,11 +586,30 @@ model Pedido {
   llegadaAnunciadaAt       DateTime?     @map("llegada_anunciada_at")
   llegadaUltimoAvisoAt     DateTime?     @map("llegada_ultimo_aviso_at")
   llegadaAnunciadaCount    Int           @default(0) @map("llegada_anunciada_count")
+  // F16 (sep 2026): cuándo se EMITIÓ el último aviso al mostrador (no cuándo
+  // llegó el último request). Es el ancla del límite de tasa: sin una columna
+  // propia, la ventana se medía desde `llegadaUltimoAvisoAt`, que se reescribe
+  // en CADA aviso, así que un cliente que insistía más seguido que la ventana
+  // nunca la cumplía y su pedido quedaba sin alerta en la TV indefinidamente.
+  llegadaUltimaEmisionAt   DateTime?     @map("llegada_ultima_emision_at")
   llegadaAnunciadaCanal    CanalLlegada? @map("llegada_anunciada_canal")
   llegadaAnunciadaKioskoId Int?          @map("llegada_anunciada_kiosko_id")
   llegadaAnunciadaPor      String?       @map("llegada_anunciada_por") @db.VarChar(60)
   llegadaDescartadaAt      DateTime?     @map("llegada_descartada_at")
   llegadaDescartadaPorId   Int?          @map("llegada_descartada_por_id")
+
+  // F16 (sep 2026): "Atendiendo" del monitor de mostrador.
+  //
+  // Cuando el operador manda a llamar a un cliente, el pedido deja la cola de
+  // espera y pasa al panel "Atendiendo" de la TV. Modelo "TV bancaria": el
+  // folio llamado se QUEDA visible hasta que el pedido pasa al siguiente paso,
+  // en vez de desvanecerse a los 6s como la alerta.
+  //
+  // Es una señal de cola, NO un estado — el pedido sigue en EN_MOSTRADOR.
+  // `PedidoStateService.cambiarEstado` la limpia sola en cuanto el pedido sale
+  // de EN_MOSTRADOR, así que no puede quedar un pedido "atendido" en otro
+  // estado (ver el comentario en ese archivo).
+  llamadoAt                DateTime?     @map("llamado_at")
 
   // F15 (sep 2026): marcas de agua de lectura del chat (modelo WhatsApp/Telegram).
   //   * Por LADO, no por usuario (hay UN asesor por tienda, así que "tienda leyó" es la
@@ -625,6 +668,9 @@ model Pedido {
   // implementa como índice parcial en la migración SQL porque
   // Prisma no soporta @@index.where.
   @@index([tiendaId, llegadaAnunciadaAt])
+  // F16: el panel "Atendiendo" de la TV. El WHERE se implementa como índice
+  // parcial en la migración SQL (Prisma no soporta @@index.where).
+  @@index([tiendaId, llamadoAt])
   @@map("pedidos")
 }
 

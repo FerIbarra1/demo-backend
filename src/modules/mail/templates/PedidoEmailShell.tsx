@@ -154,8 +154,21 @@ export const PedidoEmailShell = ({
 
     <Hr style={{ borderColor: colors.borderSubtle, margin: '32px 0 16px 0' }} />
     <Text style={{ fontSize: '12px', color: colors.foregroundMuted, lineHeight: '1.5' }}>
-      Si tienes dudas, contesta este correo o escríbenos a la tienda donde
-      hiciste tu pedido.
+      {/* El teléfono se enviaba desde el servicio pero ninguna plantilla lo
+          mostraba: el cliente leía "escríbenos a la tienda" sin ningún dato
+          de contacto. */}
+      {pedido.tiendaNombre && pedido.tiendaTelefono ? (
+        <>
+          ¿Dudas con tu pedido? Llama a {pedido.tiendaNombre} al{' '}
+          <strong>{pedido.tiendaTelefono}</strong>, o responde directamente a
+          este correo.
+        </>
+      ) : (
+        <>
+          Si tienes dudas con tu pedido, responde directamente a este correo y
+          con gusto te ayudamos.
+        </>
+      )}
     </Text>
   </EmailLayout>
 );

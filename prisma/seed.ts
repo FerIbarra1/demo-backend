@@ -95,76 +95,92 @@ const PRODUCTOS_CONFIG = [
   },
 ];
 
-async function limpiarBaseDeDatos() {
-  console.log('🗑️  Eliminando datos existentes...');
+// ============================================
+// LISTAS DE PRECIOS (Firebird CLIENTES.LISPRE 1..6)
+// ============================================
+// La lista 1 es el precio de menudeo (el más caro) y la 6 el de mayoreo (el
+// más barato): a mayor volumen, menor precio. `precioBase` y `PrecioCO.precio`
+// siguen siendo sinónimo de lista1, así que la lista 1 va con factor 1.0.
+//
+// El seed puebla las 6 listas porque Firebird todavía no está conectado: sin
+// esto todas las listas quedan en 0 y `precioDeLista` cae siempre a su fallback
+// (`pco.precio`), con lo que todos los clientes ven el mismo precio sin
+// importar su `listaPrecioCodigo`. Cuando el sync real traiga PRECIO1..6 de
+// Firebird, estos valores se sobrescriben.
+const FACTOR_LISTA: Record<number, number> = {
+  1: 1.0,
+  2: 0.95,
+  3: 0.9,
+  4: 0.85,
+  5: 0.8,
+  6: 0.75,
+};
 
-  // Borrar en orden para respetar foreign keys.
-  // Primero las tablas que referencian a usuarios/tiendas/productos.
+/** Las 6 listas para un precio base, redondeadas a centavos. */
+function preciosDeListas(precioBase: number) {
+  const conFactor = (lista: number) =>
+    Math.round(precioBase * FACTOR_LISTA[lista] * 100) / 100;
+  return {
+    lista1: conFactor(1),
+    lista2: conFactor(2),
+    lista3: conFactor(3),
+    lista4: conFactor(4),
+    lista5: conFactor(5),
+    lista6: conFactor(6),
+  };
+}
+
+// ============================================
+// LIMPIEZA
+// ============================================
+// El seed es IDEMPOTENTE: no borra el catálogo ni los usuarios, los actualiza
+// por su clave natural (código / email). Antes hacía `deleteMany` de ~25 tablas
+// y reiniciaba secuencias, lo que obligaba a recrear productos y con ellos las
+// filas de `productos_imagenes` (cascada). Eso dejaba las imágenes del admin
+// huérfanas en S3 y obligaba a re-subirlas cada vez.
+//
+// Lo que SÍ se borra son los datos TRANSACCIONALES de prueba (pedidos y su
+// rastro). Los pedidos apuntan a productos/usuarios por FK, así que recrearlos
+// es la única forma de partir de un estado limpio sin tocar el catálogo.
+//
+// `configuracion_sitio` (el logo de los correos) NUNCA se toca: no está en
+// esta lista a propósito.
+async function limpiarDatosTransaccionales() {
+  console.log('🗑️  Eliminando datos transaccionales (pedidos, kioskos)...');
+
+  // Orden por dependencias FK: primero lo que referencia a pedidos/usuarios.
   await prisma.notificacion.deleteMany({});
   await prisma.pedidoMensaje.deleteMany({});
-  // F12 (sep 2026): las propuestas y la cola de envío a Firebird referencian
-  // a pedidos — borrarlas antes de pedidos.
   await prisma.pedidoPropuesta.deleteMany({});
-  // F13: la reposición referencia pedidos — borrarla antes.
   await prisma.pedidoReposicion.deleteMany({});
   await prisma.pedidoPendienteEnvio.deleteMany({});
   await prisma.itemPedido.deleteMany({});
   await prisma.historialPedido.deleteMany({});
   await prisma.logActividad.deleteMany({});
   await prisma.pedido.deleteMany({});
-  await prisma.precioCO.deleteMany({});
-  await prisma.precio.deleteMany({});
-  await prisma.productoTienda.deleteMany({});
-  await prisma.productoImagen.deleteMany({});
-  await prisma.producto.deleteMany({});
-  await prisma.talla.deleteMany({});
-  await prisma.corrida.deleteMany({});
-  await prisma.color.deleteMany({});
-  // Tablas que referencian a usuarios (FK) — borrar antes de usuarios.
+  await prisma.favorito.deleteMany({});
+  // Kioskos: se recrean abajo. `kiosko_pairings` cae en cascada.
+  await prisma.kiosko.deleteMany({});
+  // Ventanillas: se recrean abajo (referencian usuarios).
   await prisma.ventanilla.deleteMany({});
   await prisma.refreshToken.deleteMany({});
   await prisma.passwordResetToken.deleteMany({});
-  await prisma.usuarioTienda.deleteMany({});
-  await prisma.externalRef.deleteMany({});
-  await prisma.favorito.deleteMany({});
-  // kiosko tiene FK activado_por_id → usuarios. Hay que borrarlo ANTES.
-  // F13 (sep 2026): reactivado. El comentario anterior decía que la tabla no
-  // existía, pero se crea desde la migración init — el seed dejaba kioskos
-  // huérfanos apuntando a usuarios borrados.
-  await prisma.kiosko.deleteMany({});
-  await prisma.usuario.deleteMany({});
-  await prisma.tienda.deleteMany({});
 
-  // Resetear secuencias
-  await prisma.$executeRaw`ALTER SEQUENCE "tiendas_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "usuarios_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "corridas_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "tallas_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "colores_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "productos_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "productos_tienda_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "precios_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "preciosco_id_seq" RESTART WITH 1`;
+  // Secuencias de lo que se recrea. Las de catálogo/usuarios NO se reinician:
+  // sus IDs deben seguir siendo estables para no romper referencias externas.
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "items_pedido_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "historial_pedidos_id_seq" RESTART WITH 1`;
-  // F12 (sep 2026): secuencias de propuestas y cola de envío a Firebird.
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_propuestas_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_reposicion_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_pendientes_envio_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_mensajes_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "notificaciones_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "ventanillas_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "productos_imagenes_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "refresh_tokens_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "password_reset_tokens_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "usuarios_tiendas_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "external_refs_id_seq" RESTART WITH 1`;
-  await prisma.$executeRaw`ALTER SEQUENCE "favoritos_id_seq" RESTART WITH 1`;
-  // F11 (ago 2026): kioskos_id_seq comentado — tabla kioskos no existe aún.
-  // await prisma.$executeRaw`ALTER SEQUENCE "kioskos_id_seq" RESTART WITH 1`;
 
-  console.log('  ✓ Base de datos limpiada\n');
+  console.log('  ✓ Datos transaccionales eliminados\n');
 }
 
 // Las imágenes viven en S3 desde sep 2026. El seed escribe la KEY de storage
@@ -173,17 +189,88 @@ async function limpiarBaseDeDatos() {
 // Antes escribía `/products/${archivo}`, una ruta relativa a public/ del
 // frontend. Esa carpeta ya no existe, así que esas rutas daban 404.
 //
-// El seed NO sube los archivos: asume que ya están en el bucket. Para subirlos
-// usa `pnpm migrar:imagenes` (lee los .webp del repo del frontend).
+// El seed NO sube los archivos: asume que ya están en el bucket. Para subir los
+// que falten usa `pnpm recuperar:imagenes`. NO uses `pnpm migrar:imagenes`: ese
+// convierte rutas legacy `/products/` y genera UUIDs, que no coinciden con estas
+// keys.
 function getImagenUrl(nombreArchivo: string): string {
   return `productos/seed/${nombreArchivo}`;
 }
 
+// ============================================
+// CAMPOS LEGACY DE IMÁGENES
+// ============================================
+
+/**
+ * Recalcula `Producto.imagenPrincipal` e `imagenes` desde TODAS sus filas.
+ *
+ * Escribir esos campos desde PRODUCTOS_CONFIG descartaría las imágenes del
+ * admin, que viven en las mismas filas. Replica el orden que usa
+ * `imagenes.service.ts` (esPrincipal desc, orden asc).
+ */
+async function sincronizarCamposLegacy(productoId: number): Promise<void> {
+  const filas = await prisma.productoImagen.findMany({
+    where: { productoId },
+    orderBy: [{ esPrincipal: 'desc' }, { orden: 'asc' }],
+    select: { url: true, esPrincipal: true },
+  });
+  const principal =
+    filas.find((f) => f.esPrincipal)?.url ?? filas[0]?.url ?? null;
+  await prisma.producto.update({
+    where: { id: productoId },
+    data: { imagenPrincipal: principal, imagenes: filas.map((f) => f.url) },
+  });
+}
+
+// ============================================
+// HELPERS DE UPSERT
+// ============================================
+// El seed es idempotente: busca por clave natural y sólo crea si falta. Los
+// `update` van vacíos a propósito — el seed no debe pisar lo que el admin
+// cambió desde el panel (nombre de tienda, datos de un usuario, etc.).
+
+type DatosTienda = {
+  direccion: string;
+  ciudad: string;
+  estado: string;
+  telefono: string;
+  email: string;
+};
+
+/** Busca la tienda por nombre y la crea si no existe. */
+async function upsertTienda(nombre: string, datos: DatosTienda) {
+  const existente = await prisma.tienda.findFirst({ where: { nombre } });
+  if (existente) return existente;
+  return prisma.tienda.create({ data: { nombre, ...datos } });
+}
+
+type DatosUsuario = {
+  password: string;
+  nombre: string;
+  apellido?: string;
+  telefono?: string;
+  rol: RolUsuario;
+  tiendaId?: number;
+  listaPrecioCodigo?: string;
+};
+
+/**
+ * Busca el usuario por email y lo crea si no existe.
+ *
+ * `email` es `@unique` en el schema, así que es la clave natural. El `update`
+ * va vacío: re-ejecutar el seed no debe resetear la contraseña ni el perfil que
+ * el usuario haya cambiado.
+ */
+async function upsertUsuario(email: string, datos: DatosUsuario) {
+  const existente = await prisma.usuario.findUnique({ where: { email } });
+  if (existente) return existente;
+  return prisma.usuario.create({ data: { email, ...datos } });
+}
+
 async function main() {
-  // El seed hace deleteMany sobre ~25 tablas (pedidos reales incluidos) y
-  // reinicia secuencias. Es una herramienta de desarrollo: correrlo contra
-  // producción destruye datos y, tras migrar a S3, deja las imágenes del admin
-  // huérfanas en el bucket.
+  // El seed borra los datos transaccionales (pedidos, kioskos, ventanillas) y
+  // reinicia sus secuencias. Es una herramienta de desarrollo: correrlo contra
+  // producción destruye pedidos reales.
   if (process.env.NODE_ENV === 'production') {
     throw new Error(
       'El seed es destructivo y no puede ejecutarse con NODE_ENV=production.',
@@ -200,55 +287,52 @@ async function main() {
 
   console.log('🌱 Iniciando seed de datos...\n');
 
-  // ========== LIMPIAR TODO PRIMERO ==========
-  await limpiarBaseDeDatos();
+  // ========== LIMPIAR TRANSACCIONAL ==========
+  await limpiarDatosTransaccionales();
 
   // ========== CREAR TIENDAS ==========
+  // Las tiendas no tienen clave natural única en el schema, pero `nombre` lo es
+  // en la práctica (el seed es su único escritor). Se busca por nombre y sólo
+  // se crea si falta, para no cambiar los IDs que referencian pedidos y kioskos.
   console.log('🏪 Creando tiendas...');
 
-  const tiendaMexicali = await prisma.tienda.create({
-    data: {
-      nombre: 'Punto Textil Mexicali',
-      direccion: 'Blvd. Lázaro Cárdenas 481, Ex-Ejido Coahuila, C.P. 21360',
-      ciudad: 'Mexicali',
-      estado: 'Baja California',
-      telefono: '686-000-0001',
-      email: 'mexicali@puntotextil.com',
-    },
+  const tiendaMexicali = await upsertTienda('Punto Textil Mexicali', {
+    direccion: 'Blvd. Lázaro Cárdenas 481, Ex-Ejido Coahuila, C.P. 21360',
+    ciudad: 'Mexicali',
+    estado: 'Baja California',
+    telefono: '686-000-0001',
+    email: 'mexicali@puntotextil.com',
   });
 
-  const tiendaObregon = await prisma.tienda.create({
-    data: {
-      nombre: 'Punto Textil Mayoreo Cd Obregón',
-      direccion: 'Calle Nicolás Bravo 700 B, Col. Centro (Urb. No. 1), C.P. 85000',
-      ciudad: 'Ciudad Obregón',
-      estado: 'Sonora',
-      telefono: '644-000-0002',
-      email: 'obregon@puntotextil.com',
-    },
+  const tiendaObregon = await upsertTienda('Punto Textil Mayoreo Cd Obregón', {
+    direccion: 'Calle Nicolás Bravo 700 B, Col. Centro (Urb. No. 1), C.P. 85000',
+    ciudad: 'Ciudad Obregón',
+    estado: 'Sonora',
+    telefono: '644-000-0002',
+    email: 'obregon@puntotextil.com',
   });
 
-  const tiendaHermosillo = await prisma.tienda.create({
-    data: {
-      nombre: 'Distribuidora Punto Textil Hermosillo',
+  const tiendaHermosillo = await upsertTienda(
+    'Distribuidora Punto Textil Hermosillo',
+    {
       direccion: 'Boulevard Luis Encinas J. N°573, Col. Pimentel, C.P. 83188',
       ciudad: 'Hermosillo',
       estado: 'Sonora',
       telefono: '662-000-0003',
       email: 'hermosillo@puntotextil.com',
     },
-  });
+  );
 
-  const tiendaMonterrey = await prisma.tienda.create({
-    data: {
-      nombre: 'Distribuidora Punto Textil Monterrey Tec',
+  const tiendaMonterrey = await upsertTienda(
+    'Distribuidora Punto Textil Monterrey Tec',
+    {
       direccion: 'Av. Eugenio Garza Sada Sur N° 2620, Col. Tecnológico, C.P. 64700',
       ciudad: 'Monterrey',
       estado: 'Nuevo León',
       telefono: '81-0000-0004',
       email: 'monterrey@puntotextil.com',
     },
-  });
+  );
 
   console.log(`  ✓ Tienda: ${tiendaMexicali.nombre}`);
   console.log(`  ✓ Tienda: ${tiendaObregon.nombre}`);
@@ -259,190 +343,215 @@ async function main() {
   console.log('👤 Creando usuarios...');
   const passwordHash = await bcrypt.hash('123456', 10);
 
-  const admin = await prisma.usuario.create({
-    data: {
-      email: 'admin@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Administrador',
-      apellido: 'Sistema',
-      rol: RolUsuario.ADMIN,
-      activo: true,
-    },
+  const admin = await upsertUsuario('admin@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Administrador',
+    apellido: 'Sistema',
+    rol: RolUsuario.ADMIN,
   });
 
-  const usuarioBodega = await prisma.usuario.create({
-    data: {
-      email: 'bodega@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Usuario',
-      apellido: 'Bodega',
-      rol: RolUsuario.BODEGA,
-      tiendaId: tiendaMexicali.id,
-      activo: true,
-    },
+  const usuarioBodega = await upsertUsuario('bodega@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Usuario',
+    apellido: 'Bodega',
+    rol: RolUsuario.BODEGA,
+    tiendaId: tiendaMexicali.id,
   });
 
-  const usuarioCajero = await prisma.usuario.create({
-    data: {
-      email: 'cajero@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Usuario',
-      apellido: 'Cajero',
-      rol: RolUsuario.CAJERO,
-      tiendaId: tiendaMexicali.id,
-      activo: true,
-    },
+  const usuarioCajero = await upsertUsuario('cajero@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Usuario',
+    apellido: 'Cajero',
+    rol: RolUsuario.CAJERO,
+    tiendaId: tiendaMexicali.id,
   });
 
   // F13 (sep 2026): asesor de ventas. Uno por tienda; atiende la cola de
   // pedidos que los clientes escalan desde una propuesta de bodega.
-  const usuarioVentas = await prisma.usuario.create({
-    data: {
-      email: 'ventas@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Usuario',
-      apellido: 'Ventas',
-      rol: RolUsuario.VENTAS,
-      tiendaId: tiendaMexicali.id,
-      activo: true,
-    },
+  const usuarioVentas = await upsertUsuario('ventas@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Usuario',
+    apellido: 'Ventas',
+    rol: RolUsuario.VENTAS,
+    tiendaId: tiendaMexicali.id,
   });
 
   // Usuarios dedicados al monitor de bodega (uno por tienda).
   // Pensados para dejarse logueados en TVs de la bodega.
   // Rol BODEGA_MONITOR: login redirige a /bodega-monitor; no puede tomar pedidos.
-  await prisma.usuario.create({
-    data: {
-      email: 'monitor.mexicali@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Monitor',
-      apellido: 'Mexicali',
-      rol: RolUsuario.BODEGA_MONITOR,
-      tiendaId: tiendaMexicali.id,
-      activo: true,
-    },
+  await upsertUsuario('monitor.mexicali@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Monitor',
+    apellido: 'Mexicali',
+    rol: RolUsuario.BODEGA_MONITOR,
+    tiendaId: tiendaMexicali.id,
   });
 
-  await prisma.usuario.create({
-    data: {
-      email: 'monitor.mty@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Monitor',
-      apellido: 'Monterrey',
-      rol: RolUsuario.BODEGA_MONITOR,
-      tiendaId: tiendaMonterrey.id,
-      activo: true,
-    },
+  await upsertUsuario('monitor.mty@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Monitor',
+    apellido: 'Monterrey',
+    rol: RolUsuario.BODEGA_MONITOR,
+    tiendaId: tiendaMonterrey.id,
   });
 
   // Cajero MONITOR: TV de ventanillas de la tienda Mexicali.
   // Rol CAJERO_MONITOR. Login redirige a /cajero-monitor.
-  await prisma.usuario.create({
-    data: {
-      email: 'cajero.tv.mexicali@puntotextil.com',
-      password: passwordHash,
-      nombre: 'TV',
-      apellido: 'Cajas Mexicali',
-      rol: RolUsuario.CAJERO_MONITOR,
-      tiendaId: tiendaMexicali.id,
-      activo: true,
-    },
-  });
-
-  const clienteDemo = await prisma.usuario.create({
-    data: {
-      email: 'cliente@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Cliente',
-      apellido: 'Demo',
-      telefono: '+525512345678',
-      rol: RolUsuario.CLIENTE,
-      activo: true,
-    },
+  await upsertUsuario('cajero.tv.mexicali@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'TV',
+    apellido: 'Cajas Mexicali',
+    rol: RolUsuario.CAJERO_MONITOR,
+    tiendaId: tiendaMexicali.id,
   });
 
   // Mostrador: usuario que entrega pedidos ya pagados en tienda.
   // Rol MOSTRADOR. Login redirige a /mostrador.
-  const usuarioMostrador = await prisma.usuario.create({
-    data: {
-      email: 'mostrador@puntotextil.com',
-      password: passwordHash,
-      nombre: 'Usuario',
-      apellido: 'Mostrador',
-      rol: RolUsuario.MOSTRADOR,
-      tiendaId: tiendaMexicali.id,
-      activo: true,
-    },
+  const usuarioMostrador = await upsertUsuario('mostrador@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Usuario',
+    apellido: 'Mostrador',
+    rol: RolUsuario.MOSTRADOR,
+    tiendaId: tiendaMexicali.id,
   });
+
+  // F16 (sep 2026): TV del mostrador. Rol MOSTRADOR_MONITOR — solo lee la cola
+  // y muestra la alerta cuando el operador manda a llamar a un cliente. No
+  // puede liberar/ajustar/cancelar (por eso es un rol propio).
+  // Login redirige a /mostrador-monitor.
+  await upsertUsuario('mostrador.tv.mexicali@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'TV',
+    apellido: 'Mostrador Mexicali',
+    rol: RolUsuario.MOSTRADOR_MONITOR,
+    tiendaId: tiendaMexicali.id,
+  });
+
+  // ========== CLIENTES CON LISTA DE PRECIOS ==========
+  // Un cliente por lista (1..6) para poder probar que cada uno ve SU precio.
+  // La lista vive en `Usuario.listaPrecioCodigo` (global) y, cuando el cliente
+  // tiene una lista distinta en una sucursal, en
+  // `UsuarioTienda.listaPrecioCodigo` — que tiene precedencia.
+  //
+  // `cliente@puntotextil.com` queda sin lista (null) a propósito: así se prueba
+  // el camino de "cliente sin lista asignada", que cae a lista1.
+  const clienteDemo = await upsertUsuario('cliente@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Cliente',
+    apellido: 'Demo',
+    telefono: '+525512345678',
+    rol: RolUsuario.CLIENTE,
+  });
+
+  const clientesPorLista = [
+    { email: 'cliente2@puntotextil.com', lista: '2', nombre: 'Cliente Dos' },
+    { email: 'cliente3@puntotextil.com', lista: '3', nombre: 'Cliente Tres' },
+    { email: 'cliente4@puntotextil.com', lista: '4', nombre: 'Cliente Cuatro' },
+    { email: 'cliente5@puntotextil.com', lista: '5', nombre: 'Cliente Cinco' },
+    { email: 'cliente6@puntotextil.com', lista: '6', nombre: 'Cliente Seis' },
+  ];
+
+  for (const c of clientesPorLista) {
+    await upsertUsuario(c.email, {
+      password: passwordHash,
+      nombre: c.nombre,
+      rol: RolUsuario.CLIENTE,
+      listaPrecioCodigo: c.lista,
+    });
+  }
+
+  // ========== LISTA POR SUCURSAL (precedencia) ==========
+  // `cliente4` tiene lista 4 global, pero en Mexicali se le asignó lista 2.
+  // Sirve para verificar que `UsuarioTienda` gana sobre `Usuario` — la regla de
+  // `resolverColumnaLista`. Se hace upsert por la clave compuesta
+  // (usuarioId, tiendaId) para no duplicar la membresía al re-ejecutar.
+  const cliente4 = await prisma.usuario.findUnique({
+    where: { email: 'cliente4@puntotextil.com' },
+    select: { id: true },
+  });
+  if (cliente4) {
+    await prisma.usuarioTienda.upsert({
+      where: {
+        usuarioId_tiendaId: {
+          usuarioId: cliente4.id,
+          tiendaId: tiendaMexicali.id,
+        },
+      },
+      update: { listaPrecioCodigo: '2', activo: true },
+      create: {
+        usuarioId: cliente4.id,
+        tiendaId: tiendaMexicali.id,
+        listaPrecioCodigo: '2',
+        activo: true,
+      },
+    });
+  }
 
   console.log(`  ✓ Admin: ${admin.email} / 123456`);
   console.log(`  ✓ Bodega: ${usuarioBodega.email} / 123456 (${tiendaMexicali.nombre})`);
   console.log(`  ✓ Cajero: ${usuarioCajero.email} / 123456 (${tiendaMexicali.nombre})`);
+  console.log(`  ✓ Ventas: ${usuarioVentas.email} / 123456 (${tiendaMexicali.nombre})`);
   console.log(`  ✓ Mostrador: ${usuarioMostrador.email} / 123456 (${tiendaMexicali.nombre})`);
-  console.log(`  ✓ Cliente: ${clienteDemo.email} / 123456\n`);
   console.log(`  ✓ TV Monitor Bodega (Mexicali): monitor.mexicali@puntotextil.com / 123456`);
   console.log(`  ✓ TV Monitor Bodega (Monterrey): monitor.mty@puntotextil.com / 123456`);
-  console.log(`  ✓ TV Monitor Cajas (Mexicali): cajero.tv.mexicali@puntotextil.com / 123456\n`);
+  console.log(`  ✓ TV Monitor Cajas (Mexicali): cajero.tv.mexicali@puntotextil.com / 123456`);
+  console.log(`  ✓ TV Monitor Mostrador (Mexicali): mostrador.tv.mexicali@puntotextil.com / 123456`);
+  console.log(`  ✓ Cliente sin lista (lista1): ${clienteDemo.email} / 123456`);
+  for (const c of clientesPorLista) {
+    console.log(`  ✓ Cliente lista ${c.lista}: ${c.email} / 123456`);
+  }
+  console.log(
+    `  ✓ Cliente lista 4 global → lista 2 en ${tiendaMexicali.nombre}: cliente4@puntotextil.com\n`,
+  );
 
   // ========== CREAR VENTANILLAS (F11 ago 2026) ==========
   console.log('🪟 Creando ventanillas...');
   // Mexicali: 3 ventanillas. La 1 ya está asignada al cajero demo.
-  const vMex1 = await prisma.ventanilla.create({
-    data: { tiendaId: tiendaMexicali.id, numero: 1, cajeroId: usuarioCajero.id, activa: true },
-  });
-  await prisma.ventanilla.create({
-    data: { tiendaId: tiendaMexicali.id, numero: 2, cajeroId: null, activa: true },
-  });
-  await prisma.ventanilla.create({
-    data: { tiendaId: tiendaMexicali.id, numero: 3, cajeroId: null, activa: true },
-  });
-  // Monterrey: 2 ventanillas libres.
-  await prisma.ventanilla.create({
-    data: { tiendaId: tiendaMonterrey.id, numero: 1, cajeroId: null, activa: true },
-  });
-  await prisma.ventanilla.create({
-    data: { tiendaId: tiendaMonterrey.id, numero: 2, cajeroId: null, activa: true },
-  });
+  // `(tiendaId, numero)` es único, así que el upsert es idempotente.
+  const ventanillas = [
+    { tiendaId: tiendaMexicali.id, numero: 1, cajeroId: usuarioCajero.id },
+    { tiendaId: tiendaMexicali.id, numero: 2, cajeroId: null },
+    { tiendaId: tiendaMexicali.id, numero: 3, cajeroId: null },
+    { tiendaId: tiendaMonterrey.id, numero: 1, cajeroId: null },
+    { tiendaId: tiendaMonterrey.id, numero: 2, cajeroId: null },
+  ];
+  for (const v of ventanillas) {
+    await prisma.ventanilla.upsert({
+      where: { tiendaId_numero: { tiendaId: v.tiendaId, numero: v.numero } },
+      update: {},
+      create: { ...v, activa: true },
+    });
+  }
   console.log(`  ✓ ${tiendaMexicali.nombre}: 3 ventanillas (1 ocupada por ${usuarioCajero.nombre})`);
   console.log(`  ✓ ${tiendaMonterrey.nombre}: 2 ventanillas libres\n`);
-  void vMex1;
-
-  // ========== CREAR KIOSKO DEMO ==========
-  // F11 (ago 2026): comentado porque la tabla kioskos no existe aún en la
-  // BD (modelo en schema.prisma sin migración). Re-activar cuando se cree.
-  // console.log('📱 Creando kiosko demo...');
-  // await prisma.kiosko.upsert({
-  //   where: { tiendaId_nombre: { tiendaId: tiendaMexicali.id, nombre: 'Kiosko Entrada' } },
-  //   update: {},
-  //   create: {
-  //     tiendaId: tiendaMexicali.id,
-  //     nombre: 'Kiosko Entrada',
-  //     estado: 'ACTIVO',
-  //     activadoPorId: admin.id,
-  //   },
-  // });
-  // console.log(`  ✓ Kiosko: "Kiosko Entrada" en ${tiendaMexicali.nombre}\n`);
 
   // ========== CREAR CORRIDAS Y TALLAS ==========
   console.log('📏 Creando corridas y tallas...');
 
-  const corridaAdulto = await prisma.corrida.create({
-    data: {
-      nombre: 'Adulto Unisex',
-      descripcion: 'Tallas para adulto unisex',
-      tallas: {
-        create: [
-          { nombre: 'XS', orden: 1 },
-          { nombre: 'S', orden: 2 },
-          { nombre: 'M', orden: 3 },
-          { nombre: 'L', orden: 4 },
-          { nombre: 'XL', orden: 5 },
-          { nombre: 'XXL', orden: 6 },
-        ],
-      },
-    },
+  // Corrida sin clave natural única: se busca por nombre.
+  let corridaAdulto = await prisma.corrida.findFirst({
+    where: { nombre: 'Adulto Unisex' },
     include: { tallas: true },
   });
+  if (!corridaAdulto) {
+    corridaAdulto = await prisma.corrida.create({
+      data: {
+        nombre: 'Adulto Unisex',
+        descripcion: 'Tallas para adulto unisex',
+        tallas: {
+          create: [
+            { nombre: 'XS', orden: 1 },
+            { nombre: 'S', orden: 2 },
+            { nombre: 'M', orden: 3 },
+            { nombre: 'L', orden: 4 },
+            { nombre: 'XL', orden: 5 },
+            { nombre: 'XXL', orden: 6 },
+          ],
+        },
+      },
+      include: { tallas: true },
+    });
+  }
 
   console.log(`  ✓ Corrida: ${corridaAdulto.nombre}\n`);
 
@@ -466,15 +575,16 @@ async function main() {
     'Rojo': 'RO', 'Verde Neón': 'VN', 'Amarillo Neón': 'AN',
   };
 
-  const coloresData = Array.from(coloresUnicos.values()).map((c) => ({
-    codigo: colorCodes[c.nombre] || c.nombre.substring(0, 2).toUpperCase(),
-    nombre: c.nombre,
-    hex: c.hex,
-  }));
-
-  await prisma.color.createMany({
-    data: coloresData,
-  });
+  // `codigo` es @unique: upsert para no duplicar colores ni cambiar su ID
+  // (los `productos_imagenes.color_id` apuntan ahí).
+  for (const c of coloresUnicos.values()) {
+    const codigo = colorCodes[c.nombre] || c.nombre.substring(0, 2).toUpperCase();
+    await prisma.color.upsert({
+      where: { codigo },
+      update: {},
+      create: { codigo, nombre: c.nombre, hex: c.hex },
+    });
+  }
 
   const coloresDB = await prisma.color.findMany();
   coloresDB.forEach(c => console.log(`  ✓ Color: ${c.nombre} (${c.hex})`));
@@ -486,19 +596,17 @@ async function main() {
   const productosCreados: { id: number; codigo: string; nombre: string; precioBase: number; colores: typeof PRODUCTOS_CONFIG[0]['colores'] }[] = [];
 
   for (const config of PRODUCTOS_CONFIG) {
-    // Todas las imágenes del producto (para el array de imágenes)
-    const todasImagenes = config.colores.flatMap(c => c.imagenes.map(getImagenUrl));
-
-    // Imagen principal = primera imagen del primer color
-    const imagenPrincipal = getImagenUrl(config.colores[0].imagenes[0]);
-
-    const producto = await prisma.producto.create({
-      data: {
+    // Upsert por `codigo` (@unique): el producto conserva su ID entre corridas
+    // del seed, así que `productos_imagenes` no se recrea ni se pierde el
+    // trabajo del panel ADMIN. `imagenPrincipal`/`imagenes` se recalculan al
+    // final desde las filas.
+    const producto = await prisma.producto.upsert({
+      where: { codigo: config.codigo },
+      update: {},
+      create: {
         codigo: config.codigo,
         nombre: config.nombre,
         descripcion: config.descripcion,
-        imagenPrincipal,
-        imagenes: todasImagenes,
         activo: true,
         categoria: config.categoria,
         subcategoria: config.subcategoria,
@@ -508,16 +616,28 @@ async function main() {
     // Filas ProductoImagen con colorId: asocian cada imagen a su color para
     // que catálogo/carrito/pedidos puedan mostrar la imagen del color elegido.
     // esPrincipal en la primera imagen del primer color.
+    //
+    // No hay clave natural (productoId+colorId+url), así que se busca antes de
+    // crear: sin esto cada corrida del seed duplicaría las 75 filas.
     let esPrincipalYa = false;
     for (const colorConfig of config.colores) {
       const colorDB = coloresDB.find(c => c.nombre === colorConfig.nombre);
       if (!colorDB) continue;
       for (let i = 0; i < colorConfig.imagenes.length; i++) {
+        const url = getImagenUrl(colorConfig.imagenes[i]);
+        const existente = await prisma.productoImagen.findFirst({
+          where: { productoId: producto.id, colorId: colorDB.id, url },
+          select: { id: true },
+        });
+        if (existente) {
+          if (!esPrincipalYa && i === 0) esPrincipalYa = true;
+          continue;
+        }
         await prisma.productoImagen.create({
           data: {
             productoId: producto.id,
             colorId: colorDB.id,
-            url: getImagenUrl(colorConfig.imagenes[i]),
+            url,
             orden: i,
             esPrincipal: !esPrincipalYa && i === 0,
           },
@@ -525,6 +645,8 @@ async function main() {
         if (!esPrincipalYa && i === 0) esPrincipalYa = true;
       }
     }
+
+    await sincronizarCamposLegacy(producto.id);
 
     productosCreados.push({
       id: producto.id,
@@ -535,7 +657,6 @@ async function main() {
     });
 
     console.log(`  ✓ Producto: ${producto.nombre} (${producto.codigo})`);
-    console.log(`     Imagen principal: ${imagenPrincipal}`);
     console.log(`     Colores: ${config.colores.length}`);
   }
   console.log('');
@@ -549,8 +670,12 @@ async function main() {
   for (const tienda of tiendas) {
     for (const producto of productosCreados) {
       // Crear relación producto-tienda
-      await prisma.productoTienda.create({
-        data: {
+      await prisma.productoTienda.upsert({
+        where: {
+          productoId_tiendaId: { productoId: producto.id, tiendaId: tienda.id },
+        },
+        update: {},
+        create: {
           productoId: producto.id,
           tiendaId: tienda.id,
           visible: true,
@@ -558,12 +683,19 @@ async function main() {
         },
       });
 
-      // Crear precio base
-      await prisma.precio.create({
-        data: {
+      // Precio por producto con las 6 listas. `precioBase` sigue siendo
+      // sinónimo de lista1 (ver FACTOR_LISTA).
+      const listasProducto = preciosDeListas(producto.precioBase);
+      await prisma.precio.upsert({
+        where: {
+          productoId_tiendaId: { productoId: producto.id, tiendaId: tienda.id },
+        },
+        update: { ...listasProducto, precioBase: listasProducto.lista1, activo: true },
+        create: {
           productoId: producto.id,
           tiendaId: tienda.id,
-          precioBase: producto.precioBase,
+          precioBase: listasProducto.lista1,
+          ...listasProducto,
           activo: true,
         },
       });
@@ -576,18 +708,33 @@ async function main() {
           if (!colorDB) continue;
 
           const sku = `${producto.codigo}-${colorDB.codigo}-${talla.nombre}-T${tienda.id}`;
+          // Las tallas grandes cuestan más: el sobreprecio se aplica a la base
+          // y las 6 listas se derivan de ahí, para que el orden entre listas se
+          // mantenga en todas las tallas.
           const precioVariante = talla.nombre === 'XXL' || talla.nombre === 'XG'
             ? producto.precioBase + 30
             : producto.precioBase;
+          const listasVariante = preciosDeListas(precioVariante);
 
-          await prisma.precioCO.create({
-            data: {
+          await prisma.precioCO.upsert({
+            where: {
+              productoId_tiendaId_corridaId_tallaId_colorId: {
+                productoId: producto.id,
+                tiendaId: tienda.id,
+                corridaId: corridaAdulto.id,
+                tallaId: talla.id,
+                colorId: colorDB.id,
+              },
+            },
+            update: { ...listasVariante, precio: listasVariante.lista1, sku },
+            create: {
               productoId: producto.id,
               tiendaId: tienda.id,
               corridaId: corridaAdulto.id,
               tallaId: talla.id,
               colorId: colorDB.id,
-              precio: precioVariante,
+              precio: listasVariante.lista1,
+              ...listasVariante,
               sku,
             },
           });
@@ -606,11 +753,12 @@ async function main() {
 
   console.log('\n✅ Seed completado exitosamente!\n');
   console.log('────────────────────────────────────────');
-  console.log(`Productos creados: ${productosCreados.length}`);
-  console.log(`Colores creados: ${coloresDB.length}`);
-  console.log(`Tiendas creadas: 4 (Mexicali, Cd Obregón, Hermosillo, Monterrey Tec)`);
-  console.log(`Tallas por color: ${tallasAdulto.length}`);
-  console.log(`Variantes totales: ${productosCreados.length * coloresDB.length * tallasAdulto.length * tiendas.length}`);
+  console.log(`Productos: ${productosCreados.length}`);
+  console.log(`Colores: ${coloresDB.length}`);
+  console.log(`Tiendas: 4 (Mexicali, Cd Obregón, Hermosillo, Monterrey Tec)`);
+  console.log(`Tallas por corrida: ${tallasAdulto.length}`);
+  console.log(`Variantes: ${productosCreados.length * coloresDB.length * tallasAdulto.length * tiendas.length}`);
+  console.log(`Listas de precios por variante: 6 (factores ${Object.values(FACTOR_LISTA).join(', ')})`);
   console.log('');
   console.log('Usuarios de prueba (password = 123456):');
   console.log('  admin@puntotextil.com');
@@ -618,12 +766,20 @@ async function main() {
   console.log('  cajero@puntotextil.com              (Mexicali)');
   console.log('  ventas@puntotextil.com              (Mexicali, rol VENTAS)');
   console.log('  mostrador@puntotextil.com           (Mexicali)');
-  console.log('  cliente@puntotextil.com');
   console.log('  monitor.mexicali@puntotextil.com    (TV monitor Mexicali, rol BODEGA_MONITOR)');
   console.log('  monitor.mty@puntotextil.com         (TV monitor Monterrey, rol BODEGA_MONITOR)');
+  console.log('');
+  console.log('Clientes por lista de precios:');
+  console.log('  cliente@puntotextil.com             (sin lista → lista1)');
+  console.log('  cliente2@puntotextil.com            (lista 2)');
+  console.log('  cliente3@puntotextil.com            (lista 3)');
+  console.log('  cliente4@puntotextil.com            (lista 4 global, lista 2 en Mexicali)');
+  console.log('  cliente5@puntotextil.com            (lista 5)');
+  console.log('  cliente6@puntotextil.com            (lista 6)');
   console.log('────────────────────────────────────────');
-  console.log('\nLas imágenes usan rutas relativas (/products/...)');
-  console.log('El navegador las resolverá automáticamente según el dominio del frontend');
+  console.log('\nLas imágenes usan keys de storage (productos/seed/...)');
+  console.log('El backend las resuelve a URLs de S3 al servirlas.');
+  console.log('Si alguna falta en el bucket: pnpm recuperar:imagenes');
 }
 
 main()

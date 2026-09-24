@@ -11,6 +11,8 @@ import { NotificationsService } from '../../notifications/notifications.service'
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
+import { PreciosService } from '../../precios/precios.service';
+import { precioDeLista } from '../../precios/precio-lista.util';
 import { KioskoService } from '../../kiosko/kiosko.service';
 import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
@@ -42,6 +44,7 @@ export class ClienteService {
     private readonly storage: StorageService,
     private readonly kioskoService: KioskoService,
     private readonly kioskoLlegada: KioskoLlegadaService,
+    private readonly precios: PreciosService,
   ) {}
 
   async crearPedido(
@@ -173,10 +176,18 @@ export class ClienteService {
       throw new BadRequestException('Algunos productos no están disponibles en esta tienda');
     }
 
+    // Fase 0 (sep 2026): el precio del item se congela desde la lista de
+    // precios DEL CLIENTE, no desde `pco.precio` (que es siempre lista1).
+    // Antes el catálogo mostraba la lista correcta y el pedido se guardaba con
+    // lista1: el cliente veía un precio y se le cobraba otro, con el error
+    // congelado en `ItemPedido.precioUnitario` y viajando así al ERP.
+    const columnaLista = await this.precios.columnaParaUsuario(usuario.userId, tiendaId);
+
     let subtotal = new Prisma.Decimal(0);
     const itemsData = dto.items.map((item) => {
       const pco = preciosCO.find((p) => p.id === item.precioCOId)!;
-      const itemSubtotal = new Prisma.Decimal(pco.precio).mul(item.cantidad);
+      const precioUnitario = precioDeLista(pco, columnaLista);
+      const itemSubtotal = precioUnitario.mul(item.cantidad);
       subtotal = subtotal.plus(itemSubtotal);
       return {
         productoId: pco.productoId,
@@ -186,7 +197,7 @@ export class ClienteService {
         // de MOVPED compara contra este valor para distinguir surtido COMPLETO
         // vs PARCIAL cuando el bodeguero ajusta cantidades en VFP.
         cantidadOriginal: item.cantidad,
-        precioUnitario: pco.precio,
+        precioUnitario,
         subtotal: itemSubtotal,
         productoNombre: pco.producto.nombre,
         productoCodigo: pco.producto.codigo,
@@ -400,12 +411,43 @@ export class ClienteService {
     ) {
       throw new BadRequestException('Este pedido no es para recoger en tienda');
     }
-    if (
-      pedido.estado === EstadoPedido.COMPLETED ||
-      pedido.estado === EstadoPedido.CANCELLED
-    ) {
-      throw new BadRequestException('El pedido ya no acepta avisos de llegada');
+
+    // F16 (sep 2026): solo se puede avisar llegada cuando el pedido YA ESTÁ
+    // LISTO para revisarse en tienda, es decir en `EN_MOSTRADOR`.
+    //
+    // Ese estado es exactamente el punto en que bodega terminó de verificar
+    // (aprobó el pedido tal cual), o el cliente aprobó las modificaciones que
+    // bodega o ventas propusieron. Antes de eso el pedido no está apartado, así
+    // que avisar no tendría sentido: el mostrador no tiene nada que mostrarle.
+    //
+    // Antes solo se rechazaban COMPLETED y CANCELLED, así que el cliente podía
+    // avisar desde PENDING_REVIEW — y el pedido quedaba marcado "EN TIENDA"
+    // antes de que nadie lo hubiera surtido.
+    if (pedido.estado !== EstadoPedido.EN_MOSTRADOR) {
+      const mensajes: Partial<Record<EstadoPedido, string>> = {
+        [EstadoPedido.PENDING_REVIEW]:
+          'Tu pedido todavía está en cola de revisión. Te avisaremos cuando esté listo.',
+        [EstadoPedido.REVIEWING]:
+          'Bodega está preparando tu pedido. Podrás avisar tu llegada cuando esté listo.',
+        [EstadoPedido.WAITING_CUSTOMER_APPROVAL]:
+          'Tienes una propuesta pendiente de aprobar. Tu pedido estará listo cuando la respondas.',
+        [EstadoPedido.EN_ASESORIA]:
+          'Un asesor está viendo tu pedido. Podrás avisar tu llegada cuando esté listo.',
+        [EstadoPedido.PENDING_PAID]:
+          'Tu pedido ya pasó a caja. Pasa a la ventanilla que te indiquen.',
+        [EstadoPedido.PAID]:
+          'Tu pedido ya está pagado. Pasa a mostrador a recogerlo.',
+        [EstadoPedido.SHIPPED]:
+          'Tu pedido ya fue enviado.',
+        [EstadoPedido.COMPLETED]: 'Ese pedido ya fue entregado.',
+        [EstadoPedido.CANCELLED]: 'Ese pedido está cancelado.',
+      };
+      throw new BadRequestException(
+        mensajes[pedido.estado] ??
+          'Tu pedido todavía no está listo para revisarse en tienda.',
+      );
     }
+
     return this.kioskoLlegada.confirmarDesdeCliente(pedidoId);
   }
 }

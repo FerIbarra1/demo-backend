@@ -29,7 +29,8 @@ export class CajeroController {
   @ApiOperation({
     summary:
       'Cola de pedidos en PENDING_PAID sin asignar (monitor de ventanillas). ' +
-      'Por defecto sólo KIOSKO; pasar canal=TODOS para incluir WEB.',
+      'F16: incluye KIOSKO y WEB por defecto — los pedidos web también se ' +
+      'cobran aquí. Pasar canal=KIOSKO para ver solo los de la tienda.',
   })
   @ApiQuery({ name: 'tiendaId', required: false, type: Number })
   @ApiQuery({ name: 'pagina', required: false, type: Number })
@@ -38,7 +39,7 @@ export class CajeroController {
     name: 'canal',
     required: false,
     enum: ['KIOSKO', 'WEB', 'TODOS'],
-    description: 'Filtro por canal. Default: KIOSKO.',
+    description: 'Filtro por canal. Default: TODOS.',
   })
   async obtenerColaVentanilla(
     @CurrentUser() user: any,
@@ -56,7 +57,8 @@ export class CajeroController {
       tiendaEfectiva,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
-      (canal as 'KIOSKO' | 'WEB' | 'TODOS') ?? 'KIOSKO',
+      // F16: default 'TODOS' (antes 'KIOSKO', que escondía los pedidos web).
+      (canal as 'KIOSKO' | 'WEB' | 'TODOS') ?? 'TODOS',
     );
   }
 

@@ -39,11 +39,16 @@ export class KioskoPairingController {
 
   /**
    * La tablet (sin credencial) pide emparejarse. Devuelve el código que debe
-   * mostrar en pantalla. Throttle estricto: es un endpoint público que crea
-   * filas.
+   * mostrar en pantalla.
+   *
+   * El límite es por IP y generoso a propósito: varias tablets de una misma
+   * tienda comparten la IP pública (NAT), y cada recargo de la pantalla crea
+   * una solicitud. Un límite bajo rompía el flujo legítimo sin aportar
+   * seguridad real — la defensa contra fuerza bruta está en el contador de
+   * intentos POR CÓDIGO, no aquí.
    */
   @Public()
-  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post()
   @ApiOperation({ summary: 'Solicita emparejamiento (público: la tablet no tiene credencial)' })
   async solicitar(@Body() dto: SolicitarPairingDto, @Req() req: Request) {

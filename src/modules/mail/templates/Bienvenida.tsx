@@ -45,8 +45,8 @@ export const Bienvenida = ({ nombre, logoUrl, frontendUrl }: BienvenidaProps) =>
       }}
     >
       Te damos la bienvenida a <strong>Punto Textil Mayoreo</strong>. Tu cuenta
-      está lista para que empieces a explorar nuestro catálogo y hacer tus
-      pedidos.
+      ya está activa para que consultes precios de mayoreo y armes tus pedidos
+      en línea.
     </Text>
     <Text
       style={{
@@ -56,19 +56,22 @@ export const Bienvenida = ({ nombre, logoUrl, frontendUrl }: BienvenidaProps) =>
         fontWeight: '500',
       }}
     >
-      Algunas cosas que puedes hacer ahora:
+      Con tu cuenta puedes:
     </Text>
     <div style={{ margin: '0 0 8px 16px' }}>
-      <Text style={tip}>Explorar el catálogo de productos disponibles</Text>
       <Text style={tip}>
-        Armar tu pedido y elegir entre envío a domicilio, recogida en tienda
-        o comprar en uno de nuestros kioskos
+        Consultar el catálogo completo con precios de mayoreo por talla y color
       </Text>
       <Text style={tip}>
-        Dar seguimiento a tus pedidos desde tu cuenta, en tiempo real
+        Armar tu pedido y elegir entrega a domicilio o recoger en cualquiera de
+        nuestras sucursales
       </Text>
       <Text style={tip}>
-        Guardar tus productos favoritos para encontrarlos rápido
+        Seguir el avance de cada pedido en tiempo real: revisión de bodega,
+        pago, envío y entrega
+      </Text>
+      <Text style={tip}>
+        Guardar tus productos frecuentes para volver a pedirlos en segundos
       </Text>
     </div>
     <Button href={`${frontendUrl}/catalogo`}>Ver catálogo</Button>
@@ -81,7 +84,8 @@ export const Bienvenida = ({ nombre, logoUrl, frontendUrl }: BienvenidaProps) =>
         lineHeight: '1.5',
       }}
     >
-      Si no creaste esta cuenta, puedes ignorar este correo.
+      ¿Necesitas factura o tienes dudas sobre precios y mínimos de compra?
+      Responde a este correo y te atendemos.
     </Text>
   </EmailLayout>
 );

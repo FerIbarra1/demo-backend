@@ -2,7 +2,7 @@ import * as React from 'react';
 import { PedidoEmailShell } from './PedidoEmailShell';
 import { Text } from '@react-email/components';
 import { Callout } from './Callout';
-import { PedidoEmailData } from '../mail.templates';
+import { PedidoEmailData, folioVisible } from '../mail.templates';
 
 export interface PedidoEnviadoProps {
   pedido: PedidoEmailData;
@@ -18,23 +18,22 @@ export const PedidoEnviado = ({
   frontendUrl,
 }: PedidoEnviadoProps) => (
   <PedidoEmailShell
-    preview={`Tu pedido ${pedido.numeroPedido} ya va en camino`}
+    preview={`Tu pedido ${folioVisible(pedido)} ya va en camino`}
     title={`¡Tu pedido va en camino!`}
-    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido ${pedido.numeroPedido} ya fue entregado a la paquetería y está en camino a la dirección que nos diste.`}
+    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido ${folioVisible(pedido)} salió de nuestras instalaciones y ya va en camino a la dirección que nos diste.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     logoUrl={logoUrl}
     frontendUrl={frontendUrl}
     bodyExtras={
       <>
-        {pedido.direccionEnvio ? (
-          <Callout variant="success" label="Se enviará a">
-            {pedido.direccionEnvio}
-          </Callout>
-        ) : null}
-        {pedido.numeroGuia ? (
-          <Callout variant="info" label="Número de guía">
-            {pedido.numeroGuia}
+        {pedido.paqueteria || pedido.direccionEnvio ? (
+          <Callout
+            variant="success"
+            label={pedido.paqueteria ? `Enviado por ${pedido.paqueteria}` : 'Se enviará a'}
+          >
+            {pedido.direccionEnvio ??
+              'Tu pedido viaja con la paquetería que elegiste al confirmar la compra.'}
           </Callout>
         ) : null}
         <Text
@@ -45,7 +44,8 @@ export const PedidoEnviado = ({
             lineHeight: '1.6',
           }}
         >
-          Recibirás otro correo en cuanto tu pedido sea entregado.
+          Recibirás otro correo en cuanto tu pedido sea entregado. Si necesitas
+          rastrearlo, contáctanos con tu folio {folioVisible(pedido)}.
         </Text>
       </>
     }

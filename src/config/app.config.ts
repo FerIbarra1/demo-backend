@@ -48,14 +48,26 @@ export default registerAs('app', () => ({
     pass: process.env.SMTP_PASS || '',
     secure: process.env.SMTP_SECURE === 'true',
     from: process.env.SMTP_FROM || 'no-reply@tienda.local',
+    // A dónde van las respuestas del cliente. Los correos dicen "contesta este
+    // correo", así que debe apuntar a un buzón real y monitoreado. Vacío = el
+    // cliente responde al `from`.
+    replyTo: process.env.SMTP_REPLY_TO || '',
   },
   mail: {
-    // URL absoluta del logo, resuelta contra el frontend (que es donde vive
-    // el asset). En dev: http://localhost:3001/Logo.png. En prod: el dominio
-    // público del front.
-    logoUrl: process.env.FRONTEND_URL
-      ? `${process.env.FRONTEND_URL}/Logo.png`
-      : 'http://localhost:3001/Logo.png',
+    // URL absoluta del logo para el encabezado de los correos.
+    //
+    // Debe ser alcanzable desde el cliente de correo del destinatario, así que
+    // NUNCA puede ser localhost ni una ruta relativa. Antes el fallback era
+    // `FRONTEND_URL/Logo.png`, que en dev daba `http://localhost:3001/Logo.png`:
+    // el logo salía roto en todos los correos.
+    //
+    // Orden: logo subido desde el panel ADMIN (tabla configuracion_sitio, que
+    // tiene prioridad en ConfiguracionService) → MAIL_LOGO_URL → S3.
+    logoUrl:
+      process.env.MAIL_LOGO_URL ||
+      (process.env.AWS_S3_BUCKET
+        ? `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION || 'us-west-2'}.amazonaws.com/branding/logo.png`
+        : ''),
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3001',
     passwordResetExpiresMin: parseInt(
       process.env.PASSWORD_RESET_EXPIRES_MIN || '60',

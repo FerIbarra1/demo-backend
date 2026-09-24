@@ -11,6 +11,7 @@ import {
   ESTADOS_OCUPAN_SLOT_BODEGA,
 } from '../core/pedido-limits';
 import { asignadoANombre } from '../core/pedido-mapper';
+import type { MotivoReingreso } from '../core/motivo-reingreso';
 
 /**
  * Umbrales de antigüedad (en minutos) para asignar nivel de urgencia.
@@ -178,7 +179,14 @@ export class MonitorService {
         _count: { select: { items: true } },
         items: {
           where: { cancelada: false },
-          select: { precioCOId: true, productoId: true },
+          select: { precioCOId: true, productoId: true, original: true },
+        },
+        // F16 (sep 2026): el último cambio de estado, para saber POR QUÉ el
+        // pedido volvió a la cola de bodega (ver `motivoReingreso`).
+        historial: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { estadoAnterior: true, estadoNuevo: true },
         },
       },
       orderBy: { fechaPedido: 'asc' },
@@ -203,6 +211,33 @@ export class MonitorService {
         ? `${p.cajeroAsignado.nombre} ${p.cajeroAsignado.apellido ?? ''}`.trim()
         : null;
 
+      // F16 (sep 2026): por qué el pedido volvió a la cola de bodega.
+      //
+      // Un pedido llega a REVIEWING sin asignar por TRES caminos que antes se
+      // veían idénticos (todos caían en `esLiberado`), y dos de ellos traen
+      // trabajo real que el bodeguero no podía distinguir:
+      //
+      //   LIBERADO          — otro bodeguero lo soltó. Nada nuevo que surtir.
+      //   AJUSTE_MOSTRADOR  — el cliente cambió algo en tienda. Surtir lo nuevo.
+      //   PROPUESTA_VENTAS  — el cliente aprobó una contrapropuesta. Surtir lo
+      //                       que el asesor propuso.
+      //
+      // El discriminador ya existía en los datos: `ItemPedido.original = false`
+      // solo lo setean los caminos que AGREGAN productos (ventas y el ajuste de
+      // mostrador), y el último `HistorialPedido` dice de dónde vino.
+      const itemsNuevos = p.items.filter((i) => !i.original).length;
+      const estadoAnterior = p.historial[0]?.estadoAnterior ?? null;
+      const motivoReingreso: MotivoReingreso | null =
+        p.estado !== EstadoPedido.REVIEWING || p.asignadoAId !== null
+          ? null
+          : itemsNuevos > 0 && estadoAnterior === EstadoPedido.EN_MOSTRADOR
+            ? 'AJUSTE_MOSTRADOR'
+            : itemsNuevos > 0 && estadoAnterior === EstadoPedido.WAITING_CUSTOMER_APPROVAL
+              ? 'PROPUESTA_VENTAS'
+              : estadoAnterior === EstadoPedido.REVIEWING
+                ? 'LIBERADO'
+                : null;
+
       return {
         id: p.id,
         numeroPedido: p.numeroPedido,
@@ -224,6 +259,10 @@ export class MonitorService {
         scoreSimilitud: 0,
         itemsCompartidos: 0,
         esLiberado: p.estado === EstadoPedido.REVIEWING && p.asignadoAId === null,
+        // F16: el badge nuevo. `esLiberado` se conserva durante la transición
+        // para no romper el frontend que aún lo lee.
+        motivoReingreso,
+        itemsNuevos,
       };
     });
 

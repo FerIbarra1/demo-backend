@@ -122,6 +122,86 @@ describe('KioskoService — device token (PR2)', () => {
     });
   });
 
+  // El booleano colapsaba tres causas que el frontend necesita separar:
+  // "la tablet no mandó token", "mandó uno inválido" y "el admin apagó el
+  // kiosko". Las dos primeras son 401; la tercera es 409. Sin esta
+  // distinción se le mostraba "token inválido" a un operador cuyo kiosko
+  // simplemente estaba desactivado.
+  describe('validarDeviceTokenConMotivo()', () => {
+    it('sin token → SIN_TOKEN', async () => {
+      const { svc } = crearKioskoMock({
+        id: 1,
+        tiendaId: 1,
+        estado: EstadoKiosko.ACTIVO,
+        deviceTokenHash: hashDelToken,
+      });
+      await expect(svc.validarDeviceTokenConMotivo(1, undefined)).resolves.toEqual({
+        valido: false,
+        motivo: 'SIN_TOKEN',
+      });
+    });
+
+    it('token que no coincide → TOKEN_INVALIDO', async () => {
+      const { svc } = crearKioskoMock({
+        id: 1,
+        tiendaId: 1,
+        estado: EstadoKiosko.ACTIVO,
+        deviceTokenHash: hashDelToken,
+      });
+      await expect(
+        svc.validarDeviceTokenConMotivo(1, 'token-incorrecto-aaaaaaaaaaaaaaa'),
+      ).resolves.toEqual({ valido: false, motivo: 'TOKEN_INVALIDO' });
+    });
+
+    it('kiosko INACTIVO con token correcto → KIOSKO_INACTIVO (409, no 401)', async () => {
+      const { svc } = crearKioskoMock({
+        id: 1,
+        tiendaId: 1,
+        estado: EstadoKiosko.INACTIVO,
+        deviceTokenHash: hashDelToken,
+      });
+      await expect(svc.validarDeviceTokenConMotivo(1, tokenPlano)).resolves.toEqual({
+        valido: false,
+        motivo: 'KIOSKO_INACTIVO',
+      });
+    });
+
+    it('kiosko inexistente → TOKEN_INVALIDO (no revela que no existe)', async () => {
+      const { svc } = crearKioskoMock(null);
+      await expect(svc.validarDeviceTokenConMotivo(99, tokenPlano)).resolves.toEqual({
+        valido: false,
+        motivo: 'TOKEN_INVALIDO',
+      });
+    });
+
+    it('kiosko INACTIVO con token INCORRECTO → TOKEN_INVALIDO', async () => {
+      // El token se verifica ANTES de revelar el estado: un atacante que
+      // enumera IDs no puede usar el código de respuesta como oráculo de
+      // qué kioskos existen y están activos.
+      const { svc } = crearKioskoMock({
+        id: 1,
+        tiendaId: 1,
+        estado: EstadoKiosko.INACTIVO,
+        deviceTokenHash: hashDelToken,
+      });
+      await expect(
+        svc.validarDeviceTokenConMotivo(1, 'token-incorrecto-aaaaaaaaaaaaaaa'),
+      ).resolves.toEqual({ valido: false, motivo: 'TOKEN_INVALIDO' });
+    });
+
+    it('token correcto en kiosko ACTIVO → válido sin motivo', async () => {
+      const { svc } = crearKioskoMock({
+        id: 1,
+        tiendaId: 1,
+        estado: EstadoKiosko.ACTIVO,
+        deviceTokenHash: hashDelToken,
+      });
+      await expect(svc.validarDeviceTokenConMotivo(1, tokenPlano)).resolves.toEqual({
+        valido: true,
+      });
+    });
+  });
+
   describe('regenerarDeviceToken()', () => {
     it('cambia el hash y devuelve el nuevo token en claro', async () => {
       const { svc, prisma } = crearKioskoMock({

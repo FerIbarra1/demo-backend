@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { render } from '@react-email/render';
+import { render, toPlainText } from '@react-email/render';
 import { ReactElement } from 'react';
 import { CanalNotificacion, TipoNotificacion } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -45,12 +45,20 @@ export class MailService {
     let text: string;
     try {
       html = await render(opts.template);
-      // @react-email/render no expone `render` para texto plano en versiones
-      // recientes, así que generamos un fallback simple a partir del subject
-      // o del texto provisto por el caller.
-      text =
-        opts.textFallback ??
-        `${opts.subject}\n\nPor favor visualiza este correo en un cliente que soporte HTML.`;
+      // Versión de texto plano derivada del propio HTML. Antes se usaba un
+      // placeholder ("Por favor visualiza este correo en un cliente que soporte
+      // HTML") que el cliente veía literalmente en Outlook corporativo,
+      // notificaciones de reloj y previews de Slack/WhatsApp. `toPlainText`
+      // existe en @react-email/render; el comentario anterior afirmaba lo
+      // contrario y por eso se había dejado el texto de relleno.
+      let derivado = '';
+      try {
+        derivado = toPlainText(html);
+      } catch {
+        // Si el conversor falla, el fallback del caller (o el subject) sigue
+        // siendo mejor que un cuerpo vacío.
+      }
+      text = opts.textFallback ?? (derivado.trim() || opts.subject);
     } catch (err: any) {
       this.logger.error(`Falló render del template ${opts.tipoNotificacion}: ${err.message}`);
       await this.persistirNotificacion(opts, '', '', false, `Render error: ${err.message}`);

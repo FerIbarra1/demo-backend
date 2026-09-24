@@ -54,6 +54,12 @@ export class CrearMensajeDto {
  * F13 (sep 2026): un item dentro de la propuesta adjunta al mensaje.
  * Mismo shape que `PropuestaItemDto` en propuesta.dto.ts pero revalidado acá
  * para que el chat-controller no dependa del controller de propuestas.
+ *
+ * Los campos opcionales no son decorativos: el editor del frontend los manda
+ * para los items `agregado` (producto nuevo) y para los `cambio`/`parcial`
+ * (que necesitan el "antes"). Como el ValidationPipe global corre con
+ * `forbidNonWhitelisted`, cualquier campo que no se declare aquí hace que el
+ * request entero falle con 400 antes de llegar al servicio.
  */
 export class PropuestaAdjuntaItemDto {
   @ApiProperty()
@@ -72,6 +78,15 @@ export class PropuestaAdjuntaItemDto {
   @IsString()
   variante: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Imagen del producto (del color pedido). Se guarda en el snapshot para ' +
+      'que la tarjeta del cliente pueda mostrarla sin resolver el catálogo.',
+  })
+  @IsOptional()
+  @IsString()
+  productoImagen?: string | null;
+
   @ApiProperty()
   @IsInt()
   cantidad: number;
@@ -86,13 +101,53 @@ export class PropuestaAdjuntaItemDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @IsString()
+  productoOriginal?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  varianteOriginal?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  cantidadOriginal?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  productoNuevo?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  varianteNueva?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsInt()
   cantidadNueva?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsNumber()
+  precioUnitarioNuevo?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber()
   subtotalNuevo?: number;
+
+  @ApiPropertyOptional({ description: 'tempId negativo del item agregado (aún no existe en BD).' })
+  @IsOptional()
+  @IsInt()
+  tempId?: number;
+
+  @ApiPropertyOptional({ description: 'Producto del catálogo (para tipo=agregado).' })
+  @IsOptional()
+  @IsInt()
+  productoId?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

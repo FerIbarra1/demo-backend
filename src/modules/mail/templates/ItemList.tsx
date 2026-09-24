@@ -61,6 +61,14 @@ const variante = {
   lineHeight: '1.4',
 };
 
+const precioUnitario = {
+  fontSize: '12px',
+  color: colors.foregroundSubtle,
+  margin: '4px 0 0 0',
+  lineHeight: '1.4',
+  fontVariantNumeric: 'tabular-nums' as const,
+};
+
 const cantidad = {
   fontSize: '13px',
   color: colors.foregroundMuted,
@@ -156,9 +164,25 @@ export const ItemList: React.FC<ItemListProps> = ({ items }) => {
                 <td style={cell}>
                   {it.productoCodigo && <Text style={codigo}>{it.productoCodigo}</Text>}
                   <Text style={nombre}>{it.productoNombre}</Text>
+                  {/* Las tallas/colores pueden venir vacíos en productos
+                      cargados sin variante: se omiten en vez de dejar un
+                      separador colgando ("Talla  · "). */}
                   <Text style={variante}>
-                    Talla {it.tallaNombre} · {it.colorNombre}
+                    {[
+                      it.tallaNombre ? `Talla ${it.tallaNombre}` : null,
+                      it.colorNombre || null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
                   </Text>
+                  {/* En mayoreo el precio unitario es el dato que el cliente
+                      verifica contra su lista de precios. Se enviaba desde el
+                      servicio pero nunca se pintaba. */}
+                  {it.precioUnitario != null ? (
+                    <Text style={precioUnitario}>
+                      {fmtMoney(it.precioUnitario)} c/u
+                    </Text>
+                  ) : null}
                 </td>
                 <td style={cantidad}>×{it.cantidad}</td>
                 <td style={subtotal}>{fmtMoney(it.subtotal)}</td>

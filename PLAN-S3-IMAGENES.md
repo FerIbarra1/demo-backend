@@ -480,6 +480,79 @@ tiles desde S3 con **cero rutas `/products/`**.
 > configurar las credenciales AWS, así que sigue en modo disco local y devuelve
 > `/files/...`. Hay que reiniciarlo para que resuelva a S3.
 
+### Fase 7 — Recuperación tras re-ejecutar el seed — ✅ COMPLETADA (2026-09-23)
+
+**El problema:** re-ejecutar el seed sobre una BD cuyas imágenes ya estaban en S3
+dejó las 75 filas apuntando a `productos/seed/<archivo>.webp`, keys que **nadie
+subió nunca**. El catálogo devolvía 155 URLs de S3 que daban **403**, sin ningún
+error de build que lo delatara. Los 75 objetos UUID de la Fase 3 seguían vivos en
+el bucket, pero ya sin filas que los referenciaran.
+
+**La causa raíz:** `getImagenUrl()` escribe keys deterministas, pero el seed no
+sube archivos. El comentario decía "para subirlos usa `pnpm migrar:imagenes`",
+y esa instrucción **está rota**: ese script sólo procesa rutas legacy `/products/`
+(de las que ya no quedaba ninguna) y genera UUIDs nuevos, que no coinciden con
+las keys que la BD tiene.
+
+**La solución — `pnpm recuperar:imagenes`** (`scripts/recuperar-imagenes-s3.ts`):
+sube sólo las keys que la BD referencia y que faltan en el bucket. No escribe en
+la BD (las filas ya apuntan bien), no sobrescribe objetos existentes
+(`IfNoneMatch: '*'`) y aborta si falta cualquier archivo local.
+
+```bash
+# 1. Recuperar los .webp del historial (no destructivo, fuera del repo)
+git -C ../demo-frontend archive 8bad24a^ public/products | tar -x -C /tmp/ptm-products
+
+# 2. Dry-run: reporta qué falta
+pnpm recuperar:imagenes --source-dir=/tmp/ptm-products/public/products
+
+# 3. Subir
+pnpm recuperar:imagenes --apply --source-dir=/tmp/ptm-products/public/products
+```
+
+**Verificado:** 75/75 subidas y alcanzables (7.12 MB — el mismo peso que reportó
+la Fase 3), idempotente (segunda corrida: 0 faltantes), los 75 objetos UUID
+originales intactos, catálogo con 155 URLs de S3 y **0 rutas legacy**, `next/image`
+optimiza (200), home con sus 4 tiles. `tsc` y `lint` en verde.
+
+**Sonda de presencia:** la credencial del backend sólo tiene `PutObject` /
+`DeleteObject`, así que un `HeadObject` autenticado devuelve AccessDenied **tanto
+si el objeto existe como si no** — inservible. El script usa un HEAD anónimo
+contra la URL pública. En este bucket un objeto ausente responde **403, no 404**
+(sin `ListBucket` S3 no distingue "no existe" de "no autorizado").
+
+> ⚠️ **Nunca uses `pnpm reconciliar:imagenes --borrar` aquí.** Construye su lista
+> de keys referenciadas sólo desde `producto_imagenes` y `configuracion_sitio`, así
+> que las 4 URLs hardcodeadas de `CategoryTiles.tsx` le parecen huérfanas y las
+> borraría, rompiendo la portada.
+
+### Fase 8 — Seed idempotente para imágenes — ✅ COMPLETADA (2026-09-23)
+
+El seed sigue siendo destructivo para el dataset de desarrollo (borra pedidos,
+usuarios, precios), pero **ya no destruye las imágenes**.
+
+- `capturarImagenes()` corre **antes** de `limpiarBaseDeDatos()` y guarda las
+  filas con identidad **estable**: código de producto y de color, nunca IDs (el
+  seed reinicia las secuencias).
+- Tras recrear productos y colores, se restauran resolviendo esos códigos. Las
+  keys de storage se copian tal cual — el seed nunca sube ni borra objetos.
+- Las filas del catálogo semilla se insertan sólo si no existen ya
+  (`findFirst` + `create`; `ProductoImagen` no tiene `@@unique`, así que `upsert`
+  no aplica).
+- `sincronizarCamposLegacy()` recalcula `producto.imagen_principal` e `imagenes`
+  desde **todas** las filas. Escribirlos desde `PRODUCTOS_CONFIG` descartaba las
+  imágenes del admin.
+
+**Verificado:** con una imagen de admin simulada (key UUID), el seed la preserva,
+la incluye en `productos.imagenes` y no duplica las 75 del seed — 76 filas antes
+y después.
+
+> 📌 **Nota sobre producción:** todo este trabajo (Fases 1-8) es **local y sin
+> pushear**. `origin/main` de ambos repos sigue en sep 2, así que prod no fue
+> afectada: sirve `/products/*` desde su copia de `public/products/`. **Antes de
+> desplegar el borrado de `public/products/`** hay que migrar la BD de prod con
+> `pnpm migrar:imagenes` (ahí sí aplica, porque prod tiene filas legacy).
+
 ### Fase 5 (referencia) — Detalle original
 
 - `next.config.ts`: **reemplazar los wildcards** por el host exacto del bucket (C1)

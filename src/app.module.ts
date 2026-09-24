@@ -4,6 +4,7 @@ import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import appConfig from './config/app.config';
 import { PrismaModule } from './prisma/prisma.module';
+import { PreciosModule } from './modules/precios/precios.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { TiendasModule } from './modules/tiendas/tiendas.module';
 import { CatalogoModule } from './modules/catalogo/catalogo.module';
@@ -30,6 +31,10 @@ import { Reflector } from '@nestjs/core';
       load: [appConfig],
     }),
     PrismaModule,
+    // Fase 0 (sep 2026): resolución de la lista de precios del cliente.
+    // @Global() — la usan catálogo, cliente y propuesta. Va antes de los
+    // módulos de dominio que la consumen.
+    PreciosModule,
     AuthModule,
     TiendasModule,
     CatalogoModule,

@@ -14,9 +14,13 @@ import { PedidoAprobado } from './templates/PedidoAprobado';
 import { PedidoCancelado } from './templates/PedidoCancelado';
 import { PedidoEntregado } from './templates/PedidoEntregado';
 import { PedidoEnviado } from './templates/PedidoEnviado';
+import { PedidoListoEnTienda } from './templates/PedidoListoEnTienda';
 import { PedidoRecibido } from './templates/PedidoRecibido';
 import { ResetPassword } from './templates/ResetPassword';
-import { RevisionPropuesta } from './templates/RevisionPropuesta';
+import {
+  RevisionPropuesta,
+  type OrigenPropuesta,
+} from './templates/RevisionPropuesta';
 
 export interface ItemPedidoSnapshot {
   productoNombre: string;
@@ -38,7 +42,6 @@ export interface PedidoEmailData {
   fechaPedido: Date | string;
   items?: ItemPedidoSnapshot[];
   paqueteria?: string | null;
-  numeroGuia?: string | null;
   direccionEnvio?: string | null;
   motivoCancelacion?: string | null;
   tiendaNombre?: string;
@@ -50,11 +53,18 @@ export interface PedidoEmailData {
 }
 
 /**
- * Folio visible al cliente: el de VFP si existe, si no "Pedido #id".
- * numeroPedido (folio web) nunca se muestra.
+ * Folio visible al cliente. **Un solo número por correo.**
+ *
+ * El folio de VFP (`externalFolio`) es el que el cliente ve en tienda y en el
+ * ERP, así que manda en cuanto existe. Antes de que el agente lo asigne (el
+ * correo de "recibido" es el único caso) se usa `numeroPedido`, el folio web
+ * que el cliente acaba de recibir al confirmar su compra.
+ *
+ * Nunca se inventa un "Pedido #id": el id interno no significa nada para el
+ * cliente y mostraba un tercer número distinto a los otros dos.
  */
 export function folioVisible(pedido: PedidoEmailData): string {
-  return pedido.externalFolio ?? `Pedido #${pedido.pedidoId}`;
+  return pedido.externalFolio ?? pedido.numeroPedido;
 }
 
 export interface MailContext {
@@ -74,10 +84,18 @@ export const mailTemplates = {
     pedido: PedidoEmailData;
     pedidoUrl: string;
   } & MailContext): ReactElement => PedidoRecibido(props),
+  PedidoListoEnTienda: (props: {
+    pedido: PedidoEmailData;
+    pedidoUrl: string;
+  } & MailContext): ReactElement => PedidoListoEnTienda(props),
   RevisionPropuesta: (props: {
     pedido: PedidoEmailData;
     pedidoUrl: string;
     mensajeBodeguero?: string;
+    // Quién escribe: bodega (faltantes), ventas (contrapropuesta) o asesor
+    // (el cliente pidió uno). El texto cambia porque antes decía "bodeguero"
+    // incluso cuando el mensaje venía de un asesor de ventas.
+    origen?: OrigenPropuesta;
   } & MailContext): ReactElement => RevisionPropuesta(props),
   PedidoAprobado: (props: {
     pedido: PedidoEmailData;
@@ -112,10 +130,12 @@ export const mailSubjects = {
   BIENVENIDA: '¡Bienvenido a PTM! Tu cuenta está lista',
   RESET_PASSWORD: 'Recupera tu contraseña de PTM',
   PEDIDO_RECIBIDO: (n: string) => `Recibimos tu pedido ${n}`,
+  // F16: el pedido está apartado en tienda esperando revisión del cliente.
+  LISTO_EN_TIENDA: (n: string) => `Tu pedido ${n} ya está listo en tienda`,
   // F13: la propuesta puede venir de bodega (faltantes) o del asesor de ventas
   // (contrapropuesta negociada). El subject es neutro para cubrir ambos.
   REVISION_PROPUESTA: (n: string) => `Tu pedido ${n} tiene una propuesta`,
-  REVISION_APROBADA: (n: string) => `Tu pedido ${n} fue aprobado`,
+  REVISION_APROBADA: (n: string) => `Tu pedido ${n} ya está listo para pagar`,
   REVISION_RECHAZADA: (n: string) => `Tu pedido ${n} fue rechazado`,
   PAGO_CONFIRMADO: (n: string) => `Pago confirmado de tu pedido ${n}`,
   ENVIADO: (n: string) => `Tu pedido ${n} ya fue enviado`,

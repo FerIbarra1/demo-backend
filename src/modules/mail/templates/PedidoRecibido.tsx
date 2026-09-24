@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { PedidoEmailShell } from './PedidoEmailShell';
 import { Text } from '@react-email/components';
-import { PedidoEmailData } from '../mail.templates';
+import { PedidoEmailData, folioVisible } from '../mail.templates';
 
 export interface PedidoRecibidoProps {
   pedido: PedidoEmailData;
@@ -17,8 +17,8 @@ export const PedidoRecibido = ({
   frontendUrl,
 }: PedidoRecibidoProps) => (
   <PedidoEmailShell
-    preview={`Recibimos tu pedido ${pedido.numeroPedido}`}
-    title={`¡Recibimos tu pedido ${pedido.numeroPedido}!`}
+    preview={`Recibimos tu pedido ${folioVisible(pedido)}`}
+    title={`¡Recibimos tu pedido ${folioVisible(pedido)}!`}
     greeting={`Hola, ${pedido.clienteNombre}. Tu pedido entró a nuestra cola y en breve un bodeguero lo revisará para confirmar disponibilidad y precio.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
@@ -33,8 +33,8 @@ export const PedidoRecibido = ({
           lineHeight: '1.6',
         }}
       >
-        Te avisaremos por correo cada vez que tu pedido avance: propuesta
-        del bodeguero, pago confirmado, envío y entrega.
+        Te avisaremos por correo cada vez que tu pedido avance: propuesta del
+        bodeguero, listo para revisar en tienda, pago confirmado y entrega.
       </Text>
     }
   />

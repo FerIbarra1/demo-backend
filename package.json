@@ -22,6 +22,7 @@
     "prisma:studio": "prisma studio",
     "prisma:seed": "ts-node prisma/seed.ts",
     "migrar:imagenes": "ts-node scripts/migrar-imagenes-s3.ts",
+    "recuperar:imagenes": "ts-node scripts/recuperar-imagenes-s3.ts",
     "reconciliar:imagenes": "ts-node scripts/reconciliar-imagenes-s3.ts",
     "db:up": "docker-compose up -d",
     "db:down": "docker-compose down",

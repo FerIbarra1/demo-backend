@@ -26,22 +26,70 @@ import {
  *
  * Flujo de pago (jun 2026): la tienda cobra en un sistema externo (Visual FoxPro +
  * Firebird). El backend sólo registra cuándo se cobró vía webhook autenticado
- * (`POST /admin/pedidos/:id/marcar-pagado`). REVIEWING → PENDING_PAID es una
- * transición disparada por `SurtidoService.confirmarSurtido` (sin acción humana)
- * o por `PropuestaService` cuando el cliente acepta la propuesta.
+ * (`POST /admin/pedidos/:id/marcar-pagado`).
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * FLUJO COMPLETO (F16, sep 2026): el pedido pasa por MOSTRADOR antes de pagar
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ *   PENDING_REVIEW → REVIEWING → EN_MOSTRADOR → PENDING_PAID → PAID → COMPLETED
+ *                        │            │
+ *                        │            ├─→ REVIEWING   (el cliente pidió cambios)
+ *                        │            └─→ CANCELLED   (+ lista de reposición)
+ *                        │
+ *                        └─→ PENDING_PAID  (solo DOMICILIO: salta mostrador)
+ *
+ * El negocio necesitaba que el cliente viera y aprobara los productos en tienda
+ * antes de pagar, porque muchos piden más cosas o cambian algo al verlos.
+ *
+ * DOS INVARIANTES que sostienen el diseño:
+ *
+ *   1. **El ERP solo ve pedidos liberados por mostrador.** El encolado a
+ *      Firebird (`encolarFirebird: true`) ocurre al pasar a PENDING_PAID, y a
+ *      ese estado solo se llega liberando desde EN_MOSTRADOR (o por el camino
+ *      de domicilio). Así un ajuste o cancelación en mostrador nunca deja al
+ *      ERP desincronizado: el pedido todavía no existe allá.
+ *
+ *   2. **PENDING_PAID ⟺ fila en `PedidoPendienteEnvio`.** Un pedido en ese
+ *      estado sin fila es invisible al agente, nunca recibe folio y se queda
+ *      atascado para siempre. Por eso `encolarFirebird` es obligatorio ahí.
+ *      La decisión vive en `destinoTrasSurtido` (core/destino-post-surtido.util)
+ *      para que los tres caminos que cierran la verificación no puedan divergir.
+ *
+ * Los pedidos a DOMICILIO saltan mostrador: no tiene sentido mostrarle el
+ * pedido a un cliente que no está en la tienda. Van REVIEWING → PENDING_PAID
+ * directo, con el encolado inmediato.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
  *
  * F13 (sep 2026): los arcos que salen de WAITING_CUSTOMER_APPROVAL se
  * distinguen por DESTINO, no por valores nuevos de enum:
  *
- *   → PENDING_PAID   cliente APROBÓ una propuesta de BODEGA (o de VENTAS que
+ *   → EN_MOSTRADOR   cliente APROBÓ una propuesta de BODEGA (o de VENTAS que
  *                    no dejó items pendientes). Bodega ya verificó físicamente
- *                    lo que propuso, no hay nada que confirmar.
+ *                    lo que propuso; el cliente lo revisa antes de pagar.
+ *   → PENDING_PAID   el camino de DOMICILIO (no pasa por mostrador).
  *   → REVIEWING      cliente APROBÓ una propuesta de VENTAS y quedaron items
  *                    nuevos por surtir. Vuelve a bodega SIN ASIGNAR.
  *   → EN_ASESORIA    cliente pidió asesor (propuesta de bodega), o rechazó una
  *                    propuesta de VENTAS y quiere re-negociar.
  *   → CANCELLED      cliente rechazó una propuesta de BODEGA, o canceló
  *                    explícitamente.
+ *
+ * F16 (sep 2026): el pedido pasa por MOSTRADOR antes de pagar. El negocio
+ * necesitaba que el cliente viera y aprobara los productos en tienda antes de
+ * pagar, porque muchos piden más cosas o cambian algo al verlos.
+ *
+ *   → EN_MOSTRADOR   bodega (o ventas) terminó de verificar. El pedido está
+ *                    apartado esperando que el cliente lo revise. NO está
+ *                    encolado a Firebird todavía.
+ *   EN_MOSTRADOR →   PENDING_PAID (liberar: AQUÍ entra al ERP),
+ *                    REVIEWING (ajustar: el cliente cambió algo),
+ *                    CANCELLED (cancelar + reposición).
+ *
+ * Los pedidos a DOMICILIO saltan mostrador: no tiene sentido mostrarle el
+ * pedido a un cliente que no está en la tienda. Van REVIEWING → PENDING_PAID
+ * directo, como antes.
  */
 const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
   [EstadoPedido.PENDING_REVIEW]: [EstadoPedido.REVIEWING, EstadoPedido.CANCELLED],
@@ -49,15 +97,22 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
     // REVIEWING → WAITING_CUSTOMER_APPROVAL: lo dispara PropuestaService
     // cuando bodega envía una propuesta (hay faltantes).
     EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-    // REVIEWING → PENDING_PAID: lo dispara SurtidoService.confirmarSurtido
-    // cuando la bodega cierra el surtido SIN faltantes. El pedido queda listo
-    // para pago; la transición y los cambios de items son atómicos.
+    // F16: REVIEWING → EN_MOSTRADOR es la transición normal de bodega para
+    // pedidos que se recogen en tienda (KIOSKO / RECOGER_TIENDA).
+    EstadoPedido.EN_MOSTRADOR,
+    // REVIEWING → PENDING_PAID: se CONSERVA, pero sólo para DOMICILIO. Un
+    // pedido a domicilio no pasa por mostrador (el cliente no está en tienda).
+    // También lo dispara SurtidoService.confirmarSurtido cuando la bodega
+    // cierra el surtido SIN faltantes.
     EstadoPedido.PENDING_PAID,
     EstadoPedido.CANCELLED,
   ],
   // F13: el cliente decide sobre una propuesta. El destino depende del origen
   // de la propuesta y de la decisión — ver el comentario de arriba.
+  // F16: el destino de "aprobó y no queda nada por surtir" pasó de
+  // PENDING_PAID a EN_MOSTRADOR para pedidos de tienda.
   [EstadoPedido.WAITING_CUSTOMER_APPROVAL]: [
+    EstadoPedido.EN_MOSTRADOR,
     EstadoPedido.PENDING_PAID,
     EstadoPedido.REVIEWING,
     EstadoPedido.EN_ASESORIA,
@@ -67,8 +122,24 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
   // aquí cuando el vendedor manda una contrapropuesta (→ WAITING_CUSTOMER_
   // APPROVAL), cuando determina que el pedido original estaba bien y lo
   // devuelve a bodega (→ REVIEWING), o cuando se cancela.
+  // F16: también puede ir a EN_MOSTRADOR si la contrapropuesta no dejó items
+  // pendientes y el pedido se recoge en tienda.
   [EstadoPedido.EN_ASESORIA]: [
     EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+    EstadoPedido.REVIEWING,
+    EstadoPedido.EN_MOSTRADOR,
+    EstadoPedido.CANCELLED,
+  ],
+  // F16: el pedido está apartado en mostrador esperando que el cliente lo
+  // revise. Las tres salidas son las acciones del operador:
+  //   → PENDING_PAID  liberar (AQUÍ se encola a Firebird: el ERP sólo ve
+  //                   pedidos que el cliente ya confirmó).
+  //   → REVIEWING     ajustar (el cliente pidió cambios; bodega re-surte).
+  //                   Requiere opts.asignacion explícito por el guard de
+  //                   `cambiarEstado` — el caller NO es un bodeguero.
+  //   → CANCELLED     cancelar (crea la lista de reposición en la misma tx).
+  [EstadoPedido.EN_MOSTRADOR]: [
+    EstadoPedido.PENDING_PAID,
     EstadoPedido.REVIEWING,
     EstadoPedido.CANCELLED,
   ],
@@ -211,6 +282,14 @@ export class PedidoStateService {
           estado: estadoNuevo,
           ...this.cambiosDeAsignacion(opts.asignacion, usuario, ahora),
           ...this.cambiosDeReloj(opts.reloj, pedido, ahora),
+          // F16: "Atendiendo" solo tiene sentido dentro de EN_MOSTRADOR. Al
+          // salir (a pago, a bodega o a cancelado) el panel de la TV debe
+          // vaciarse solo — si no, un folio ya cobrado seguiría anunciado como
+          // "te toca". Se limpia aquí y no en cada caller para que ninguna
+          // transición futura pueda olvidarlo.
+          ...(estadoNuevo !== EstadoPedido.EN_MOSTRADOR
+            ? { llamadoAt: null }
+            : {}),
         },
       });
       if (result.count !== 1) {
@@ -568,6 +647,9 @@ export class PedidoStateService {
       // dispara PropuestaService (que conoce la nota del cliente y el origen
       // de la propuesta), no la máquina de estados genérica.
       case EstadoPedido.EN_ASESORIA: return null;
+      // F16: el pedido quedó apartado en tienda esperando que el cliente lo
+      // revise. Exige que se presente físicamente, así que sí se notifica.
+      case EstadoPedido.EN_MOSTRADOR: return TipoNotificacion.LISTO_EN_TIENDA;
       // PENDING_PAID no notifica al cliente: el cambio lo ve por realtime/refresh
       // cuando bodega confirma el surtido o el cliente acepta la propuesta.
       case EstadoPedido.PAID: return TipoNotificacion.PAGO_CONFIRMADO;

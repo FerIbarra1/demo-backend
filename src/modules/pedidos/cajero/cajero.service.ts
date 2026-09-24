@@ -10,7 +10,7 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { VentanillasService } from '../../ventanillas/ventanillas.service';
 import { UserContext } from '../../../types/pedido.types';
-import { EstadoPedido, Prisma, RolUsuario, CanalOrigen } from '@prisma/client';
+import { EstadoPedido, Prisma, RolUsuario, ModoEntrega } from '@prisma/client';
 
 /**
  * Servicio del dominio CAJERO.
@@ -36,11 +36,23 @@ export class CajeroService {
     tiendaId?: number,
     pagina = 1,
     limite = 20,
-    canal: 'KIOSKO' | 'WEB' | 'TODOS' = 'KIOSKO',
+    /**
+     * F16 (sep 2026): default `'TODOS'`. Antes era `'KIOSKO'` y escondía los
+     * pedidos web, que con el flujo nuevo SÍ llegan a caja (mostrador los
+     * libera). El filtro sigue existiendo como comodidad de UI — la cajera
+     * puede querer ver solo los de kiosko — pero ya no es un gate: el gate real
+     * es el ESTADO (`PENDING_PAID`), al que solo se llega por liberación de
+     * mostrador (o por domicilio, que no pasa por caja).
+     */
+    canal: 'KIOSKO' | 'WEB' | 'TODOS' = 'TODOS',
   ) {
     const where: Prisma.PedidoWhereInput = {
       estado: EstadoPedido.PENDING_PAID,
       cajeroAsignadoId: null,
+      // Un pedido a DOMICILIO en PENDING_PAID no se cobra en ventanilla: el
+      // cliente no va a la tienda. Antes quedaba excluido de facto por el
+      // filtro de KIOSKO; al quitarlo hay que ser explícito.
+      modoEntrega: { not: ModoEntrega.DOMICILIO },
     };
     if (canal !== 'TODOS') where.canalOrigen = canal;
     if (tiendaId) where.tiendaId = tiendaId;
@@ -83,12 +95,21 @@ export class CajeroService {
       const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
-      if (pedido.canalOrigen !== CanalOrigen.KIOSKO) {
-        throw new BadRequestException('Sólo pedidos del kiosko entran al monitor de ventanillas');
-      }
+      // F16 (sep 2026): el candado de canal se eliminó. Antes rechazaba todo
+      // pedido no-KIOSKO con 400, y con el flujo nuevo los pedidos web SÍ
+      // llegan a caja (mostrador los libera tras mostrárselos al cliente).
+      // El gate real es el ESTADO: solo `PENDING_PAID` entra al monitor de
+      // ventanillas, y a ese estado solo se llega por liberación de mostrador
+      // o por el camino de domicilio (que no pasa por caja).
       if (pedido.estado !== EstadoPedido.PENDING_PAID) {
         throw new BadRequestException(
           `Sólo se toman pedidos en PENDING_PAID (actual: ${pedido.estado})`,
+        );
+      }
+      // Un pedido a domicilio no se cobra en ventanilla.
+      if (pedido.modoEntrega === ModoEntrega.DOMICILIO) {
+        throw new BadRequestException(
+          'Los pedidos a domicilio no se cobran en ventanilla',
         );
       }
       if (pedido.cajeroAsignadoId !== null && pedido.cajeroAsignadoId !== usuario.userId) {
@@ -200,8 +221,13 @@ export class CajeroService {
 
   /**
    * F11 (ago 2026): "Llamar siguiente" — el cajero presiona el botón, toma el
-   * primer pedido KIOSKO en PENDING_PAID sin asignar (FIFO por fechaPedido)
-   * y se lo asigna a su ventanilla.
+   * primer pedido en PENDING_PAID sin asignar (FIFO por fechaPedido) y se lo
+   * asigna a su ventanilla.
+   *
+   * F16 (sep 2026): ya NO filtra por canal. Antes solo tomaba pedidos KIOSKO,
+   * así que con el flujo nuevo "Llamar siguiente" habría devuelto 404 aunque
+   * hubiera pedidos web esperando en la cola — el bug más fácil de cometer al
+   * quitar el candado de canal (habría que quitarlo también aquí).
    *
    * Precondiciones:
    *  - El cajero debe tener una ventanilla elegida. Si no, 400.
@@ -226,12 +252,14 @@ export class CajeroService {
       );
     }
 
-    // 2) Buscar el primer pedido KIOSKO sin asignar (FIFO).
+    // 2) Buscar el primer pedido sin asignar (FIFO). Sin filtro de canal: los
+    // pedidos web liberados por mostrador también se cobran aquí.
     const siguiente = await this.prisma.pedido.findFirst({
       where: {
         tiendaId: usuario.tiendaId,
         estado: EstadoPedido.PENDING_PAID,
-        canalOrigen: CanalOrigen.KIOSKO,
+        // Los pedidos a domicilio no se cobran en ventanilla.
+        modoEntrega: { not: ModoEntrega.DOMICILIO },
         cajeroAsignadoId: null,
       },
       orderBy: { fechaPedido: 'asc' },

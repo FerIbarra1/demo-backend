@@ -299,11 +299,25 @@ export class MessagesService {
             tipo: it.tipo,
             producto: it.producto,
             variante: it.variante,
+            // El snapshot es la fuente de verdad de lo que el cliente ve en la
+            // tarjeta del chat, así que se guarda el item COMPLETO: la imagen,
+            // el productoId (para resolver la foto de un `agregado`) y el
+            // "antes" de los tipos `cambio`/`parcial`. Antes este map los
+            // descartaba y la tarjeta no podía mostrar ni la foto ni el delta.
+            productoImagen: it.productoImagen ?? null,
             cantidad: it.cantidad,
             precioUnitario: it.precioUnitario,
             subtotal: it.subtotal,
+            productoOriginal: it.productoOriginal ?? null,
+            varianteOriginal: it.varianteOriginal ?? null,
+            cantidadOriginal: it.cantidadOriginal ?? null,
+            productoNuevo: it.productoNuevo ?? null,
+            varianteNueva: it.varianteNueva ?? null,
             cantidadNueva: it.cantidadNueva ?? null,
+            precioUnitarioNuevo: it.precioUnitarioNuevo ?? null,
             subtotalNuevo: it.subtotalNuevo ?? null,
+            tempId: it.tempId ?? null,
+            productoId: it.productoId ?? null,
             precioCOId: it.precioCOId ?? null,
           })),
           total: dto.total ?? 0,

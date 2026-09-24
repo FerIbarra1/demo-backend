@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { PedidoEmailShell } from './PedidoEmailShell';
 import { Text } from '@react-email/components';
-import { PedidoEmailData } from '../mail.templates';
+import { PedidoEmailData, folioVisible } from '../mail.templates';
 
 export interface PagoConfirmadoProps {
   pedido: PedidoEmailData;
@@ -17,9 +17,9 @@ export const PagoConfirmado = ({
   frontendUrl,
 }: PagoConfirmadoProps) => (
   <PedidoEmailShell
-    preview={`Pago confirmado de tu pedido ${pedido.numeroPedido}`}
+    preview={`Pago confirmado de tu pedido ${folioVisible(pedido)}`}
     title={`¡Pago confirmado!`}
-    greeting={`Hola, ${pedido.clienteNombre}. Recibimos el pago de tu pedido ${pedido.numeroPedido}. Ya estamos preparando todo para entregártelo.`}
+    greeting={`Hola, ${pedido.clienteNombre}. Recibimos el pago de tu pedido ${folioVisible(pedido)}.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     logoUrl={logoUrl}
@@ -33,8 +33,9 @@ export const PagoConfirmado = ({
           lineHeight: '1.6',
         }}
       >
-        Te avisaremos por correo en cuanto tu pedido sea enviado (si es a
-        domicilio) o esté listo para recoger en tienda.
+        {pedido.direccionEnvio
+          ? 'Te avisaremos por correo en cuanto tu pedido sea enviado.'
+          : 'Ya puedes llevarte tu pedido: acércate al mostrador con tu folio y te lo entregamos.'}
       </Text>
     }
   />

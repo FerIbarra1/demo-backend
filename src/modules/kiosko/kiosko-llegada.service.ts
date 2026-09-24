@@ -16,10 +16,31 @@ import {
   verificarLlegoQr,
   tokenEsDeTienda,
 } from '../pedidos/core/qr-llegada.util';
+import { estadoPedidoLabel } from '../mail/estado-labels';
 import { CanalLlegada, EstadoPedido, ModoEntrega, Prisma } from '@prisma/client';
 
 const THROTTLE_WINDOW_MS = 60_000;
+/**
+ * F16 (sep 2026): tope de avisos que emiten realtime SIN esperar la ventana de
+ * reintento. Pasado el tope, el aviso sigue funcionando pero solo re-emite cada
+ * `REINTENTO_WINDOW_MS`.
+ */
 const MAX_AVISOS_POR_PEDIDO = 5;
+/**
+ * F16: ventana tras la cual un pedido que agotó el tope puede volver a emitir.
+ *
+ * Antes el tope era de POR VIDA: `llegadaAnunciadaCount` se incrementaba y
+ * nunca se reiniciaba, así que tras 5 avisos el pedido dejaba de emitir
+ * realtime PARA SIEMPRE. Era un adorno cuando la llegada solo pintaba un badge;
+ * con el gate de D5 (un pedido web NO aparece en mostrador hasta que el cliente
+ * avisa) el bug se vuelve real: si el operador descarta el aviso y el cliente
+ * vuelve a avisar, el pedido reaparece en la cola por el polling pero SIN la
+ * alerta en la TV — el operador no se entera de que hay alguien esperando.
+ *
+ * Convertirlo en límite de tasa (en vez de tope de por vida) arregla el caso
+ * sin necesidad de una columna nueva: `llegadaUltimoAvisoAt` ya existe.
+ */
+const REINTENTO_WINDOW_MS = 10 * 60_000;
 
 /**
  * PR7 (kiosko-profesional): flujo "avisar llegada a tienda".
@@ -126,16 +147,45 @@ export class KioskoLlegadaService {
     const pedido = await this.resolverPedido(input);
 
     // Validaciones de estado y modo de entrega.
-    if (pedido.estado === EstadoPedido.COMPLETED) {
+    //
+    // F16 (sep 2026): el aviso solo se acepta cuando el pedido YA ESTÁ LISTO
+    // para revisarse en tienda (`EN_MOSTRADOR`). Ese estado es exactamente el
+    // punto en que bodega terminó de verificar, o el cliente aprobó las
+    // modificaciones que bodega o ventas propusieron.
+    //
+    // Antes solo se rechazaban COMPLETED y CANCELLED, así que el cliente podía
+    // avisar desde PENDING_REVIEW y su pedido quedaba marcado "EN TIENDA" antes
+    // de que nadie lo hubiera surtido.
+    if (pedido.estado !== EstadoPedido.EN_MOSTRADOR) {
+      const codigo =
+        pedido.estado === EstadoPedido.COMPLETED
+          ? 'YA_ENTREGADO'
+          : pedido.estado === EstadoPedido.CANCELLED
+            ? 'CANCELADO'
+            : 'AUN_NO_ESTA_LISTO';
+      const mensajes: Partial<Record<EstadoPedido, string>> = {
+        [EstadoPedido.COMPLETED]: 'Ese pedido ya fue entregado.',
+        [EstadoPedido.CANCELLED]:
+          'Ese pedido está cancelado. Pasa al mostrador para revisarlo.',
+        [EstadoPedido.PENDING_REVIEW]:
+          'Tu pedido todavía está en cola de revisión. Te avisamos cuando esté listo.',
+        [EstadoPedido.REVIEWING]:
+          'Bodega está preparando tu pedido. Podrás avisar tu llegada cuando esté listo.',
+        [EstadoPedido.WAITING_CUSTOMER_APPROVAL]:
+          'Tienes una propuesta pendiente de aprobar. Tu pedido estará listo cuando la respondas.',
+        [EstadoPedido.EN_ASESORIA]:
+          'Un asesor está viendo tu pedido. Podrás avisar tu llegada cuando esté listo.',
+        [EstadoPedido.PENDING_PAID]:
+          'Tu pedido ya pasó a caja. Pasa a la ventanilla que te indiquen para pagar.',
+        [EstadoPedido.PAID]:
+          'Tu pedido ya está pagado. Acércate al mostrador con tu folio y te lo entregamos.',
+        [EstadoPedido.SHIPPED]: 'Tu pedido ya fue enviado.',
+      };
       throw new ConflictException({
-        codigo: 'YA_ENTREGADO',
-        message: 'Ese pedido ya fue entregado.',
-      });
-    }
-    if (pedido.estado === EstadoPedido.CANCELLED) {
-      throw new ConflictException({
-        codigo: 'CANCELADO',
-        message: 'Ese pedido está cancelado. Pasa al mostrador para revisarlo.',
+        codigo,
+        message:
+          mensajes[pedido.estado] ??
+          'Tu pedido todavía no está listo para revisarse en tienda.',
       });
     }
     if (
@@ -149,10 +199,13 @@ export class KioskoLlegadaService {
     }
 
     // Idempotencia: si avisó hace <60s, devolvemos sin re-emit.
+    // F16: un aviso DESCARTADO por el operador se puede volver a mandar de
+    // inmediato (ver el comentario en `confirmarDesdeCliente`).
     const now = new Date();
     const ultimo = pedido.llegadaUltimoAvisoAt;
     const isFresh = ultimo && now.getTime() - ultimo.getTime() < THROTTLE_WINDOW_MS;
-    if (pedido.llegadaAnunciadaAt && isFresh) {
+    const descartado = pedido.llegadaDescartadaAt !== null;
+    if (pedido.llegadaAnunciadaAt && isFresh && !descartado) {
       const esperandoDesdeMin = Math.max(
         0,
         Math.floor((now.getTime() - pedido.llegadaAnunciadaAt.getTime()) / 60_000),
@@ -165,10 +218,21 @@ export class KioskoLlegadaService {
       };
     }
 
-    // Anti-spam: si llega a MAX, dejamos de re-emit realtime (el
-    // mostrador ya sabe). Igual dejamos que se actualice el último
-    // timestamp para que el cliente vea feedback.
-    const nuevoCount = pedido.llegadaAnunciadaCount + 1;
+    // F16: el tope es un LÍMITE DE TASA, no un tope de por vida. Pasado
+    // `REINTENTO_WINDOW_MS` desde la última EMISIÓN, el contador se reinicia y
+    // el pedido vuelve a emitir. Sin esto, un cliente que avisa 6 veces deja su
+    // pedido sin alerta en la TV para siempre (bug B2 del plan).
+    //
+    // El ancla es `llegadaUltimaEmisionAt`, NO `llegadaUltimoAvisoAt`: este
+    // último se reescribe en cada request, así que un cliente que insistía más
+    // seguido que la ventana nunca la cumplía y su pedido quedaba sin alerta
+    // indefinidamente.
+    const agotoTope = pedido.llegadaAnunciadaCount >= MAX_AVISOS_POR_PEDIDO;
+    const ultimaEmision = pedido.llegadaUltimaEmisionAt;
+    const pasoLaVentana =
+      ultimaEmision === null ||
+      now.getTime() - ultimaEmision.getTime() >= REINTENTO_WINDOW_MS;
+    const nuevoCount = agotoTope && pasoLaVentana ? 1 : pedido.llegadaAnunciadaCount + 1;
     const debeEmitir = nuevoCount <= MAX_AVISOS_POR_PEDIDO;
 
     const actualizado = await this.prisma.pedido.update({
@@ -177,6 +241,10 @@ export class KioskoLlegadaService {
         llegadaAnunciadaAt: pedido.llegadaAnunciadaAt ?? now,
         llegadaUltimoAvisoAt: now,
         llegadaAnunciadaCount: nuevoCount,
+        // Solo se mueve el ancla cuando REALMENTE se emite: si el aviso se
+        // suprime, la ventana tiene que seguir corriendo desde la última
+        // emisión real.
+        ...(debeEmitir ? { llegadaUltimaEmisionAt: now } : {}),
         llegadaAnunciadaCanal: CanalLlegada.QR, // se sobreescribe abajo según método
         llegadaAnunciadaKioskoId: input.kioskoId,
         llegadaAnunciadaPor: input.kioskoNombre,
@@ -266,7 +334,17 @@ export class KioskoLlegadaService {
       pedido.llegadaUltimoAvisoAt &&
       now.getTime() - pedido.llegadaUltimoAvisoAt.getTime() < THROTTLE_WINDOW_MS;
 
-    if (pedido.llegadaAnunciadaAt && isFresh) {
+    // F16 (sep 2026): un aviso DESCARTADO se puede volver a mandar de inmediato.
+    //
+    // El descarte lo hace el operador cuando el cliente no está (o se fue), así
+    // que invalida el aviso anterior: no tiene sentido hacerlo esperar la
+    // ventana de 60s. Sin esta excepción, si el operador descartaba dentro de
+    // ese minuto —lo normal, porque descarta en cuanto no ve al cliente— el
+    // cliente recibía "ya avisamos al equipo" y su pedido NO volvía a la cola,
+    // quedándose sin forma de re-avisar.
+    const descartado = pedido.llegadaDescartadaAt !== null;
+
+    if (pedido.llegadaAnunciadaAt && isFresh && !descartado) {
       const esperandoDesdeMin = Math.max(
         0,
         Math.floor((now.getTime() - pedido.llegadaAnunciadaAt.getTime()) / 60_000),
@@ -281,7 +359,16 @@ export class KioskoLlegadaService {
       };
     }
 
-    const nuevoCount = pedido.llegadaAnunciadaCount + 1;
+    // F16: mismo límite de tasa que el camino del kiosko (ver el comentario en
+    // `confirmar`). Sin esto, un cliente que avisa 6 veces desde su app deja su
+    // pedido sin alerta en la TV para siempre. El ancla es la última EMISIÓN,
+    // no el último aviso.
+    const agotoTope = pedido.llegadaAnunciadaCount >= MAX_AVISOS_POR_PEDIDO;
+    const ultimaEmision = pedido.llegadaUltimaEmisionAt;
+    const pasoLaVentana =
+      ultimaEmision === null ||
+      now.getTime() - ultimaEmision.getTime() >= REINTENTO_WINDOW_MS;
+    const nuevoCount = agotoTope && pasoLaVentana ? 1 : pedido.llegadaAnunciadaCount + 1;
     const debeEmitir = nuevoCount <= MAX_AVISOS_POR_PEDIDO;
     await this.prisma.pedido.update({
       where: { id: pedidoId },
@@ -289,6 +376,7 @@ export class KioskoLlegadaService {
         llegadaAnunciadaAt: pedido.llegadaAnunciadaAt ?? now,
         llegadaUltimoAvisoAt: now,
         llegadaAnunciadaCount: nuevoCount,
+        ...(debeEmitir ? { llegadaUltimaEmisionAt: now } : {}),
         llegadaAnunciadaCanal: CanalLlegada.WEB,
         llegadaAnunciadaKioskoId: null,
         llegadaAnunciadaPor: 'App del cliente',
@@ -360,7 +448,13 @@ export class KioskoLlegadaService {
       }
       const pedido = await this.prisma.pedido.findUnique({
         where: { id: r.pedidoId },
-        include: { tienda: { select: { nombre: true } } },
+        // `items` es necesario: `toConsultarDto` cuenta los artículos para
+        // el resumen de "¿es este tu pedido?". Sin el include, el conteo
+        // caía al fallback y la pantalla mostraba "? artículos".
+        include: {
+          tienda: { select: { nombre: true } },
+          items: { select: { id: true } },
+        },
       });
       if (!pedido) {
         throw new NotFoundException({
@@ -382,7 +476,10 @@ export class KioskoLlegadaService {
           numeroPedido: folio,
           tiendaId: input.kioskoTiendaId,
         },
-        include: { tienda: { select: { nombre: true } } },
+        include: {
+          tienda: { select: { nombre: true } },
+          items: { select: { id: true } },
+        },
       });
       if (!pedido) {
         // Fallback: externalFolio (folio de Firebird, asignado tras
@@ -390,7 +487,14 @@ export class KioskoLlegadaService {
         // migración.
         const pendiente = await this.prisma.pedidoPendienteEnvio.findFirst({
           where: { externalFolio: folio, pedido: { tiendaId: input.kioskoTiendaId } },
-          include: { pedido: { include: { tienda: { select: { nombre: true } } } } },
+          include: {
+            pedido: {
+              include: {
+                tienda: { select: { nombre: true } },
+                items: { select: { id: true } },
+              },
+            },
+          },
         });
         pedido = pendiente?.pedido ?? null;
       }
@@ -452,20 +556,12 @@ export class KioskoLlegadaService {
   }
 
   private labelParaEstado(estado: EstadoPedido): string {
-    // Reusar etiquetas existentes si están en estado-labels.ts; si no,
-    // fallback a un mapping mínimo para no acoplar al módulo mostrador.
-    const map: Record<EstadoPedido, string> = {
-      PENDING_REVIEW: 'En revisión',
-      REVIEWING: 'En revisión',
-      WAITING_CUSTOMER_APPROVAL: 'Propuesta pendiente',
-      EN_ASESORIA: 'Con asesor',
-      PENDING_PAID: 'Pendiente de pago',
-      PAID: 'Pagado',
-      SHIPPED: 'En preparación',
-      COMPLETED: 'Entregado',
-      CANCELLED: 'Cancelado',
-    };
-    return map[estado] ?? estado;
+    // Fuente única: `mail/estado-labels.ts`. Antes había un mapa local que
+    // decía reutilizar las etiquetas pero en realidad las duplicaba, y ya
+    // divergían (EN_MOSTRADOR salía "Listo en tienda" aquí y "Listo en tienda ·
+    // revísalo" en el correo). El cliente veía dos vocabularios para el mismo
+    // paso según dónde mirara.
+    return estadoPedidoLabel(estado);
   }
 
   private mensajeParaEstado(estado: EstadoPedido): string {
@@ -481,6 +577,13 @@ export class KioskoLlegadaService {
     }
     if (estado === EstadoPedido.EN_ASESORIA) {
       return 'Ya avisamos al equipo. Un asesor te atenderá.';
+    }
+    // F16 (sep 2026): el pedido está apartado esperando que el cliente lo
+    // revise. No es un error de compilación (esta función es una cadena de
+    // `if` con fallback), pero sin este caso el cliente recibiría el copy
+    // genérico justo cuando más necesita saber qué sigue.
+    if (estado === EstadoPedido.EN_MOSTRADOR) {
+      return '¡Listo! Ya avisamos al equipo. Pasa a mostrador a revisar tu pedido.';
     }
     if (estado === EstadoPedido.PENDING_PAID) {
       return 'Ya avisamos al equipo. Pasa a caja a pagar.';

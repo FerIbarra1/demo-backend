@@ -1,4 +1,6 @@
-import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query, Headers, UnauthorizedException } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query, Headers } from '@nestjs/common';
+import { KioskoTokenInvalidoException } from './exceptions/kiosko-token-invalido.exception';
+import { KioskoInactivoException } from './exceptions/kiosko-inactivo.exception';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { KioskoService } from './kiosko.service';
@@ -47,9 +49,20 @@ export class KioskoController {
     @Param('id', ParseIntPipe) id: number,
     @Headers('x-kiosko-token') deviceToken?: string,
   ) {
-    const valido = await this.kioskoService.validarDeviceToken(id, deviceToken);
+    const { valido, motivo } = await this.kioskoService.validarDeviceTokenConMotivo(
+      id,
+      deviceToken,
+    );
     if (!valido) {
-      throw new UnauthorizedException('X-Kiosko-Token inválido o kiosko sin token configurado');
+      // El frontend distingue los dos casos por `codigo`:
+      //  - KIOSKO_INACTIVO (409): el admin apagó el kiosko → basta reactivarlo.
+      //  - KIOSKO_TOKEN_INVALIDO (401): la tablet no puede probar su
+      //    identidad → el admin debe regenerar el token y pegarlo.
+      // Antes ambos eran un 401 genérico y la tablet no sabía qué hacer.
+      if (motivo === 'KIOSKO_INACTIVO') {
+        throw new KioskoInactivoException();
+      }
+      throw new KioskoTokenInvalidoException();
     }
     return this.kioskoService.heartbeat(id);
   }

@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { EstadoPedido, CanalOrigen } from '@prisma/client';
+import type { MotivoReingreso } from '../../core/motivo-reingreso';
 
 export class MonitorPedidoDto {
   @ApiProperty() id: number;
@@ -44,6 +45,32 @@ export class MonitorPedidoDto {
    */
   @ApiProperty({ default: false })
   esLiberado: boolean;
+
+  /**
+   * F16 (sep 2026): por qué el pedido volvió a la cola de bodega.
+   *
+   * `esLiberado` confluye tres casos distintos, y dos traen trabajo real que el
+   * bodeguero no podía distinguir sin abrir el historial:
+   *   - LIBERADO         → otro bodeguero lo soltó. Nada nuevo que surtir.
+   *   - AJUSTE_MOSTRADOR → el cliente cambió algo en tienda.
+   *   - PROPUESTA_VENTAS → el cliente aprobó la contrapropuesta del asesor.
+   *
+   * `null` = el pedido nunca salió de bodega (es nuevo).
+   */
+  @ApiProperty({
+    enum: ['LIBERADO', 'AJUSTE_MOSTRADOR', 'PROPUESTA_VENTAS'],
+    nullable: true,
+    description: 'Motivo por el que el pedido volvió a la cola de bodega.',
+  })
+  motivoReingreso: MotivoReingreso | null;
+
+  /**
+   * F16: cuántos items del pedido son nuevos (agregados por ventas o por el
+   * ajuste de mostrador). Es lo que le dice al bodeguero cuánto trabajo extra
+   * trae el pedido, sin tener que abrirlo.
+   */
+  @ApiProperty({ default: 0 })
+  itemsNuevos: number;
 }
 
 /**

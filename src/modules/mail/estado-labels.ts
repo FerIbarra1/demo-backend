@@ -10,6 +10,9 @@ export const ESTADO_PEDIDO_LABELS: Record<EstadoPedido, string> = {
   REVIEWING: 'En revisión por bodega',
   WAITING_CUSTOMER_APPROVAL: 'Propuesta pendiente de tu aprobación',
   EN_ASESORIA: 'Con un asesor de ventas',
+  // F16 (sep 2026): el pedido está apartado en tienda esperando que el cliente
+  // lo revise antes de pagar.
+  EN_MOSTRADOR: 'Listo en tienda · revísalo',
   PENDING_PAID: 'Pendiente de pago',
   PAID: 'Pago confirmado',
   SHIPPED: 'Enviado · en camino',

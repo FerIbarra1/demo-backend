@@ -125,7 +125,18 @@ export class PedidoLlegoQrController {
   ) {
     // Validación: el cliente solo puede pedir el QR de SU pedido.
     // ADMIN/MOSTRADOR pueden pedir cualquiera.
-    if (user.rol === RolUsuario.CLIENTE && user.userId !== undefined) {
+    //
+    // F16 (sep 2026): antes la condición era
+    // `user.rol === CLIENTE && user.userId !== undefined`. Si `userId` llegaba
+    // `undefined` (token sin el claim), la condición completa era `false` y se
+    // SALTABA la validación de dueño: un CLIENTE autenticado podía obtener el
+    // QR firmado de cualquier pedido. Ese QR es la credencial para anunciar
+    // llegada, así que el bypass permitía hacer aparecer el pedido de otro en
+    // la cola del mostrador. Ahora se exige el userId y se falla cerrado.
+    if (user.rol === RolUsuario.CLIENTE) {
+      if (user.userId === undefined || user.userId === null) {
+        throw new UnauthorizedException('No autorizado');
+      }
       const pedido = await this.prisma.pedido.findUnique({
         where: { id: pedidoId },
         select: { usuarioId: true },

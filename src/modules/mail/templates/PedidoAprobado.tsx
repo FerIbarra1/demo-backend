@@ -19,12 +19,12 @@ export const PedidoAprobado = ({
   qrDataUrl,
 }: PedidoAprobadoProps) => (
   <PedidoEmailShell
-    preview={`Tu pedido ${folioVisible(pedido)} está aprobado y listo para pagar`}
-    title={`Tu pedido ${folioVisible(pedido)} está aprobado`}
-    greeting={`Hola, ${pedido.clienteNombre}. Confirmamos la disponibilidad de tu pedido y ya quedó listo para pago.`}
+    preview={`Tu pedido ${folioVisible(pedido)} ya está listo para pagar`}
+    title={`Tu pedido ${folioVisible(pedido)} ya está listo`}
+    greeting={`Hola, ${pedido.clienteNombre}. Revisamos tu pedido y ya puedes pasar a pagar.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
-    ctaLabel="Ir a pagar"
+    ctaLabel="Ver mi pedido"
     logoUrl={logoUrl}
     frontendUrl={frontendUrl}
     bodyExtras={
@@ -37,9 +37,9 @@ export const PedidoAprobado = ({
             lineHeight: '1.6',
           }}
         >
-          Acércate a la ventanilla de la tienda o sigue las instrucciones
-          según el modo de entrega que elegiste. Te avisaremos por correo
-          en cuanto el pago quede confirmado.
+          {pedido.direccionEnvio
+            ? 'Tu pedido va a domicilio: ya puedes completar el pago y te avisaremos por correo en cuanto salga a camino.'
+            : 'Presenta este folio en caja para completar tu pago. Si ya estás en la tienda, acércate a la ventanilla que te indiquen.'}
         </Text>
         {qrDataUrl ? (
           <div
@@ -63,7 +63,7 @@ export const PedidoAprobado = ({
                 lineHeight: '1.5',
               }}
             >
-              Muestra este código QR en la tienda para agilizar tu pago.
+              Muestra este código QR en caja para agilizar tu pago.
             </Text>
           </div>
         ) : null}

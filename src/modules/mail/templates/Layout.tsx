@@ -51,8 +51,12 @@ const styles = {
     overflow: 'hidden' as const,
     boxShadow: '0 4px 20px -2px rgba(0,0,0,0.05)',
   },
+  // El header va SIEMPRE en blanco. El logo de PTM es oscuro sobre blanco, así
+  // que si el cliente de correo invierte los colores en modo oscuro el fondo se
+  // vuelve negro y el logo desaparece. Ver `colorSchemeLightOnly` abajo: además
+  // del color explícito, se le dice al cliente que no invierta.
   header: {
-    backgroundColor: colors.background,
+    backgroundColor: '#ffffff',
     padding: '40px 32px 32px',
     textAlign: 'center' as const,
     borderBottom: `1px solid ${colors.borderSubtle}`,
@@ -98,17 +102,33 @@ export const EmailLayout = ({
   const year = new Date().getFullYear();
   return (
     <Html>
-      <Head />
+      <Head>
+        {/* Modo oscuro: se declara que el correo es sólo claro.
+            Sin esto, Gmail/Outlook invierten los fondos y el header del logo
+            (diseñado oscuro sobre blanco) se vuelve negro y el logo desaparece.
+            Los clientes que respetan la declaración mantienen el diseño tal
+            como se ve en claro. */}
+        <meta name="color-scheme" content="light" />
+        <meta name="supported-color-schemes" content="light" />
+        <style>{`
+          :root { color-scheme: light; supported-color-schemes: light; }
+          /* Refuerzo para clientes que invierten por su cuenta: el header
+             mantiene su fondo blanco aunque el resto se oscurezca. */
+          .ptm-header { background-color: #ffffff !important; }
+          .ptm-header img { background-color: #ffffff !important; }
+        `}</style>
+      </Head>
       <Preview>{preview}</Preview>
       <Body style={styles.body}>
         <Container style={styles.container}>
-          <Section style={styles.header}>
+          <Section className="ptm-header" style={styles.header}>
             {logoUrl ? (
               <Img
                 src={logoUrl}
                 width="220"
                 height="auto"
                 alt="Punto Textil Mayoreo"
+                className="ptm-header"
                 style={styles.logo}
               />
             ) : (
@@ -118,12 +138,26 @@ export const EmailLayout = ({
           <Section style={styles.content}>{children}</Section>
           <Hr style={{ borderColor: colors.borderSubtle, margin: 0 }} />
           <Section style={styles.footer}>
-            <Text>
+            <Text style={{ margin: '0 0 8px 0' }}>
               © {year} Punto Textil Mayoreo
-              <br />
-              <Link href={frontendUrl} style={styles.footerLink}>
-                Visitar sitio
+            </Text>
+            <Text style={{ margin: '0 0 8px 0' }}>
+              <Link href={`${frontendUrl}/pedidos`} style={styles.footerLink}>
+                Mis pedidos
               </Link>
+              {' · '}
+              <Link href={`${frontendUrl}/catalogo`} style={styles.footerLink}>
+                Catálogo
+              </Link>
+              {' · '}
+              <Link href={frontendUrl} style={styles.footerLink}>
+                Sitio
+              </Link>
+            </Text>
+            <Text style={{ margin: 0, fontSize: '11px' }}>
+              Recibes este correo porque hiciste un pedido en Punto Textil
+              Mayoreo. Si tienes dudas sobre tu cuenta o tus pedidos, responde a
+              este correo.
             </Text>
           </Section>
         </Container>

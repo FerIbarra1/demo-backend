@@ -160,6 +160,11 @@ export class AuthController {
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
     RolUsuario.MOSTRADOR,
+    // F16 (sep 2026): la TV del mostrador también necesita cerrar sesión y
+    // consultar su perfil. Faltaba, así que el logout devolvía 403 y el
+    // refresh token httpOnly quedaba vivo server-side (el frontend traga el
+    // error con .catch, así que el usuario no se enteraba).
+    RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
     RolUsuario.ADMIN,
@@ -184,6 +189,11 @@ export class AuthController {
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
     RolUsuario.MOSTRADOR,
+    // F16 (sep 2026): la TV del mostrador también necesita cerrar sesión y
+    // consultar su perfil. Faltaba, así que el logout devolvía 403 y el
+    // refresh token httpOnly quedaba vivo server-side (el frontend traga el
+    // error con .catch, así que el usuario no se enteraba).
+    RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
     RolUsuario.ADMIN,
@@ -202,6 +212,11 @@ export class AuthController {
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
     RolUsuario.MOSTRADOR,
+    // F16 (sep 2026): la TV del mostrador también necesita cerrar sesión y
+    // consultar su perfil. Faltaba, así que el logout devolvía 403 y el
+    // refresh token httpOnly quedaba vivo server-side (el frontend traga el
+    // error con .catch, así que el usuario no se enteraba).
+    RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
     RolUsuario.ADMIN,
@@ -223,6 +238,11 @@ export class AuthController {
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
     RolUsuario.MOSTRADOR,
+    // F16 (sep 2026): la TV del mostrador también necesita cerrar sesión y
+    // consultar su perfil. Faltaba, así que el logout devolvía 403 y el
+    // refresh token httpOnly quedaba vivo server-side (el frontend traga el
+    // error con .catch, así que el usuario no se enteraba).
+    RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
     RolUsuario.ADMIN,
@@ -247,6 +267,9 @@ export class AuthController {
     RolUsuario.BODEGA_MONITOR,
     RolUsuario.CAJERO,
     RolUsuario.MOSTRADOR,
+    // F16: el rol de la TV. No aparece en el monitor de bodega (no tiene
+    // slots), pero sin él el heartbeat devolvía 403.
+    RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.VENTAS,
     RolUsuario.ADMIN,
   )

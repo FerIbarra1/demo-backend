@@ -11,6 +11,11 @@ export const ROLES_EMPLEADO = [
   RolUsuario.CAJERO,
   RolUsuario.CAJERO_MONITOR,
   RolUsuario.MOSTRADOR,
+  // F16 (sep 2026): la TV del mostrador. Faltaba aquí, así que el rol existía
+  // en el enum y en el dropdown del frontend pero el backend lo rechazaba con
+  // 400 (`@IsIn(ROLES_EMPLEADO)` + `forbidNonWhitelisted`): solo se podía
+  // provisionar por seed.
+  RolUsuario.MOSTRADOR_MONITOR,
   RolUsuario.VENTAS,
 ] as const;
 

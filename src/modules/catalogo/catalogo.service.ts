@@ -1,39 +1,25 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../imagenes/storage.service';
+import { PreciosService } from '../precios/precios.service';
+import { ColumnaLista } from '../precios/precio-lista.util';
 import { FiltroCatalogoDto } from './dto/filtro-catalogo.dto';
 
 /**
- * F9 (ago 2026): elige qué columna de Precio.listaX usar según el
- * Usuario.listaPrecioCodigo (sincronizado desde Firebird CLIENTES.LISPRE).
+ * Fase 0 (sep 2026): la resolución de la lista de precios del cliente se movió
+ * a `PreciosService` + `precio-lista.util.ts`.
  *
- * Si el cliente tiene `listaPrecioCodigo='3'` → mostrar Precio.lista3.
- * Si no, fallback a `precioBase` (= lista1) para mantener compatibilidad.
+ * Antes vivía privada aquí (`resolverColumnaLista` + `obtenerColumnaLista`), y
+ * eso permitió que el catálogo respetara la lista del cliente mientras el
+ * PEDIDO se creaba con `PrecioCO.precio` (siempre `lista1`). Ahora los dos
+ * caminos comparten la misma regla y no pueden divergir.
  */
-function resolverColumnaLista(
-  listaPrecioCodigo: string | null | undefined,
-): 'lista1' | 'lista2' | 'lista3' | 'lista4' | 'lista5' | 'lista6' {
-  switch ((listaPrecioCodigo ?? '').trim()) {
-    case '2':
-      return 'lista2';
-    case '3':
-      return 'lista3';
-    case '4':
-      return 'lista4';
-    case '5':
-      return 'lista5';
-    case '6':
-      return 'lista6';
-    default:
-      return 'lista1';
-  }
-}
-
 @Injectable()
 export class CatalogoService {
   constructor(
     private prisma: PrismaService,
     private readonly storage: StorageService,
+    private readonly precios: PreciosService,
   ) {}
 
   async obtenerProductos(filtros: FiltroCatalogoDto, usuarioId?: number) {
@@ -44,9 +30,7 @@ export class CatalogoService {
     }
 
     // F9: detectar la lista de precios del cliente logueado.
-    let columnaLista: 'lista1' | 'lista2' | 'lista3' | 'lista4' | 'lista5' | 'lista6' =
-      'lista1';
-    columnaLista = await this.obtenerColumnaLista(usuarioId, tiendaId);
+    const columnaLista = await this.precios.columnaParaUsuario(usuarioId, tiendaId);
 
     const skip = (pagina - 1) * limite;
 
@@ -208,7 +192,7 @@ export class CatalogoService {
   }
 
   async obtenerProductoDetalle(productoId: number, tiendaId: number, usuarioId?: number) {
-    const columnaLista = await this.obtenerColumnaLista(usuarioId, tiendaId);
+    const columnaLista = await this.precios.columnaParaUsuario(usuarioId, tiendaId);
     const producto = await this.prisma.producto.findUnique({
       where: { id: productoId },
       include: {
@@ -294,26 +278,13 @@ export class CatalogoService {
     };
   }
 
-  private async obtenerColumnaLista(usuarioId?: number, tiendaId?: number) {
-    if (!usuarioId) return 'lista1' as const;
-    const usuario = await this.prisma.usuario.findUnique({
-      where: { id: usuarioId },
-      select: {
-        listaPrecioCodigo: true,
-        tiendasCliente: tiendaId
-          ? {
-              where: { tiendaId, activo: true },
-              select: { listaPrecioCodigo: true },
-            }
-          : undefined,
-      },
-    });
-    const listaPorTienda = usuario?.tiendasCliente?.[0]?.listaPrecioCodigo;
-    return resolverColumnaLista(listaPorTienda ?? usuario?.listaPrecioCodigo);
-  }
+  async obtenerFiltrosDisponibles(tiendaId: number, usuarioId?: number) {
+    const columnaLista = await this.precios.columnaParaUsuario(
+      usuarioId,
+      tiendaId,
+    );
 
-  async obtenerFiltrosDisponibles(tiendaId: number) {
-    const [categorias, corridas, colores, precioMax] = await Promise.all([
+    const [categorias, corridas, colores, precioMaximo] = await Promise.all([
       this.prisma.producto.groupBy({
         by: ['categoria'],
         where: {
@@ -330,25 +301,78 @@ export class CatalogoService {
         where: { activo: true },
         orderBy: { nombre: 'asc' },
       }),
-      this.prisma.precio.aggregate({
-        _max: { precioBase: true },
-        where: {
-          tiendaId,
-          activo: true,
-          producto: {
-            activo: true,
-            productosTienda: { some: { tiendaId, visible: true } },
-          },
-        },
-      }),
+      this.precioMaximoDeLista(tiendaId, columnaLista),
     ]);
 
     return {
       categorias: categorias.map((c) => c.categoria).filter(Boolean),
       corridas,
       colores,
-      precioMaximo: Number(precioMax._max.precioBase ?? 0),
+      precioMaximo,
     };
+  }
+
+  /**
+   * Tope del slider de precios: el mayor precio que verá ESTE cliente.
+   *
+   * Sale de la lista del cliente (`columnaLista`), no de `precioBase` — que es
+   * sinónimo de lista1. Sin esto un cliente de lista 6 (la más barata) recibía
+   * un slider calibrado con precios de lista 1 y el rango no correspondía a
+   * nada de lo que veía en pantalla. Un visitante anónimo resuelve a `lista1`,
+   * que es el comportamiento anterior.
+   *
+   * Cada fila aporta su valor de lista y, si esa lista no está capturada (0),
+   * su precio base — el mismo fallback que aplica `precioDeLista` al mostrar.
+   * Por eso cada mitad se agrega con su propio `where`: tomar `MAX(listaN)` y
+   * `MAX(precio)` sobre TODAS las filas daría un tope inflado, porque el
+   * `precio` de una fila que sí tiene lista capturada no es lo que se muestra.
+   *
+   * Se consideran variantes (`PrecioCO`) y precios de producto (`Precio`): el
+   * frontend filtra por la primera variante y cae a `precioBase` si no hay.
+   */
+  private async precioMaximoDeLista(
+    tiendaId: number,
+    columnaLista: ColumnaLista,
+  ): Promise<number> {
+    // `Precio` tiene `activo`; `PrecioCO` no (la variante viva es la fila).
+    const productoVisible = {
+      producto: {
+        activo: true,
+        productosTienda: { some: { tiendaId, visible: true } },
+      },
+    };
+    const whereCO = { tiendaId, ...productoVisible };
+    const wherePrecio = { tiendaId, activo: true, ...productoVisible };
+
+    const [coLista, coBase, prodLista, prodBase] = await Promise.all([
+      this.prisma.precioCO.aggregate({
+        _max: { [columnaLista]: true },
+        where: { ...whereCO, [columnaLista]: { gt: 0 } },
+      }),
+      this.prisma.precioCO.aggregate({
+        _max: { precio: true },
+        where: { ...whereCO, [columnaLista]: { lte: 0 } },
+      }),
+      this.prisma.precio.aggregate({
+        _max: { [columnaLista]: true },
+        where: { ...wherePrecio, [columnaLista]: { gt: 0 } },
+      }),
+      this.prisma.precio.aggregate({
+        _max: { precioBase: true },
+        where: { ...wherePrecio, [columnaLista]: { lte: 0 } },
+      }),
+    ]);
+
+    const candidatos = [
+      coLista._max[columnaLista],
+      coBase._max.precio,
+      prodLista._max[columnaLista],
+      prodBase._max.precioBase,
+    ];
+    return candidatos.reduce<number>(
+      (max, valor) => Math.max(max, Number(valor ?? 0)),
+      0,
+    );
   }
 
   /**
@@ -357,7 +381,7 @@ export class CatalogoService {
    */
   async obtenerPreciosPorIds(ids: number[], tiendaId?: number, usuarioId?: number) {
     if (ids.length === 0) return [];
-    const columnaLista = await this.obtenerColumnaLista(usuarioId, tiendaId);
+    const columnaLista = await this.precios.columnaParaUsuario(usuarioId, tiendaId);
     const precios = await this.prisma.precioCO.findMany({
       where: {
         id: { in: ids },

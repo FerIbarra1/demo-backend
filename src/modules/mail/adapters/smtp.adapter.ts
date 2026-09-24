@@ -15,6 +15,7 @@ export class SmtpAdapter {
   private readonly logger = new Logger(SmtpAdapter.name);
   private transporter: nodemailer.Transporter;
   private fromAddress: string;
+  private replyTo: string | undefined;
 
   constructor(private config: ConfigService) {
     const host = this.config.get<string>('app.smtp.host') ?? 'localhost';
@@ -24,6 +25,10 @@ export class SmtpAdapter {
     const secure = this.config.get<boolean>('app.smtp.secure') ?? false;
     this.fromAddress =
       this.config.get<string>('app.smtp.from') ?? 'no-reply@tienda.local';
+    // Los correos invitan a "contesta este correo", pero el remitente es
+    // no-reply: sin replyTo la respuesta se perdía en un buzón inexistente.
+    // Vacío = se omite y el cliente responde al `from`.
+    this.replyTo = this.config.get<string>('app.smtp.replyTo') || undefined;
 
     this.transporter = nodemailer.createTransport({
       host,
@@ -57,6 +62,7 @@ export class SmtpAdapter {
     const hasAttachments = (params.attachments?.length ?? 0) > 0;
     const info = await this.transporter.sendMail({
       from: this.fromAddress,
+      ...(this.replyTo ? { replyTo: this.replyTo } : {}),
       to: params.to,
       subject: params.subject,
       html: params.html,

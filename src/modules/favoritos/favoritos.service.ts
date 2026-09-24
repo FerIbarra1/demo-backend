@@ -1,6 +1,8 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../imagenes/storage.service';
+import { PreciosService } from '../precios/precios.service';
+import { precioDeLista } from '../precios/precio-lista.util';
 
 /**
  * Servicio de favoritos.
@@ -10,6 +12,12 @@ import { StorageService } from '../imagenes/storage.service';
  *   - El producto debe estar activo.
  *   - Las operaciones son idempotentes: añadir 2 veces el mismo producto no
  *     duplica; quitar un producto que no está como favorito no falla.
+ *
+ * F16 (sep 2026): los precios se resuelven con la lista del cliente, igual que
+ * el catálogo y el pedido. Antes devolvía `precioBase` y `pco.precio` (que es
+ * siempre `lista1`), así que un cliente con lista 3 veía precios de lista 1 en
+ * /favoritos — el mismo bug que la Fase 0 arregló en el catálogo y el pedido,
+ * pero en un módulo que no se había revisado.
  */
 @Injectable()
 export class FavoritosService {
@@ -18,6 +26,7 @@ export class FavoritosService {
   constructor(
     private prisma: PrismaService,
     private readonly storage: StorageService,
+    private readonly precios: PreciosService,
   ) {}
 
   /**
@@ -62,11 +71,25 @@ export class FavoritosService {
     // de precio/variantes.
     const productoIds = favoritos.map((f) => f.productoId);
 
+    // F16: la lista de precios del cliente, igual que el catálogo.
+    const columnaLista = await this.precios.columnaParaUsuario(usuarioId, tiendaId);
+
     const [precios, variantes] = tiendaId
       ? await Promise.all([
           this.prisma.precio.findMany({
             where: { productoId: { in: productoIds }, tiendaId },
-            select: { productoId: true, precioBase: true, precioOferta: true },
+            select: {
+              productoId: true,
+              precioBase: true,
+              precioOferta: true,
+              // F16: las 6 listas, para elegir la del cliente sin otro query.
+              lista1: true,
+              lista2: true,
+              lista3: true,
+              lista4: true,
+              lista5: true,
+              lista6: true,
+            },
           }),
           this.prisma.precioCO.findMany({
             where: { productoId: { in: productoIds }, tiendaId },
@@ -85,8 +108,12 @@ export class FavoritosService {
 
     const precioPorProducto = new Map<number, { precioBase: any; precioOferta: any }>();
     for (const p of precios as any[]) {
+      // F16: el precio base sale de la lista del cliente, con fallback al
+      // `precioBase` cuando esa lista está en 0 (Firebird puede no tenerla
+      // capturada). Mismo criterio que `catalogo.service.ts`.
+      const deLista = Number(p[columnaLista] ?? 0);
       precioPorProducto.set(p.productoId, {
-        precioBase: p.precioBase,
+        precioBase: deLista > 0 ? deLista : p.precioBase,
         precioOferta: p.precioOferta,
       });
     }
@@ -104,7 +131,8 @@ export class FavoritosService {
         talla: pco.talla.nombre,
         color: pco.color.nombre,
         colorHex: pco.color.hex,
-        precio: pco.precio,
+        // F16: precio de la variante en la lista del cliente.
+        precio: precioDeLista(pco, columnaLista),
         // B2B: sin manejo de stock. Ver nota en catalogo.service.ts.
         stockDisponible: null,
       });

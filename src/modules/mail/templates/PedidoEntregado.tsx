@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { PedidoEmailShell } from './PedidoEmailShell';
 import { Text } from '@react-email/components';
-import { PedidoEmailData } from '../mail.templates';
+import { PedidoEmailData, folioVisible } from '../mail.templates';
 
 export interface PedidoEntregadoProps {
   pedido: PedidoEmailData;
@@ -17,9 +17,9 @@ export const PedidoEntregado = ({
   frontendUrl,
 }: PedidoEntregadoProps) => (
   <PedidoEmailShell
-    preview={`Tu pedido ${pedido.numeroPedido} fue entregado`}
+    preview={`Tu pedido ${folioVisible(pedido)} fue entregado`}
     title={`¡Tu pedido fue entregado!`}
-    greeting={`Hola, ${pedido.clienteNombre}. Confirmamos que tu pedido ${pedido.numeroPedido} ya fue entregado.`}
+    greeting={`Hola, ${pedido.clienteNombre}. Confirmamos que tu pedido ${folioVisible(pedido)} ya fue entregado.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     ctaLabel="Ver detalle de mi pedido"

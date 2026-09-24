@@ -6,7 +6,7 @@ import {
   resumenPropuesta,
   type ItemPropuestaJson,
 } from '../propuesta';
-import { PedidoEmailData } from '../mail.templates';
+import { PedidoEmailData, folioVisible } from '../mail.templates';
 
 export interface MensajeBodegueroProps {
   pedido: PedidoEmailData;
@@ -66,7 +66,7 @@ export const MensajeBodeguero = ({
 
   return (
     <EmailLayout
-      preview={`${nombreBodeguero} te ha enviado un mensaje sobre tu pedido ${pedido.numeroPedido}`}
+      preview={`${nombreBodeguero} te ha enviado un mensaje sobre tu pedido ${folioVisible(pedido)}`}
       logoUrl={logoUrl}
       frontendUrl={frontendUrl}
     >
@@ -81,7 +81,7 @@ export const MensajeBodeguero = ({
           lineHeight: '1.2',
         }}
       >
-        Tienes un mensaje de bodega
+        Tienes un mensaje de tu asesor
       </Heading>
       <Text
         style={{
@@ -91,8 +91,8 @@ export const MensajeBodeguero = ({
           lineHeight: '1.6',
         }}
       >
-        Hola, {pedido.clienteNombre}. {nombreBodeguero}, del equipo de bodega,
-        te ha escrito sobre tu pedido <strong>{pedido.numeroPedido}</strong>.
+        Hola, {pedido.clienteNombre}. {nombreBodeguero} te ha escrito sobre tu
+        pedido <strong>{folioVisible(pedido)}</strong>.
       </Text>
 
       <Section
@@ -114,7 +114,10 @@ export const MensajeBodeguero = ({
             margin: '0 0 12px 0',
           }}
         >
-          {nombreBodeguero} propone:
+          {/* "propone:" sólo cuando el mensaje trae una propuesta estructurada.
+              Antes se pintaba siempre, así que un mensaje suelto ("¿te llamo en
+              10 min?") aparecía bajo el encabezado "propone:". */}
+          {parsed ? `${nombreBodeguero} propone:` : `Mensaje de ${nombreBodeguero}`}
         </Text>
 
         {parsed ? (
@@ -167,10 +170,9 @@ export const MensajeBodeguero = ({
           lineHeight: '1.6',
         }}
       >
-        Puedes responder directamente desde el chat del pedido. Te avisaremos
-        por correo únicamente cuando sea la primera vez que el bodeguero te
-        escribe — el resto de la conversación la puedes seguir en tiempo
-        real dentro de la pagina.
+        Puedes responder directamente desde el chat del pedido. Te avisamos
+        por correo sólo en este primer mensaje — el resto de la conversación la
+        puedes seguir en tiempo real dentro de la página.
       </Text>
 
       <Section style={{ textAlign: 'center', margin: '8px 0' }}>

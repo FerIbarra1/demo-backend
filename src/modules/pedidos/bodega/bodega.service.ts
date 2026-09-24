@@ -173,6 +173,25 @@ export class BodegaService {
   async tomarPedido(pedidoId: number, usuario: UserContext) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
+    // F16 (sep 2026): solo se toman pedidos que están en la cola de bodega.
+    //
+    // Sin este guard, un bodeguero podía "tomar" un pedido en EN_MOSTRADOR: la
+    // transición EN_MOSTRADOR → REVIEWING existe en TRANSICIONES (es el arco de
+    // "ajustar" que usa mostrador), así que `cambiarEstado` la aceptaba. El
+    // efecto era sacar el pedido de la cola de mostrador sin que el cliente lo
+    // hubiera visto, y asignárselo a un bodeguero como si fuera trabajo nuevo.
+    //
+    // El arco de "ajustar" es EXCLUSIVO de mostrador: lo dispara el operador con
+    // el cliente presente. Un bodeguero nunca debe iniciarlo.
+    if (
+      pedido.estado !== EstadoPedido.PENDING_REVIEW &&
+      pedido.estado !== EstadoPedido.REVIEWING
+    ) {
+      throw new BadRequestException(
+        `Solo se pueden tomar pedidos en la cola de bodega (actual: ${pedido.estado}).`,
+      );
+    }
+
     if (pedido.asignadoAId !== null && pedido.asignadoAId !== usuario.userId) {
       const asignado = await this.prisma.usuario.findUnique({
         where: { id: pedido.asignadoAId },
@@ -766,6 +785,15 @@ export class BodegaService {
       where: {
         id: { in: idsUnicos },
         tiendaId: usuario.tiendaId,
+        // F16 (sep 2026): solo se toman pedidos que están EN la cola de bodega.
+        //
+        // Antes esta query no filtraba por estado y el `updateMany` de abajo
+        // forzaba `REVIEWING` sin pasar por `PedidoStateService.cambiarEstado`
+        // (y por tanto sin validar TRANSICIONES). Eso permitía ARRANCAR un
+        // pedido de `EN_MOSTRADOR` — desaparecía de la cola de mostrador y el
+        // cliente se quedaba sin ver su pedido — o uno de `PENDING_PAID`, que
+        // ya está encolado a Firebird, desincronizando el ERP.
+        estado: { in: [EstadoPedido.PENDING_REVIEW, EstadoPedido.REVIEWING] },
       },
       select: { id: true, tiendaId: true, estado: true, asignadoAId: true },
     });
@@ -831,8 +859,18 @@ export class BodegaService {
 
         // F12: atomicidad contra la carrera TOCTOU — updateMany con condición
         // asignadoAId=null garantiza que solo un bodeguero gana cada pedido.
+        //
+        // F16 (sep 2026): además se exige que el pedido siga en un estado de
+        // cola de bodega. El `where` del updateMany es la última línea de
+        // defensa: si entre la carga y la escritura el pedido pasó a
+        // EN_MOSTRADOR (bodega lo surtió) o a PENDING_PAID (mostrador lo
+        // liberó), `count` será 0 y no se lo arranca de esa cola.
         const res = await tx.pedido.updateMany({
-          where: { id: pedido.id, asignadoAId: null },
+          where: {
+            id: pedido.id,
+            asignadoAId: null,
+            estado: { in: [EstadoPedido.PENDING_REVIEW, EstadoPedido.REVIEWING] },
+          },
           data: {
             estado: EstadoPedido.REVIEWING,
             asignadoAId: usuario.userId,
@@ -842,7 +880,7 @@ export class BodegaService {
         });
         if (res.count !== 1) {
           throw new ConflictException(
-            `El pedido ${pedido.id} ya fue tomado por otro bodeguero. Actualiza la pantalla.`,
+            `El pedido ${pedido.id} ya no está disponible para tomar (puede que otro bodeguero lo haya tomado, o que ya haya salido de la cola de bodega). Actualiza la pantalla.`,
           );
         }
         await tx.historialPedido.create({

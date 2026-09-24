@@ -46,8 +46,16 @@ export class CatalogoController {
   @Get('filtros/:tiendaId')
   @Public()
   @ApiOperation({ summary: 'Obtener opciones de filtro disponibles' })
-  async obtenerFiltros(@Param('tiendaId', ParseIntPipe) tiendaId: number) {
-    return this.catalogoService.obtenerFiltrosDisponibles(tiendaId);
+  async obtenerFiltros(
+    @Param('tiendaId', ParseIntPipe) tiendaId: number,
+    @Req() req: Request,
+  ) {
+    // `precioMaximo` depende de la lista del cliente: sin el JWT el tope sale
+    // de lista1. Ver `CatalogoService.precioMaximoDeLista`.
+    return this.catalogoService.obtenerFiltrosDisponibles(
+      tiendaId,
+      this.leerUserIdOpcional(req),
+    );
   }
 
   @Get('precios')
