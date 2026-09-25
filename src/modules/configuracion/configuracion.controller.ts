@@ -70,14 +70,13 @@ export class ConfiguracionController {
 
   @Put('kiosko')
   @ApiOperation({
-    summary: 'Actualiza el copy del kiosko (título, subtítulo, slideMs, appDownloadUrl)',
+    summary: 'Actualiza el copy del kiosko (título, subtítulo, slideMs)',
   })
   actualizarBrandingKiosko(
     @Body() body: {
       titulo?: string;
       subtitulo?: string;
       slideMs?: number;
-      appDownloadUrl?: string;
     },
   ) {
     return this.configuracion

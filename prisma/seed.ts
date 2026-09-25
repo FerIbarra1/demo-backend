@@ -449,6 +449,7 @@ async function main() {
     { email: 'cliente4@puntotextil.com', lista: '4', nombre: 'Cliente Cuatro' },
     { email: 'cliente5@puntotextil.com', lista: '5', nombre: 'Cliente Cinco' },
     { email: 'cliente6@puntotextil.com', lista: '6', nombre: 'Cliente Seis' },
+    { email: 'cliente7@puntotextil.com', lista: '7', nombre: 'Cliente Siete' },
   ];
 
   for (const c of clientesPorLista) {

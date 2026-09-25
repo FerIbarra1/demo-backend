@@ -12,7 +12,11 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
 import { PreciosService } from '../../precios/precios.service';
-import { precioDeLista } from '../../precios/precio-lista.util';
+import {
+  precioDeLista,
+  precioConPromoVolumen,
+  COLUMNA_MAYOREO,
+} from '../../precios/precio-lista.util';
 import { KioskoService } from '../../kiosko/kiosko.service';
 import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
@@ -183,10 +187,27 @@ export class ClienteService {
     // congelado en `ItemPedido.precioUnitario` y viajando así al ERP.
     const columnaLista = await this.precios.columnaParaUsuario(usuario.userId, tiendaId);
 
+    // Promo de volumen (sep 2026): 12+ piezas → lista 2. Se congela el par
+    // (base, mayoreo) en cada item para que la promo se pueda re-evaluar
+    // después sin releer `PrecioCO` — ver `promo-volumen.util.ts`.
+    //
+    // El precio efectivo sale de `precioConPromoVolumen`, la MISMA función que
+    // usa la re-evaluación y el endpoint del carrito. Es la única forma de
+    // garantizar que el precio congelado sea punto fijo del recálculo: con dos
+    // gates distintos (uno por columna, otro por precio) el pedido cambiaría de
+    // precio solo cuando Firebird tiene una lista sin capturar.
+    const totalPiezas = dto.items.reduce((acc, i) => acc + i.cantidad, 0);
+
     let subtotal = new Prisma.Decimal(0);
     const itemsData = dto.items.map((item) => {
       const pco = preciosCO.find((p) => p.id === item.precioCOId)!;
-      const precioUnitario = precioDeLista(pco, columnaLista);
+      const precioUnitarioBase = precioDeLista(pco, columnaLista);
+      const precioUnitarioMayoreo = precioDeLista(pco, COLUMNA_MAYOREO);
+      const precioUnitario = precioConPromoVolumen(
+        precioUnitarioBase,
+        precioUnitarioMayoreo,
+        totalPiezas,
+      );
       const itemSubtotal = precioUnitario.mul(item.cantidad);
       subtotal = subtotal.plus(itemSubtotal);
       return {
@@ -198,6 +219,8 @@ export class ClienteService {
         // vs PARCIAL cuando el bodeguero ajusta cantidades en VFP.
         cantidadOriginal: item.cantidad,
         precioUnitario,
+        precioUnitarioBase,
+        precioUnitarioMayoreo,
         subtotal: itemSubtotal,
         productoNombre: pco.producto.nombre,
         productoCodigo: pco.producto.codigo,

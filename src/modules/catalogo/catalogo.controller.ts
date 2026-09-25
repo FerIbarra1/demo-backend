@@ -1,9 +1,19 @@
-import { Controller, Get, Param, ParseIntPipe, Query, Req } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  ParseIntPipe,
+  Query,
+  Req,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { CatalogoService } from './catalogo.service';
 import { FiltroCatalogoDto } from './dto/filtro-catalogo.dto';
+import { PromoVolumenDto } from './dto/promo-volumen.dto';
 import { Public } from '../../common/decorators/public.decorator';
 
 @ApiTags('Catálogo')
@@ -73,6 +83,27 @@ export class CatalogoController {
     return this.catalogoService.obtenerPreciosPorIds(
       parsed,
       tiendaId,
+      this.leerUserIdOpcional(req),
+    );
+  }
+
+  /**
+   * Evalúa la promo de volumen del carrito (12+ piezas → lista 2).
+   *
+   * Es POST y no GET porque necesita las cantidades, no solo los ids. Vive en
+   * `catalogo` (y no en el módulo `precios`) porque reusa los helpers de
+   * lectura de JWT/X-Tienda-Id de este controller y porque el carrito ya
+   * consume `/catalogo/precios`.
+   */
+  @Post('promo-volumen')
+  @Public()
+  @ApiOperation({
+    summary: 'Evalúa la promo de volumen (12+ piezas → precio de lista 2)',
+  })
+  async evaluarPromoVolumen(@Body() dto: PromoVolumenDto, @Req() req: Request) {
+    return this.catalogoService.evaluarPromoVolumen(
+      dto.items,
+      this.leerTiendaIdOpcional(req),
       this.leerUserIdOpcional(req),
     );
   }

@@ -9,3 +9,8 @@ ALTER TABLE "kiosko_pairings"
 -- compara updated_at contra la ventana de retención.
 CREATE INDEX "kiosko_pairings_estado_updated_at_idx"
     ON "kiosko_pairings"("estado", "updated_at");
+
+-- `@updatedAt` es gestionado por Prisma, no por un DEFAULT de PostgreSQL.
+-- El default solo se necesita durante el ADD COLUMN para filas existentes.
+ALTER TABLE "kiosko_pairings"
+    ALTER COLUMN "updated_at" DROP DEFAULT;

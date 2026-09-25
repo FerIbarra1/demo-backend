@@ -14,7 +14,7 @@ import { destinoTrasSurtido } from '../core/destino-post-surtido.util';
 import { recalcularTotalesPedido } from '../core/totales.util';
 import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
 import { PreciosService } from '../../precios/precios.service';
-import { precioDeLista, ColumnaLista } from '../../precios/precio-lista.util';
+import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../../precios/precio-lista.util';
 import { UserContext } from '../../../types/pedido.types';
 import {
   EstadoPedido,
@@ -396,6 +396,16 @@ export class PropuestaService {
             consumidaAt: ahora,
           },
         });
+
+        // Los items recién cancelados seguían contando en `subtotal`/`total`:
+        // el pedido viajaba al ERP cobrando mercancía que nadie va a surtir.
+        // Se recalcula aquí dentro del tx (y de paso re-evalúa la promo de
+        // volumen, que depende del conteo de piezas).
+        //
+        // Se usa `pedidoCompleto` (el `findUnique` de arriba) y no el `pedido`
+        // del parámetro: ese llega con el shape mínimo que necesitan las
+        // transiciones y no garantiza traer `descuento`/`impuestos`.
+        await recalcularTotalesPedido(tx, pedidoCompleto);
       });
 
       // Transición alternativa: vuelve a bodega con reloj reanudado.
@@ -965,7 +975,14 @@ export class PropuestaService {
         const cantidad = Math.max(1, it.cantidadNueva ?? it.cantidad);
         // Fase 0: el precio del producto agregado sale de la lista del cliente
         // que hizo el pedido, no de `pco.precio` (lista1).
-        const precioUnitario = precioDeLista(pco, columnaLista);
+        //
+        // Promo de volumen: se congela el par (base, mayoreo) y el efectivo
+        // queda en la base; `recalcularTotalesPedido`, que corre al final de
+        // este método, lo ajusta si el pedido llega a 12 piezas contando lo que
+        // ya traía más lo que el asesor acaba de agregar.
+        const precioUnitarioBase = precioDeLista(pco, columnaLista);
+        const precioUnitarioMayoreo = precioDeLista(pco, COLUMNA_MAYOREO);
+        const precioUnitario = precioUnitarioBase;
         await tx.itemPedido.create({
           data: {
             pedidoId: pedido.id,
@@ -974,6 +991,8 @@ export class PropuestaService {
             cantidad,
             cantidadOriginal: cantidad,
             precioUnitario,
+            precioUnitarioBase,
+            precioUnitarioMayoreo,
             subtotal: precioUnitario.mul(cantidad),
             productoNombre: pco.producto.nombre,
             productoCodigo: pco.producto.codigo,

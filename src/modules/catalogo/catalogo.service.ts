@@ -1,8 +1,15 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from '../imagenes/storage.service';
 import { PreciosService } from '../precios/precios.service';
-import { ColumnaLista } from '../precios/precio-lista.util';
+import {
+  ColumnaLista,
+  precioDeLista,
+  precioConPromoVolumen,
+  PIEZAS_MAYOREO,
+  COLUMNA_MAYOREO,
+} from '../precios/precio-lista.util';
 import { FiltroCatalogoDto } from './dto/filtro-catalogo.dto';
 
 /**
@@ -427,6 +434,115 @@ export class CatalogoService {
       },
       };
     });
+  }
+
+  /**
+   * Evalúa la promo de volumen del carrito (12+ piezas → lista 2).
+   *
+   * Existe porque el frontend NO puede calcular la promo por su cuenta: solo
+   * conoce el precio ya resuelto de la lista del cliente (`PrecioResuelto`),
+   * nunca el de lista2 ni cuál es la lista base. Duplicar la regla en el
+   * cliente reproduciría el bug que documenta `precio-lista.util.ts`: el
+   * cliente veía un precio y se le cobraba otro.
+   *
+   * Devuelve el total EFECTIVO (con promo si aplica) además del desglose, para
+   * que el carrito muestre exactamente lo que `ClienteService.crearPedido`
+   * congelará en los items.
+   *
+   * `elegible` se DERIVA de los precios reales (¿el mayoreo es más barato que
+   * la lista del cliente?) en vez de asumir cuál lista tiene. Hoy los datos van
+   * lista1=60 > lista2=57 > lista3=54, así que un cliente de lista 2..6 sale
+   * `false` — ya paga menos que lista2 y anunciarle la promo sería mentirle.
+   * Derivarlo hace que la promo se apague sola si Firebird captura las listas
+   * al revés, en vez de prometer un ahorro que no existe.
+   */
+  async evaluarPromoVolumen(
+    items: Array<{ precioCOId: number; cantidad: number }>,
+    tiendaId?: number,
+    usuarioId?: number,
+  ) {
+    const columnaLista = await this.precios.columnaParaUsuario(usuarioId, tiendaId);
+
+    const precios = await this.prisma.precioCO.findMany({
+      where: {
+        id: { in: items.map((i) => i.precioCOId) },
+        ...(tiendaId ? { tiendaId } : {}),
+      },
+      select: {
+        id: true,
+        precio: true,
+        lista1: true,
+        lista2: true,
+        lista3: true,
+        lista4: true,
+        lista5: true,
+        lista6: true,
+      },
+    });
+    const porId = new Map(precios.map((p) => [p.id, p]));
+
+    // Dos pasadas a propósito: la promo se decide con el total de piezas FINAL
+    // del carrito, no con el acumulado parcial. Resolverlo en una sola pasada
+    // daría precios mezclados (las primeras líneas a base y las últimas a
+    // mayoreo) según el orden en que llegaran los items.
+    const resueltos = items.flatMap((item) => {
+      const pco = porId.get(item.precioCOId);
+      if (!pco) return []; // variante no disponible en esta tienda
+      const cantidad = Math.max(0, item.cantidad);
+      const base = precioDeLista(pco, columnaLista);
+      const mayoreo = precioDeLista(pco, COLUMNA_MAYOREO);
+      return [{ precioCOId: pco.id, cantidad, base, mayoreo }];
+    });
+
+    const totalPiezas = resueltos.reduce((acc, i) => acc + i.cantidad, 0);
+
+    let totalSinPromo = new Prisma.Decimal(0);
+    let totalConPromo = new Prisma.Decimal(0);
+    for (const it of resueltos) {
+      totalSinPromo = totalSinPromo.plus(it.base.mul(it.cantidad));
+      // `precioConPromoVolumen` con el total ya completo: es la misma función
+      // que usará `crearPedido`, así que el total de aquí y el precio que se
+      // congela salen de la misma regla.
+      totalConPromo = totalConPromo.plus(
+        precioConPromoVolumen(it.base, it.mayoreo, totalPiezas).mul(it.cantidad),
+      );
+    }
+
+    // `elegible` = "la promo le bajaría el precio a este cliente", y NO depende
+    // del número de piezas (para eso está `aplica`): es lo que decide si tiene
+    // sentido mostrarle la barra "te faltan N piezas". Se deriva de los precios
+    // reales — un cliente de lista 3..6 ya paga menos que lista2, así que su
+    // mayoreo no es más barato que su base y sale `false`.
+    //
+    // Se compara por item y no con los totales a propósito: con 11 piezas los
+    // dos totales coinciden (la promo aún no aplica) y el cliente elegible
+    // quedaría marcado como no elegible, apagándole el aviso justo cuando más
+    // sirve.
+    const elegible = resueltos.some((it) => it.mayoreo.lessThan(it.base));
+    const aplica = elegible && totalPiezas >= PIEZAS_MAYOREO;
+
+    return {
+      elegible,
+      aplica,
+      totalPiezas,
+      piezasFaltantes: elegible ? Math.max(0, PIEZAS_MAYOREO - totalPiezas) : 0,
+      umbral: PIEZAS_MAYOREO,
+      total: Number(aplica ? totalConPromo : totalSinPromo),
+      totalSinPromo: Number(totalSinPromo),
+      ahorro: Number(aplica ? totalSinPromo.minus(totalConPromo) : 0),
+      // Precio efectivo POR LÍNEA. Sin esto la UI muestra el precio base en
+      // cada card y el total con promo abajo, y el cliente ve dos precios
+      // distintos en la misma pantalla (la suma de las líneas no cuadra con el
+      // total).
+      items: resueltos.map((it) => ({
+        precioCOId: it.precioCOId,
+        cantidad: it.cantidad,
+        precioUnitario: Number(
+          aplica ? precioConPromoVolumen(it.base, it.mayoreo, totalPiezas) : it.base,
+        ),
+        precioUnitarioSinPromo: Number(it.base),
+      })),
+    };
   }
 
   /**

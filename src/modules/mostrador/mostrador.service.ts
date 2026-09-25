@@ -7,7 +7,7 @@ import { ReposicionService } from '../pedidos/reposicion/reposicion.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import { recalcularTotalesPedido } from '../pedidos/core/totales.util';
 import { PreciosService } from '../precios/precios.service';
-import { precioDeLista, ColumnaLista } from '../precios/precio-lista.util';
+import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../precios/precio-lista.util';
 import { ItemAjusteDto } from './dto/accion-mostrador.dto';
 import { UserContext } from '../../types/pedido.types';
 
@@ -435,7 +435,13 @@ export class MostradorService {
         }
 
         const cantidad = Math.max(1, it.cantidad ?? 1);
-        const precioUnitario = precioDeLista(pco, columnaLista);
+        const precioUnitarioBase = precioDeLista(pco, columnaLista);
+        const precioUnitarioMayoreo = precioDeLista(pco, COLUMNA_MAYOREO);
+        // Promo de volumen: el precio efectivo lo decide el tamaño FINAL del
+        // pedido, no el de este item aislado. Se congela el par y se deja el
+        // efectivo en el precio base; `recalcularTotalesPedido` (que corre al
+        // final de este método) lo ajusta al mayoreo si el pedido llega a 12.
+        const precioUnitario = precioUnitarioBase;
         await tx.itemPedido.create({
           data: {
             pedidoId: pedido.id,
@@ -444,6 +450,8 @@ export class MostradorService {
             cantidad,
             cantidadOriginal: cantidad,
             precioUnitario,
+            precioUnitarioBase,
+            precioUnitarioMayoreo,
             subtotal: precioUnitario.mul(cantidad),
             productoNombre: pco.producto.nombre,
             productoCodigo: pco.producto.codigo,

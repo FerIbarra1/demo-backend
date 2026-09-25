@@ -682,6 +682,21 @@ model ItemPedido {
   cantidad         Int
   precioUnitario   Decimal @map("precio_unitario") @db.Decimal(10, 2)
   subtotal         Decimal @db.Decimal(12, 2)
+
+  // Promo de volumen (sep 2026): 12+ piezas → precio de lista 2.
+  //
+  // Se congelan los DOS precios candidatos al crear el pedido, y
+  // `precioUnitario` es el efectivo (lo que leen el ERP, los totales y la UI).
+  // Guardar el par hace que el precio efectivo sea una función exacta de dos
+  // números congelados: la promo se puede re-evaluar cuando el pedido cambia
+  // de tamaño (bodega surte de menos, mostrador agrega productos) sin releer
+  // `PrecioCO` — que pudo cambiar en Firebird mientras el pedido estaba en
+  // bodega, y que puede haberse borrado (`precioCOId` es nullable).
+  //
+  // NULL = pedido anterior a la promo: nunca entra a la regla.
+  precioUnitarioBase    Decimal? @map("precio_unitario_base") @db.Decimal(10, 2)
+  precioUnitarioMayoreo Decimal? @map("precio_unitario_mayoreo") @db.Decimal(10, 2)
+
   // Sincronización bidireccional (F9+): snapshot de la cantidad que tenía el
   // item al crear el pedido. Se compara contra la nueva cantidad que reporta
   // MOVPED para distinguir COMPLETO (igual), PARCIAL (menor) o NO_DISPONIBLE (0).

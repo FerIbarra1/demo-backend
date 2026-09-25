@@ -3,6 +3,8 @@ import {
   columnaDesdeCodigo,
   resolverColumnaLista,
   precioDeLista,
+  precioConPromoVolumen,
+  PIEZAS_MAYOREO,
   ColumnaLista,
 } from './precio-lista.util';
 
@@ -124,5 +126,55 @@ describe('precioDeLista', () => {
     expect(precioDeLista(mixto, 'lista2').toString()).toBe('200');
     expect(precioDeLista(mixto, 'lista3').toString()).toBe('300');
     expect(precioDeLista(mixto, 'lista4').toString()).toBe('400');
+  });
+});
+
+describe('precioConPromoVolumen', () => {
+  const d = (n: number) => new Prisma.Decimal(n);
+
+  it('devuelve el precio base por debajo del umbral', () => {
+    expect(precioConPromoVolumen(d(60), d(57), PIEZAS_MAYOREO - 1).toString()).toBe('60');
+    expect(precioConPromoVolumen(d(60), d(57), 1).toString()).toBe('60');
+    expect(precioConPromoVolumen(d(60), d(57), 0).toString()).toBe('60');
+  });
+
+  it('aplica el mayoreo justo en el umbral', () => {
+    expect(precioConPromoVolumen(d(60), d(57), PIEZAS_MAYOREO).toString()).toBe('57');
+  });
+
+  it('NUNCA encarece a un cliente que ya tiene mejor precio', () => {
+    // Las listas van de menudeo (1, caro) a mayoreo (6, barato). Para un
+    // cliente de lista 3 (54) el mayoreo (57) es MÁS CARO: el mínimo conserva
+    // su 54. La promo es un beneficio para el de menudeo, no un castigo.
+    expect(precioConPromoVolumen(d(54), d(57), PIEZAS_MAYOREO).toString()).toBe('54');
+    expect(precioConPromoVolumen(d(45), d(57), 500).toString()).toBe('45');
+  });
+
+  it('protege ante una lista2 mal capturada (más cara que la base)', () => {
+    expect(precioConPromoVolumen(d(60), d(99), PIEZAS_MAYOREO).toString()).toBe('60');
+  });
+
+  it('es idempotente: aplicarla dos veces da el mismo resultado', () => {
+    const una = precioConPromoVolumen(d(60), d(57), 20);
+    const dos = precioConPromoVolumen(una, d(57), 20);
+    expect(dos.toString()).toBe(una.toString());
+    expect(una.toString()).toBe('57');
+  });
+
+  it('es punto fijo: el precio que congela la creación no cambia al re-evaluar', () => {
+    // El invariante que sostiene todo: si el pedido se creó con este precio,
+    // volver a aplicar la regla (lo que hace cada `recalcularTotalesPedido`)
+    // tiene que dar EXACTAMENTE lo mismo. Si no, el pedido cambiaría de precio
+    // solo, sin que nadie lo edite.
+    for (const [base, mayoreo] of [
+      [60, 57], // lista1 normal
+      [54, 57], // lista3 con mayoreo más caro
+      [60, 60], // lista2 sin capturar (fallback a base)
+      [57, 57], // ambos iguales
+    ]) {
+      const congelado = precioConPromoVolumen(d(base), d(mayoreo), 12);
+      const reevaluado = precioConPromoVolumen(congelado, d(mayoreo), 12);
+      expect(reevaluado.toString()).toBe(congelado.toString());
+    }
   });
 });

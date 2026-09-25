@@ -97,3 +97,55 @@ export function precioDeLista(
   const deLista = new Prisma.Decimal(pco[columna] ?? 0);
   return deLista.greaterThan(0) ? deLista : new Prisma.Decimal(pco.precio);
 }
+
+/**
+ * Promo de volumen (sep 2026): a partir de 12 piezas —mezclando productos,
+ * colores y tallas libremente— se aplica el precio de lista 2.
+ *
+ * El umbral y la lista destino van fijos en código a propósito: son una regla
+ * comercial, no configuración de sitio. Si cambian, cambian con un deploy y
+ * los pedidos ya creados conservan el par de precios que congelaron.
+ */
+export const PIEZAS_MAYOREO = 12;
+export const COLUMNA_MAYOREO: ColumnaLista = 'lista2';
+
+/**
+ * Precio efectivo de UNA pieza según la promo de volumen.
+ *
+ * Es LA regla, en un solo lugar, y por eso la llaman los tres caminos que
+ * necesitan saber el precio: la creación del pedido (`ClienteService`), la
+ * re-evaluación (`aplicarPromoVolumen`) y el endpoint del carrito
+ * (`CatalogoService.evaluarPromoVolumen`). Mientras los tres llamen aquí, no
+ * pueden divergir.
+ *
+ * Bajo el umbral devuelve el precio base. Al alcanzarlo devuelve
+ * `min(base, mayoreo)`, que es lo que implementa "solo para el cliente de
+ * menudeo": un cliente de lista 3..6 ya tiene un precio base MÁS BARATO que
+ * lista2 (las listas van de menudeo caro a mayoreo barato), así que el mínimo
+ * es su propia lista y la promo nunca le encarece nada.
+ *
+ * Expresarlo como MÍNIMO y no como "¿es lista1?" es deliberado y tiene dos
+ * consecuencias, ambas deseadas:
+ *
+ *   1. Es una función pura del par de precios CONGELADO, así que se puede
+ *      re-evaluar dentro de una transacción sin consultar la lista del cliente
+ *      (que requeriría salir del `tx`). Un gate por columna no se puede: la
+ *      columna no vive en el item.
+ *   2. Es consistente cuando Firebird tiene una lista sin capturar (0). Ahí
+ *      `precioDeLista` ya cae al precio base, así que el precio EFECTIVO de ese
+ *      cliente es el de lista1 aunque su columna diga lista3 — y la promo
+ *      sigue ese precio efectivo, no el nombre de la columna. Un gate por
+ *      columna diría "no califica" al crear y "sí califica" al re-evaluar, y el
+ *      pedido cambiaría de precio solo, sin que nadie lo edite.
+ *
+ * Nunca sube un precio: `min` es idempotente y monótono, así que aplicarla dos
+ * veces da el mismo resultado.
+ */
+export function precioConPromoVolumen(
+  precioBase: Prisma.Decimal,
+  precioMayoreo: Prisma.Decimal,
+  totalPiezas: number,
+): Prisma.Decimal {
+  if (totalPiezas < PIEZAS_MAYOREO) return precioBase;
+  return Prisma.Decimal.min(precioBase, precioMayoreo);
+}

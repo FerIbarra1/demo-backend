@@ -1,5 +1,6 @@
 import { ClienteService } from './cliente.service';
 import { PreciosService } from '../../precios/precios.service';
+import { precioConPromoVolumen } from '../../precios/precio-lista.util';
 import { CanalOrigen, EstadoPedido, ModoEntrega, Prisma } from '@prisma/client';
 
 /**
@@ -208,5 +209,185 @@ describe('ClienteService.crearPedido — precio por lista (Fase 0)', () => {
     expect(pedidoCreado.data.modoEntrega).toBe(ModoEntrega.RECOGER_TIENDA);
     // El precio de lista no debe alterar el snapshot de cantidad original.
     expect(pedidoCreado.data.items.create[0].cantidadOriginal).toBe(3);
+  });
+});
+
+describe('ClienteService.crearPedido — promo de volumen (12+ piezas → lista 2)', () => {
+  // Los mocks tienen lista1=100 y lista2=200, así que el mayoreo es MÁS CARO
+  // que la base. Eso hace visible cualquier promoción indebida: si un test de
+  // "no aplica" viera 200, sabríamos que la regla se disparó de más. Para los
+  // casos donde la promo SÍ debe aplicar se usa un mock con lista2 más barata,
+  // que es el caso real (las listas van de menudeo caro a mayoreo barato).
+  const precioCOBarato = (id: number) =>
+    precioCOMock(id, {
+      lista1: new Prisma.Decimal('100.00'),
+      lista2: new Prisma.Decimal('80.00'),
+    });
+
+  it('aplica lista2 justo en 12 piezas', async () => {
+    const { svc, pedidoCreado } = crearServicio({
+      preciosCO: [precioCOBarato(1)],
+      listaPrecioCodigo: null, // lista1
+    });
+
+    await svc.crearPedido(
+      { ...dtoBase, items: [{ precioCOId: 1, cantidad: 12 }] } as never,
+      usuarioBase as never,
+    );
+
+    const item = pedidoCreado.data.items.create[0];
+    expect(item.precioUnitario.toString()).toBe('80');
+    expect(item.subtotal.toString()).toBe('960');
+    // El par congelado queda guardado para poder re-evaluar después.
+    expect(item.precioUnitarioBase.toString()).toBe('100');
+    expect(item.precioUnitarioMayoreo.toString()).toBe('80');
+  });
+
+  it('NO aplica con 11 piezas', async () => {
+    const { svc, pedidoCreado } = crearServicio({
+      preciosCO: [precioCOBarato(1)],
+      listaPrecioCodigo: null,
+    });
+
+    await svc.crearPedido(
+      { ...dtoBase, items: [{ precioCOId: 1, cantidad: 11 }] } as never,
+      usuarioBase as never,
+    );
+
+    const item = pedidoCreado.data.items.create[0];
+    expect(item.precioUnitario.toString()).toBe('100');
+    expect(pedidoCreado.data.total.toString()).toBe('1100');
+  });
+
+  it('cuenta las piezas de TODO el pedido, no por línea', async () => {
+    // 12 piezas repartidas en dos productos distintos califican igual que 12
+    // del mismo: la promo es por volumen del pedido, mezclando lo que sea.
+    const { svc, pedidoCreado } = crearServicio({
+      preciosCO: [precioCOBarato(1), precioCOBarato(2)],
+      listaPrecioCodigo: null,
+    });
+
+    await svc.crearPedido(
+      {
+        ...dtoBase,
+        items: [
+          { precioCOId: 1, cantidad: 5 },
+          { precioCOId: 2, cantidad: 7 },
+        ],
+      } as never,
+      usuarioBase as never,
+    );
+
+    const items = pedidoCreado.data.items.create;
+    expect(items.every((i: any) => i.precioUnitario.toString() === '80')).toBe(true);
+    expect(pedidoCreado.data.total.toString()).toBe('960');
+  });
+
+  it('un cliente de lista 3 conserva su precio aunque lleve 12+', async () => {
+    // OJO con los precios de este mock: van DESCENDENTES (lista1=100 > lista2=80
+    // > lista3=60), igual que los datos reales (60 > 57 > 54). Los mocks de
+    // `precioCOMock` van ascendentes, que es al revés de la realidad y hace
+    // parecer que la promo beneficia a un cliente de lista 3.
+    //
+    // Con el orden real, un cliente de lista 3 ya paga menos que lista2, así que
+    // la promo no le cambia nada: conserva su 60.
+    const { svc, pedidoCreado } = crearServicio({
+      preciosCO: [
+        precioCOMock(1, {
+          lista1: new Prisma.Decimal('100.00'),
+          lista2: new Prisma.Decimal('80.00'),
+          lista3: new Prisma.Decimal('60.00'),
+        }),
+      ],
+      listaPrecioCodigo: '3',
+    });
+
+    await svc.crearPedido(
+      { ...dtoBase, items: [{ precioCOId: 1, cantidad: 20 }] } as never,
+      usuarioBase as never,
+    );
+
+    const item = pedidoCreado.data.items.create[0];
+    expect(item.precioUnitario.toString()).toBe('60');
+    // El par se congela igual (para que un ajuste posterior pueda re-evaluar),
+    // pero el efectivo es su propia lista.
+    expect(item.precioUnitarioBase.toString()).toBe('60');
+    expect(item.precioUnitarioMayoreo.toString()).toBe('80');
+  });
+
+  it('congela el par aunque lista2 sea más cara que la lista del cliente', async () => {
+    // Datos malos en Firebird (mayoreo más caro que la base). `crearPedido`
+    // congela el par tal cual y aplica la columna que le toca; quien protege
+    // el precio es el `min(base, mayoreo)` de `promo-volumen.util.ts`, que
+    // corre en cada `recalcularTotalesPedido`. Este test fija que el par
+    // congelado llega íntegro — sin él, esa protección no tendría con qué
+    // comparar.
+    const { svc, pedidoCreado } = crearServicio({
+      preciosCO: [precioCOMock(1)], // lista1=100, lista2=200
+      listaPrecioCodigo: null,
+    });
+
+    await svc.crearPedido(
+      { ...dtoBase, items: [{ precioCOId: 1, cantidad: 12 }] } as never,
+      usuarioBase as never,
+    );
+
+    const item = pedidoCreado.data.items.create[0];
+    expect(item.precioUnitarioBase.toString()).toBe('100');
+    expect(item.precioUnitarioMayoreo.toString()).toBe('200');
+  });
+
+  it('un cliente de lista 3 SIN capturar (0) sí recibe la promo', async () => {
+    // Firebird puede tener la lista del cliente sin capturar. `precioDeLista`
+    // cae al precio base, así que el precio EFECTIVO de este cliente es el de
+    // lista1 y la promo debe aplicarle. Un gate por nombre de columna diría
+    // que no, y el pedido cambiaría de precio solo en el primer recálculo
+    // (`aplicarPromoVolumen` no conoce la columna, solo los precios).
+    const { svc, pedidoCreado } = crearServicio({
+      preciosCO: [
+        precioCOMock(1, {
+          lista2: new Prisma.Decimal('80.00'),
+          lista3: new Prisma.Decimal('0'),
+        }),
+      ],
+      listaPrecioCodigo: '3',
+    });
+
+    await svc.crearPedido(
+      { ...dtoBase, items: [{ precioCOId: 1, cantidad: 12 }] } as never,
+      usuarioBase as never,
+    );
+
+    const item = pedidoCreado.data.items.create[0];
+    // base: lista3=0 → fallback al precio (100). mayoreo: 80.
+    expect(item.precioUnitarioBase.toString()).toBe('100');
+    expect(item.precioUnitarioMayoreo.toString()).toBe('80');
+    // Y el precio congelado ya es el de promo: punto fijo del recálculo.
+    expect(item.precioUnitario.toString()).toBe('80');
+  });
+
+  it('el precio congelado es punto fijo de la re-evaluación', async () => {
+    // El invariante que sostiene la feature: `aplicarPromoVolumen` corre en
+    // cada `recalcularTotalesPedido`, así que el precio que se congela al
+    // crear tiene que ser EXACTAMENTE el que esa función volvería a calcular.
+    // Si no, el pedido cambiaría de precio solo, sin que nadie lo edite.
+    const { svc, pedidoCreado } = crearServicio({
+      preciosCO: [precioCOMock(1)],
+      listaPrecioCodigo: null,
+    });
+
+    await svc.crearPedido(
+      { ...dtoBase, items: [{ precioCOId: 1, cantidad: 12 }] } as never,
+      usuarioBase as never,
+    );
+
+    const item = pedidoCreado.data.items.create[0];
+    const congelado = new Prisma.Decimal(item.precioUnitario);
+    const reevaluado = precioConPromoVolumen(
+      new Prisma.Decimal(item.precioUnitarioBase),
+      new Prisma.Decimal(item.precioUnitarioMayoreo),
+      12,
+    );
+    expect(reevaluado.toString()).toBe(congelado.toString());
   });
 });

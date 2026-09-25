@@ -11,7 +11,6 @@ import {
   CLAVE_KIOSKO_IDLE_TITULO,
   CLAVE_KIOSKO_IDLE_SUBTITULO,
   CLAVE_KIOSKO_IDLE_SLIDE_MS,
-  CLAVE_APP_DOWNLOAD_URL,
   PREFIJO_KIOSKO_IDLE,
   LIMITE_KIOSKO_IDLE_BYTES,
 } from './configuracion.constants';
@@ -189,14 +188,12 @@ export class ConfiguracionService {
     titulo: string;
     subtitulo: string;
     slideMs: number;
-    appDownloadUrl: string;
   }> {
-    const [mediaRaw, titulo, subtitulo, slideMsRaw, appDownloadUrl] = await Promise.all([
+    const [mediaRaw, titulo, subtitulo, slideMsRaw] = await Promise.all([
       this.obtenerPorClave(CLAVE_KIOSKO_IDLE_MEDIA),
       this.obtenerPorClave(CLAVE_KIOSKO_IDLE_TITULO),
       this.obtenerPorClave(CLAVE_KIOSKO_IDLE_SUBTITULO),
       this.obtenerPorClave(CLAVE_KIOSKO_IDLE_SLIDE_MS),
-      this.obtenerPorClave(CLAVE_APP_DOWNLOAD_URL),
     ]);
 
     let media: Array<{ url: string; key: string }> = [];
@@ -216,9 +213,8 @@ export class ConfiguracionService {
     return {
       media,
       titulo: titulo ?? 'Tu pedido, en 3 toques',
-      subtitulo: subtitulo ?? 'Pide desde aquí y recoge en barra. Sin filas, sin esperas.',
+      subtitulo: subtitulo ?? 'Pide desde aquí y te llamamos a mostrador cuando esté listo.',
       slideMs: slideMsRaw ? Math.max(2000, parseInt(slideMsRaw, 10) || 7000) : 7000,
-      appDownloadUrl: appDownloadUrl ?? '',
     };
   }
 
@@ -288,14 +284,13 @@ export class ConfiguracionService {
   }
 
   /**
-   * PR5: actualiza el copy del kiosko (título, subtítulo, slideMs,
-   * appDownloadUrl). Cualquier campo undefined se ignora.
+   * PR5: actualiza el copy del kiosko (título, subtítulo, slideMs).
+   * Cualquier campo undefined se ignora.
    */
   async actualizarBrandingKiosko(input: {
     titulo?: string;
     subtitulo?: string;
     slideMs?: number;
-    appDownloadUrl?: string;
   }): Promise<void> {
     if (input.titulo !== undefined) {
       await this.setPorClave(CLAVE_KIOSKO_IDLE_TITULO, input.titulo);
@@ -305,9 +300,6 @@ export class ConfiguracionService {
     }
     if (input.slideMs !== undefined) {
       await this.setPorClave(CLAVE_KIOSKO_IDLE_SLIDE_MS, String(input.slideMs));
-    }
-    if (input.appDownloadUrl !== undefined) {
-      await this.setPorClave(CLAVE_APP_DOWNLOAD_URL, input.appDownloadUrl);
     }
   }
 }

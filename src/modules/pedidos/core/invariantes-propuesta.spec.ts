@@ -234,9 +234,10 @@ describe('T3 — H2 red: aprobarPropuestaBodega vuelve a REVIEWING si hay PENDIE
       update: jest.fn(async () => ({})),
       // El guard "pedido sin productos" se evalúa con este count.
       count: jest.fn(async () => 2),
-      // `recalcularTotalesPedido` no se llama en este path (la propuesta
-      // se consume sin pasar por `aplicarCambiosDeBodega`), pero
-      // mantenemos findMany por si alguna ruta lo invoca.
+      // La red de seguridad SÍ recalcula los totales tras cancelar los
+      // PENDIENTE (antes los items cancelados seguían sumando en el total).
+      // `recalcularTotalesPedido` pide los items no cancelados dos veces: una
+      // para re-evaluar la promo de volumen y otra para sumar.
       findMany: jest.fn(async () => []),
     };
 
@@ -270,10 +271,15 @@ describe('T3 — H2 red: aprobarPropuestaBodega vuelve a REVIEWING si hay PENDIE
       // La red de seguridad corre las cancelaciones dentro de `$transaction`.
       // Hacemos que `tx` reuse los mismos mocks para que las updates dentro
       // de la transacción queden registradas igual.
+      //
+      // El `tx` también necesita `pedido.update`: la red de seguridad recalcula
+      // los totales tras cancelar los PENDIENTE (los items cancelados seguían
+      // sumando en `subtotal`/`total`), y ese recálculo escribe en el pedido.
       $transaction: jest.fn(async (fn: (tx: any) => unknown) => {
         const tx = {
           itemPedido: itemPedidoMock,
           pedidoPropuesta: pedidoPropuestaMock,
+          pedido: { update: jest.fn(async () => ({})) },
         };
         return fn(tx);
       }),
