@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  BadRequestException,
-  Logger,
-} from '@nestjs/common';
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { RolUsuario, TipoNotificacion } from '@prisma/client';
@@ -20,11 +16,7 @@ import { mailTemplates, mailSubjects } from '../../mail/mail.templates';
  * perdió el acceso por completo (ni lee ni escribe) — su trabajo es verificar
  * existencia, no negociar. CAJERO se mantiene para notas internas de ventanilla.
  */
-const ROLES_PUEDEN_INTERNO: RolUsuario[] = [
-  RolUsuario.VENTAS,
-  RolUsuario.CAJERO,
-  RolUsuario.ADMIN,
-];
+const ROLES_PUEDEN_INTERNO: RolUsuario[] = [RolUsuario.VENTAS, RolUsuario.CAJERO, RolUsuario.ADMIN];
 
 @Injectable()
 export class MessagesService {
@@ -89,9 +81,7 @@ export class MessagesService {
         select: { pedidoId: true },
       });
       if (!item || item.pedidoId !== pedidoId) {
-        throw new BadRequestException(
-          `Item ${dto.itemId} no pertenece al pedido ${pedidoId}`,
-        );
+        throw new BadRequestException(`Item ${dto.itemId} no pertenece al pedido ${pedidoId}`);
       }
     }
 
@@ -137,11 +127,8 @@ export class MessagesService {
         where: { pedidoId },
       });
       if (!yaEnviado) {
-        this.dispararEmailPrimeraRespuestaAsesor(mensaje.id, pedidoId).catch(
-          (err) =>
-            this.logger.error(
-              `Falló email MENSAJE_BODEGUERO (pedido ${pedidoId}): ${err.message}`,
-            ),
+        this.dispararEmailPrimeraRespuestaAsesor(mensaje.id, pedidoId).catch((err) =>
+          this.logger.error(`Falló email MENSAJE_BODEGUERO (pedido ${pedidoId}): ${err.message}`),
         );
       }
     }
@@ -155,10 +142,7 @@ export class MessagesService {
    * cuelan al mismo tiempo, el segundo se entera (unique constraint en
    * pedidoId) y se aborta el envío duplicado.
    */
-  private async dispararEmailPrimeraRespuestaAsesor(
-    mensajeId: number,
-    pedidoId: number,
-  ) {
+  private async dispararEmailPrimeraRespuestaAsesor(mensajeId: number, pedidoId: number) {
     // Cargamos el pedido completo con la info que necesita la plantilla.
     const pedido = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
@@ -183,8 +167,13 @@ export class MessagesService {
       await this.prisma.mensajeBodegueroEnviado.create({
         data: { pedidoId, mensajeId },
       });
-    } catch {
-      // P2002 = unique constraint. Otro hilo ya creó el flag: no enviar.
+    } catch (err) {
+      // Sólo P2002 (unique constraint) significa "otro hilo ya creó el flag".
+      // Cualquier otro fallo —BD caída, timeout, conexión perdida— NO debe
+      // tragarse: antes este catch era ciego, así que un error de
+      // infraestructura devolvía en silencio y el cliente nunca recibía el
+      // correo "tu asesor te contactó", sin log y sin rastro.
+      if ((err as { code?: string }).code !== 'P2002') throw err;
       this.logger.log(
         `Pedido ${pedidoId}: flag de primera respuesta ya existía, no se envía email duplicado`,
       );
@@ -245,7 +234,6 @@ export class MessagesService {
     return mensajes.map((m) => ({ ...m, autorNombre: m.autor.nombre }));
   }
 
-
   /**
    * F13 (sep 2026): crea un mensaje de chat que opcionalmente adjunta una
    * propuesta (estilo WhatsApp/Airbnb). Si `dto.propuestaItems` está presente,
@@ -258,11 +246,7 @@ export class MessagesService {
    * El campo `PedidoPropuesta.items` se guarda como snapshot — sigue siendo la
    * fuente de verdad de la decisión del cliente.
    */
-  async crearConAdjunto(
-    pedidoId: number,
-    dto: CrearMensajeConAdjuntoDto,
-    usuario: UserContext,
-  ) {
+  async crearConAdjunto(pedidoId: number, dto: CrearMensajeConAdjuntoDto, usuario: UserContext) {
     // 1. Validaciones de acceso y estado (igual que `crear`).
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
@@ -287,60 +271,76 @@ export class MessagesService {
     // 2. Si trae propuesta, validarla primero (delegamos al service de
     // propuestas para no duplicar reglas: el origen del caller determina qué
     // decisiones legales tiene el cliente).
-    let adjunto: { tipo: 'propuesta'; propuestaId: number } | null = null;
-    if (dto.propuestaItems && dto.propuestaItems.length > 0) {
-      // El service de propuestas hace todas las validaciones; nosotros sólo
-      // creamos el `PedidoMensaje` con el id resultante en la misma tx.
-      const propuesta = await this.propuesta.enviarPropuesta(
-        pedidoId,
-        {
-          items: dto.propuestaItems.map((it) => ({
-            itemId: it.itemId,
-            tipo: it.tipo,
-            producto: it.producto,
-            variante: it.variante,
-            // El snapshot es la fuente de verdad de lo que el cliente ve en la
-            // tarjeta del chat, así que se guarda el item COMPLETO: la imagen,
-            // el productoId (para resolver la foto de un `agregado`) y el
-            // "antes" de los tipos `cambio`/`parcial`. Antes este map los
-            // descartaba y la tarjeta no podía mostrar ni la foto ni el delta.
-            productoImagen: it.productoImagen ?? null,
-            cantidad: it.cantidad,
-            precioUnitario: it.precioUnitario,
-            subtotal: it.subtotal,
-            productoOriginal: it.productoOriginal ?? null,
-            varianteOriginal: it.varianteOriginal ?? null,
-            cantidadOriginal: it.cantidadOriginal ?? null,
-            productoNuevo: it.productoNuevo ?? null,
-            varianteNueva: it.varianteNueva ?? null,
-            cantidadNueva: it.cantidadNueva ?? null,
-            precioUnitarioNuevo: it.precioUnitarioNuevo ?? null,
-            subtotalNuevo: it.subtotalNuevo ?? null,
-            tempId: it.tempId ?? null,
-            productoId: it.productoId ?? null,
-            precioCOId: it.precioCOId ?? null,
-          })),
-          total: dto.total ?? 0,
-          // El texto del mensaje YA es el "comentario" de la propuesta; no
-          // necesitamos un campo `nota` separado en la propuesta.
-        } as any,
-        usuario,
-      );
-      adjunto = { tipo: 'propuesta', propuestaId: propuesta.id };
-    }
+    //
+    // Todo lo que sigue corre dentro de UNA transacción: la propuesta, la
+    // transición a WAITING_CUSTOMER_APPROVAL y el mensaje de chat que la
+    // muestra. El comentario de este método prometía esa atomicidad desde
+    // F13, pero no la había: `enviarPropuesta` confirmaba su propia
+    // transacción y el mensaje se creaba después, fuera de cualquiera. Si el
+    // segundo create fallaba, el cliente quedaba con una propuesta pendiente
+    // que no podía ver ni responder — justo el bug que se decía haber
+    // arreglado.
+    const { mensaje, adjunto } = await this.prisma.$transaction(async (tx) => {
+      let adjunto: { tipo: 'propuesta'; propuestaId: number } | null = null;
 
-    // 3. Crear el mensaje con el adjunto.
-    const mensaje = await this.prisma.pedidoMensaje.create({
-      data: {
-        pedidoId,
-        itemId: null,
-        autorId: usuario.userId,
-        autorRol: usuario.rol,
-        contenido: dto.contenido,
-        visibleParaCliente: true, // el nuevo endpoint siempre es visible al cliente
-        adjunto: adjunto ?? undefined,
-      },
-      include: { autor: { select: { id: true, nombre: true, rol: true } } },
+      if (dto.propuestaItems && dto.propuestaItems.length > 0) {
+        // El service de propuestas hace todas las validaciones; nosotros sólo
+        // creamos el `PedidoMensaje` con el id resultante en la misma tx.
+        const propuesta = await this.propuesta.enviarPropuesta(
+          pedidoId,
+          {
+            items: dto.propuestaItems.map((it) => ({
+              itemId: it.itemId,
+              tipo: it.tipo,
+              producto: it.producto,
+              variante: it.variante,
+              // El snapshot es la fuente de verdad de lo que el cliente ve en
+              // la tarjeta del chat, así que se guarda el item COMPLETO: la
+              // imagen, el productoId (para resolver la foto de un `agregado`)
+              // y el "antes" de los tipos `cambio`/`parcial`. Antes este map
+              // los descartaba y la tarjeta no podía mostrar ni la foto ni el
+              // delta.
+              productoImagen: it.productoImagen ?? null,
+              cantidad: it.cantidad,
+              precioUnitario: it.precioUnitario,
+              subtotal: it.subtotal,
+              productoOriginal: it.productoOriginal ?? null,
+              varianteOriginal: it.varianteOriginal ?? null,
+              cantidadOriginal: it.cantidadOriginal ?? null,
+              productoNuevo: it.productoNuevo ?? null,
+              varianteNueva: it.varianteNueva ?? null,
+              cantidadNueva: it.cantidadNueva ?? null,
+              precioUnitarioNuevo: it.precioUnitarioNuevo ?? null,
+              subtotalNuevo: it.subtotalNuevo ?? null,
+              tempId: it.tempId ?? null,
+              productoId: it.productoId ?? null,
+              precioCOId: it.precioCOId ?? null,
+            })),
+            total: dto.total ?? 0,
+            // El texto del mensaje YA es el "comentario" de la propuesta; no
+            // necesitamos un campo `nota` separado en la propuesta.
+          } as any,
+          usuario,
+          tx,
+        );
+        adjunto = { tipo: 'propuesta', propuestaId: propuesta.id };
+      }
+
+      // 3. Crear el mensaje con el adjunto, en la misma transacción.
+      const mensaje = await tx.pedidoMensaje.create({
+        data: {
+          pedidoId,
+          itemId: null,
+          autorId: usuario.userId,
+          autorRol: usuario.rol,
+          contenido: dto.contenido,
+          visibleParaCliente: true, // el nuevo endpoint siempre es visible al cliente
+          adjunto: adjunto ?? undefined,
+        },
+        include: { autor: { select: { id: true, nombre: true, rol: true } } },
+      });
+
+      return { mensaje, adjunto };
     });
 
     // 4. Realtime: el cliente y el room del pedido reciben el mensaje con su
@@ -367,11 +367,8 @@ export class MessagesService {
         where: { pedidoId },
       });
       if (!yaEnviado) {
-        this.dispararEmailPrimeraRespuestaAsesor(mensaje.id, pedidoId).catch(
-          (err) =>
-            this.logger.error(
-              `Falló email MENSAJE_BODEGUERO (pedido ${pedidoId}): ${err.message}`,
-            ),
+        this.dispararEmailPrimeraRespuestaAsesor(mensaje.id, pedidoId).catch((err) =>
+          this.logger.error(`Falló email MENSAJE_BODEGUERO (pedido ${pedidoId}): ${err.message}`),
         );
       }
     }
@@ -395,11 +392,7 @@ export class MessagesService {
    * Después de bumpear, emite `mensaje.leido` al room del pedido y al cliente
    * para que el otro lado vea los ticks ✓✓ actualizarse en tiempo real.
    */
-  async marcarLeido(
-    pedidoId: number,
-    dto: MarcarLeidoDto,
-    usuario: UserContext,
-  ) {
+  async marcarLeido(pedidoId: number, dto: MarcarLeidoDto, usuario: UserContext) {
     await this.access.cargarYValidar(pedidoId, usuario);
 
     // El id del último mensaje que el caller vio. Si el caller pide bumpear
@@ -409,15 +402,10 @@ export class MessagesService {
       where: { pedidoId },
       _max: { id: true },
     });
-    const ultimoId = Math.min(
-      dto.ultimoMensajeId,
-      maxId._max.id ?? dto.ultimoMensajeId,
-    );
+    const ultimoId = Math.min(dto.ultimoMensajeId, maxId._max.id ?? dto.ultimoMensajeId);
 
     const esCliente = usuario.rol === RolUsuario.CLIENTE;
-    const campoLeido = esCliente
-      ? 'clienteUltimoMensajeLeidoId'
-      : 'tiendaUltimoMensajeLeidoId';
+    const campoLeido = esCliente ? 'clienteUltimoMensajeLeidoId' : 'tiendaUltimoMensajeLeidoId';
     const campoEntregado = 'clienteUltimoMensajeEntregadoId';
 
     // 1. Avance del watermark del LADO del caller (idempotente).
@@ -440,17 +428,12 @@ export class MessagesService {
       // Si pidió bumpear entregado explícitamente O si el leído supera al
       // entregado actual, avanzamos. El leído siempre implica entregado.
       const debeAvanzarEntregado =
-        dto.entregado ||
-        entregadoActual == null ||
-        ultimoId > entregadoActual;
+        dto.entregado || entregadoActual == null || ultimoId > entregadoActual;
       if (debeAvanzarEntregado) {
         await this.prisma.pedido.updateMany({
           where: {
             id: pedidoId,
-            OR: [
-              { [campoEntregado]: null },
-              { [campoEntregado]: { lt: ultimoId } },
-            ],
+            OR: [{ [campoEntregado]: null }, { [campoEntregado]: { lt: ultimoId } }],
           },
           data: { [campoEntregado]: ultimoId },
         });

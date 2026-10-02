@@ -14,11 +14,7 @@ import { asignadoANombre } from './pedido-mapper';
 import { pausarReloj, reanudarReloj } from './atencion.util';
 import { CambiarEstadoDto } from '../admin/dto/cambiar-estado.dto';
 import { UserContext } from '../../../types/pedido.types';
-import {
-  EstadoPedido,
-  TipoNotificacion,
-  Prisma,
-} from '@prisma/client';
+import { EstadoPedido, TipoNotificacion, Prisma } from '@prisma/client';
 
 /**
  * Máquina de estados B2B. Cada estado declara a qué otros puede transicionar.
@@ -198,6 +194,13 @@ export interface CambiarEstadoOpts {
   efectos?: (tx: Prisma.TransactionClient) => Promise<void>;
   /** Emitir `monitor.invalidado` a la tienda (para que los monitores refresquen). */
   invalidarMonitor?: boolean;
+  /**
+   * Transacción del caller. Si viene, la transición corre DENTRO de ella en
+   * vez de abrir la suya, para que el cambio de estado y las escrituras del
+   * caller sean atómicos. Lo usa `MessagesService.crearConAdjunto` para crear
+   * la propuesta, transicionar y crear el mensaje como una sola unidad.
+   */
+  tx?: Prisma.TransactionClient;
 }
 
 /**
@@ -250,7 +253,30 @@ export class PedidoStateService {
     opts: CambiarEstadoOpts = {},
   ) {
     await this.access.cargarYValidar(pedidoId, usuario);
-    return this.prisma.$transaction(async (tx) => {
+
+    // Si el caller ya abrió una transacción, la transición se ejecuta DENTRO
+    // de ella. Es lo que permite que un cambio de estado y otra escritura
+    // (ej. crear la propuesta y el mensaje de chat que la muestra) sean
+    // atómicos: o quedan los dos, o no queda ninguno.
+    if (opts.tx) {
+      return this.ejecutarCambio(opts.tx, pedidoId, dto, usuario, opts);
+    }
+
+    return this.prisma.$transaction((tx) => this.ejecutarCambio(tx, pedidoId, dto, usuario, opts));
+  }
+
+  /**
+   * Cuerpo de la transición. Extraído de `cambiarEstado` para que un caller
+   * pueda componerlo dentro de su propia transacción vía `opts.tx`.
+   */
+  private async ejecutarCambio(
+    tx: Prisma.TransactionClient,
+    pedidoId: number,
+    dto: CambiarEstadoDto,
+    usuario: UserContext,
+    opts: CambiarEstadoOpts,
+  ) {
+    {
       const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
@@ -287,9 +313,7 @@ export class PedidoStateService {
           // vaciarse solo — si no, un folio ya cobrado seguiría anunciado como
           // "te toca". Se limpia aquí y no en cada caller para que ninguna
           // transición futura pueda olvidarlo.
-          ...(estadoNuevo !== EstadoPedido.EN_MOSTRADOR
-            ? { llamadoAt: null }
-            : {}),
+          ...(estadoNuevo !== EstadoPedido.EN_MOSTRADOR ? { llamadoAt: null } : {}),
         },
       });
       if (result.count !== 1) {
@@ -330,7 +354,9 @@ export class PedidoStateService {
         },
       });
 
-      this.logger.log(`Pedido ${pedidoId}: ${estadoAnterior} → ${estadoNuevo} (por ${usuario.nombre})`);
+      this.logger.log(
+        `Pedido ${pedidoId}: ${estadoAnterior} → ${estadoNuevo} (por ${usuario.nombre})`,
+      );
 
       // Realtime: notificar a la tienda y al room del pedido.
       this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
@@ -357,15 +383,17 @@ export class PedidoStateService {
         if (pedidoCompleto) {
           // Fire-and-forget fuera de la transacción
           setImmediate(() => {
-            this.notifications.enviar(pedidoCompleto, notifTipo).catch((err) =>
-              this.logger.error(`Error enviando notificación ${notifTipo}: ${err.message}`),
-            );
+            this.notifications
+              .enviar(pedidoCompleto, notifTipo)
+              .catch((err) =>
+                this.logger.error(`Error enviando notificación ${notifTipo}: ${err.message}`),
+              );
           });
         }
       }
 
       return pedidoActualizado;
-    });
+    }
   }
 
   /**
@@ -440,10 +468,7 @@ export class PedidoStateService {
    * agente se pierda, GRABAR_PEDIDOS recibe siempre el mismo ID y la SP lo
    * trata como UPDATE (idempotente).
    */
-  async encolarEnvioAFirebird(
-    tx: Prisma.TransactionClient,
-    pedidoId: number,
-  ): Promise<void> {
+  async encolarEnvioAFirebird(tx: Prisma.TransactionClient, pedidoId: number): Promise<void> {
     await tx.pedidoPendienteEnvio.create({
       data: {
         pedidoId,
@@ -499,7 +524,8 @@ export class PedidoStateService {
           pedidoId,
           estadoAnterior,
           estadoNuevo: nuevoEstado,
-          observacion: opts.observacion || `Cambio de estado por ${opts.usuarioNombre ?? 'sistema'}`,
+          observacion:
+            opts.observacion || `Cambio de estado por ${opts.usuarioNombre ?? 'sistema'}`,
           usuarioId: null,
           usuarioNombre: opts.usuarioNombre ?? 'SISTEMA',
         },
@@ -526,9 +552,11 @@ export class PedidoStateService {
         const pedidoCompleto = await tx.pedido.findUnique({ where: { id: pedidoId } });
         if (pedidoCompleto) {
           setImmediate(() => {
-            this.notifications.enviar(pedidoCompleto, notifTipo).catch((err) =>
-              this.logger.error(`Error enviando notificación ${notifTipo}: ${err.message}`),
-            );
+            this.notifications
+              .enviar(pedidoCompleto, notifTipo)
+              .catch((err) =>
+                this.logger.error(`Error enviando notificación ${notifTipo}: ${err.message}`),
+              );
           });
         }
       }
@@ -642,21 +670,29 @@ export class PedidoStateService {
 
   private notifTipoParaEstado(estado: EstadoPedido): TipoNotificacion | null {
     switch (estado) {
-      case EstadoPedido.WAITING_CUSTOMER_APPROVAL: return TipoNotificacion.REVISION_PROPUESTA;
+      case EstadoPedido.WAITING_CUSTOMER_APPROVAL:
+        return TipoNotificacion.REVISION_PROPUESTA;
       // F13: EN_ASESORIA no notifica aquí: el email ASESOR_SOLICITADO lo
       // dispara PropuestaService (que conoce la nota del cliente y el origen
       // de la propuesta), no la máquina de estados genérica.
-      case EstadoPedido.EN_ASESORIA: return null;
+      case EstadoPedido.EN_ASESORIA:
+        return null;
       // F16: el pedido quedó apartado en tienda esperando que el cliente lo
       // revise. Exige que se presente físicamente, así que sí se notifica.
-      case EstadoPedido.EN_MOSTRADOR: return TipoNotificacion.LISTO_EN_TIENDA;
+      case EstadoPedido.EN_MOSTRADOR:
+        return TipoNotificacion.LISTO_EN_TIENDA;
       // PENDING_PAID no notifica al cliente: el cambio lo ve por realtime/refresh
       // cuando bodega confirma el surtido o el cliente acepta la propuesta.
-      case EstadoPedido.PAID: return TipoNotificacion.PAGO_CONFIRMADO;
-      case EstadoPedido.SHIPPED: return TipoNotificacion.ENVIADO;
-      case EstadoPedido.COMPLETED: return TipoNotificacion.ENTREGADO;
-      case EstadoPedido.CANCELLED: return TipoNotificacion.CANCELADO;
-      default: return null;
+      case EstadoPedido.PAID:
+        return TipoNotificacion.PAGO_CONFIRMADO;
+      case EstadoPedido.SHIPPED:
+        return TipoNotificacion.ENVIADO;
+      case EstadoPedido.COMPLETED:
+        return TipoNotificacion.ENTREGADO;
+      case EstadoPedido.CANCELLED:
+        return TipoNotificacion.CANCELADO;
+      default:
+        return null;
     }
   }
 }

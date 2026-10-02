@@ -79,6 +79,11 @@ test-results/
 *.heapsnapshot
 *.cpuprofile
 
+# Scripts de depuración puntual. Llevan cadenas de conexión con credenciales
+# y no son parte del proyecto; nunca deben commitearse.
+*.tmp.js
+.seed-neon-temporal.ts
+
 # Imágenes subidas en local (fallback sin S3). En prod viven en el bucket.
 /uploads/
 

@@ -16,18 +16,8 @@ import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
 import { PreciosService } from '../../precios/precios.service';
 import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../../precios/precio-lista.util';
 import { UserContext } from '../../../types/pedido.types';
-import {
-  EstadoPedido,
-  EstadoPropuesta,
-  EstadoSurtido,
-  RolUsuario,
-  Prisma,
-} from '@prisma/client';
-import {
-  CrearPropuestaDto,
-  ResponderPropuestaDto,
-  DecisionPropuesta,
-} from './dto/propuesta.dto';
+import { EstadoPedido, EstadoPropuesta, EstadoSurtido, RolUsuario, Prisma } from '@prisma/client';
+import { CrearPropuestaDto, ResponderPropuestaDto, DecisionPropuesta } from './dto/propuesta.dto';
 
 /**
  * F12/F13 (sep 2026): flujo de propuesta/contrapropuesta entre el negocio y
@@ -111,14 +101,21 @@ export class PropuestaService {
     pedidoId: number,
     dto: CrearPropuestaDto,
     usuario: UserContext,
+    /**
+     * Transacción del caller. Si viene, la propuesta, la transición y las
+     * escrituras del caller quedan en la misma transacción. Lo usa
+     * `MessagesService.crearConAdjunto`, que necesita que la propuesta y el
+     * mensaje de chat que la muestra sean atómicos: antes la propuesta se
+     * confirmaba por su cuenta y el mensaje se creaba fuera, así que un fallo
+     * del segundo dejaba al cliente con una propuesta viva que no podía ver.
+     */
+    txExterna?: Prisma.TransactionClient,
   ) {
     const esVentas = usuario.rol === RolUsuario.VENTAS;
     const esBodega = usuario.rol === RolUsuario.BODEGA;
 
     if (!esVentas && !esBodega && usuario.rol !== RolUsuario.ADMIN) {
-      throw new BadRequestException(
-        'Sólo bodega o el asesor de ventas pueden enviar propuestas.',
-      );
+      throw new BadRequestException('Sólo bodega o el asesor de ventas pueden enviar propuestas.');
     }
 
     await this.access.cargarYValidar(pedidoId, usuario, {
@@ -144,19 +141,11 @@ export class PropuestaService {
         where: { pedidoId, cancelada: false },
         select: { id: true, estadoSurtido: true },
       });
-      const idsEnPropuesta = new Set(
-        dto.items
-          .filter((i) => i.itemId > 0)
-          .map((i) => i.itemId),
-      );
+      const idsEnPropuesta = new Set(dto.items.filter((i) => i.itemId > 0).map((i) => i.itemId));
       // Contamos items del pedido que bodega no marcó y que la propuesta
       // tampoco menciona — esos son los PENDIENTE que quedarían sin surtir.
       const idsPendientesSinCubrir = itemsPedido
-        .filter(
-          (i) =>
-            i.estadoSurtido === EstadoSurtido.PENDIENTE &&
-            !idsEnPropuesta.has(i.id),
-        )
+        .filter((i) => i.estadoSurtido === EstadoSurtido.PENDIENTE && !idsEnPropuesta.has(i.id))
         .map((i) => i.id);
       if (idsPendientesSinCubrir.length > 0) {
         throw new BadRequestException(
@@ -196,35 +185,48 @@ export class PropuestaService {
       );
     }
 
-    const propuesta = await this.prisma.pedidoPropuesta.create({
-      data: {
-        pedidoId,
-        estado: EstadoPropuesta.PENDIENTE,
-        items: dto.items as unknown as Prisma.InputJsonValue,
-        total: new Prisma.Decimal(totalCalculado),
-        nota: dto.nota ?? null,
-        creadaPorId: usuario.userId,
-        creadaPorRol: usuario.rol,
-      },
-    });
+    // Sin tx externa abrimos la nuestra: la propuesta y la transición a
+    // WAITING_CUSTOMER_APPROVAL deben ser atómicas. Antes la propuesta se
+    // creaba suelta y, si la transición fallaba, quedaba una propuesta
+    // PENDIENTE que bloqueaba el siguiente envío por el índice único parcial.
+    const crearYTransicionar = async (tx: Prisma.TransactionClient) => {
+      const propuesta = await tx.pedidoPropuesta.create({
+        data: {
+          pedidoId,
+          estado: EstadoPropuesta.PENDIENTE,
+          items: dto.items as unknown as Prisma.InputJsonValue,
+          total: new Prisma.Decimal(totalCalculado),
+          nota: dto.nota ?? null,
+          creadaPorId: usuario.userId,
+          creadaPorRol: usuario.rol,
+        },
+      });
 
-    // Transicionar a WAITING_CUSTOMER_APPROVAL. El reloj se DETIENE y el
-    // pedido se libera: el bodeguero ya no puede accionar nada.
-    await this.state.cambiarEstado(
-      pedidoId,
-      {
-        nuevoEstado: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-        observacion: esVentas
-          ? `Propuesta del asesor de ventas enviada al cliente (${dto.items.length} item(s))`
-          : `Propuesta de bodega enviada al cliente (${dto.items.length} item(s))`,
-      },
-      usuario,
-      {
-        asignacion: 'limpiar',
-        reloj: 'detener',
-        invalidarMonitor: true,
-      },
-    );
+      // Transicionar a WAITING_CUSTOMER_APPROVAL. El reloj se DETIENE y el
+      // pedido se libera: el bodeguero ya no puede accionar nada.
+      await this.state.cambiarEstado(
+        pedidoId,
+        {
+          nuevoEstado: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+          observacion: esVentas
+            ? `Propuesta del asesor de ventas enviada al cliente (${dto.items.length} item(s))`
+            : `Propuesta de bodega enviada al cliente (${dto.items.length} item(s))`,
+        },
+        usuario,
+        {
+          asignacion: 'limpiar',
+          reloj: 'detener',
+          invalidarMonitor: true,
+          tx,
+        },
+      );
+
+      return propuesta;
+    };
+
+    const propuesta = txExterna
+      ? await crearYTransicionar(txExterna)
+      : await this.prisma.$transaction(crearYTransicionar);
 
     // Aviso al cliente por realtime (el email lo manda la máquina de estados
     // al entrar a WAITING_CUSTOMER_APPROVAL).
@@ -260,9 +262,7 @@ export class PropuestaService {
     });
     if (!propuesta) throw new NotFoundException('Propuesta no encontrada');
     if (propuesta.estado !== EstadoPropuesta.PENDIENTE) {
-      throw new ConflictException(
-        `Esta propuesta ya fue respondida (estado: ${propuesta.estado})`,
-      );
+      throw new ConflictException(`Esta propuesta ya fue respondida (estado: ${propuesta.estado})`);
     }
 
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
@@ -343,9 +343,7 @@ export class PropuestaService {
     if (!pedidoCompleto) throw new NotFoundException('Pedido no encontrado');
 
     const itemsConFaltante = pedidoCompleto.items.filter(
-      (i) =>
-        !i.cancelada &&
-        (i.estadoSurtido === 'PARCIAL' || i.estadoSurtido === 'NO_DISPONIBLE'),
+      (i) => !i.cancelada && (i.estadoSurtido === 'PARCIAL' || i.estadoSurtido === 'NO_DISPONIBLE'),
     );
 
     // F16 (sep 2026): red de seguridad — si por una carrera quedaron items
@@ -921,15 +919,11 @@ export class PropuestaService {
             where: { id: it.itemId },
             data: {
               cantidad: item.cantidadSurtida,
-              subtotal: new Prisma.Decimal(item.precioUnitario).mul(
-                item.cantidadSurtida,
-              ),
+              subtotal: new Prisma.Decimal(item.precioUnitario).mul(item.cantidadSurtida),
               estadoSurtido: 'COMPLETO',
             },
           });
-          cambios.push(
-            `Item #${it.itemId} ajustado a ${item.cantidadSurtida} piezas (lo que hay)`,
-          );
+          cambios.push(`Item #${it.itemId} ajustado a ${item.cantidadSurtida} piezas (lo que hay)`);
         }
         continue;
       }
@@ -950,9 +944,7 @@ export class PropuestaService {
           throw new NotFoundException(`PrecioCO ${it.precioCOId} no existe`);
         }
         if (pco.tiendaId !== pedido.tiendaId) {
-          throw new BadRequestException(
-            `El producto "${it.producto}" pertenece a otra tienda.`,
-          );
+          throw new BadRequestException(`El producto "${it.producto}" pertenece a otra tienda.`);
         }
 
         // Si es un cambio, cancelar el item original.
@@ -1132,11 +1124,7 @@ export class PropuestaService {
    * Admin fuerza la aprobación de una propuesta sin respuesta del cliente
    * (caso excepcional: cliente no responde). Registra auditoría.
    */
-  async forzarAprobacion(
-    pedidoId: number,
-    propuestaId: number,
-    usuario: UserContext,
-  ) {
+  async forzarAprobacion(pedidoId: number, propuestaId: number, usuario: UserContext) {
     if (usuario.rol !== RolUsuario.ADMIN) {
       throw new BadRequestException('Sólo un admin puede forzar la aprobación.');
     }

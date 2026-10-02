@@ -1,13 +1,5 @@
-import {
-  BadRequestException,
-} from '@nestjs/common';
-import {
-  EstadoPedido,
-  EstadoSurtido,
-  ModoEntrega,
-  Prisma,
-  RolUsuario,
-} from '@prisma/client';
+import { BadRequestException } from '@nestjs/common';
+import { EstadoPedido, EstadoSurtido, ModoEntrega, Prisma, RolUsuario } from '@prisma/client';
 import { SurtidoService } from '../bodega/surtido.service';
 import { PropuestaService } from '../propuesta/propuesta.service';
 import { aplicarCambiosFisicos } from './aplicar-cambios-surtido.util';
@@ -79,10 +71,7 @@ function item(over: Partial<Record<string, unknown>> = {}) {
 // T1/T2 — H2: enviarPropuesta (BODEGA) debe rechazar items PENDIENTE
 // =============================================================================
 
-function crearPropuestaServiceParaEnvio(
-  items: any[],
-  opts: { pedidoEncontrado?: any } = {},
-) {
+function crearPropuestaServiceParaEnvio(items: any[], opts: { pedidoEncontrado?: any } = {}) {
   const creado: any[] = [];
 
   const pedido = opts.pedidoEncontrado ?? {
@@ -91,7 +80,7 @@ function crearPropuestaServiceParaEnvio(
     tiendaId: 5,
   };
 
-  const prisma = {
+  const prisma: any = {
     pedido: {
       findUnique: jest.fn(async () => pedido),
     },
@@ -106,6 +95,11 @@ function crearPropuestaServiceParaEnvio(
       }),
     },
   };
+  // `enviarPropuesta` ahora envuelve la creación de la propuesta y la
+  // transición de estado en una transacción, para que no quede una propuesta
+  // PENDIENTE huérfana si la transición falla. El mock la ejecuta inline con
+  // el mismo cliente.
+  prisma.$transaction = jest.fn(async (fn: any) => fn(prisma));
 
   const state = {
     // No usamos cambiarEstado en este test (la propuesta no transiciona
@@ -179,9 +173,35 @@ describe('T1/T2 — H2 prevención: enviarPropuesta valida items PENDIENTE', () 
       1,
       {
         items: [
-          { itemId: 1, tipo: 'completo', producto: '', variante: '', cantidad: 5, precioUnitario: 100, subtotal: 500 },
-          { itemId: 2, tipo: 'no-disponible', producto: '', variante: '', cantidad: 5, precioUnitario: 100, subtotal: 500 },
-          { itemId: 3, tipo: 'parcial', producto: '', variante: '', cantidad: 5, cantidadNueva: 2, precioUnitario: 100, subtotal: 500, subtotalNuevo: 200 },
+          {
+            itemId: 1,
+            tipo: 'completo',
+            producto: '',
+            variante: '',
+            cantidad: 5,
+            precioUnitario: 100,
+            subtotal: 500,
+          },
+          {
+            itemId: 2,
+            tipo: 'no-disponible',
+            producto: '',
+            variante: '',
+            cantidad: 5,
+            precioUnitario: 100,
+            subtotal: 500,
+          },
+          {
+            itemId: 3,
+            tipo: 'parcial',
+            producto: '',
+            variante: '',
+            cantidad: 5,
+            cantidadNueva: 2,
+            precioUnitario: 100,
+            subtotal: 500,
+            subtotalNuevo: 200,
+          },
         ] as any,
         total: 1200,
       },
@@ -210,7 +230,17 @@ describe('T1/T2 — H2 prevención: enviarPropuesta valida items PENDIENTE', () 
     await enviar(
       1,
       {
-        items: [{ itemId: 1, tipo: 'completo', producto: '', variante: '', cantidad: 5, precioUnitario: 100, subtotal: 500 }] as any,
+        items: [
+          {
+            itemId: 1,
+            tipo: 'completo',
+            producto: '',
+            variante: '',
+            cantidad: 5,
+            precioUnitario: 100,
+            subtotal: 500,
+          },
+        ] as any,
         total: 500,
       },
       usuarioVentas,
@@ -371,8 +401,24 @@ describe('T4 — H3: ventas no avanza con 0 items activos', () => {
         prisma,
         pedido,
         [
-          { itemId: 1, tipo: 'no-disponible', producto: '', variante: '', cantidad: 5, precioUnitario: 100, subtotal: 500 },
-          { itemId: 2, tipo: 'no-disponible', producto: '', variante: '', cantidad: 5, precioUnitario: 100, subtotal: 500 },
+          {
+            itemId: 1,
+            tipo: 'no-disponible',
+            producto: '',
+            variante: '',
+            cantidad: 5,
+            precioUnitario: 100,
+            subtotal: 500,
+          },
+          {
+            itemId: 2,
+            tipo: 'no-disponible',
+            producto: '',
+            variante: '',
+            cantidad: 5,
+            precioUnitario: 100,
+            subtotal: 500,
+          },
         ],
         [
           { id: 1, precioUnitario: new Prisma.Decimal(100) },
@@ -505,10 +551,15 @@ describe('T7/T8 — H5: marcarItem rechaza cantidades inválidas y cancelados', 
     });
 
     await expect(
-      marcar(1, 1, {
-        cantidadSurtida: 999,
-        estadoSurtido: EstadoSurtido.COMPLETO,
-      }, usuarioBodega),
+      marcar(
+        1,
+        1,
+        {
+          cantidadSurtida: 999,
+          estadoSurtido: EstadoSurtido.COMPLETO,
+        },
+        usuarioBodega,
+      ),
     ).rejects.toThrow(/no puede exceder la cantidad pedida/i);
   });
 
@@ -521,10 +572,15 @@ describe('T7/T8 — H5: marcarItem rechaza cantidades inválidas y cancelados', 
     });
 
     await expect(
-      marcar(1, 1, {
-        cantidadSurtida: 3,
-        estadoSurtido: EstadoSurtido.PARCIAL,
-      }, usuarioBodega),
+      marcar(
+        1,
+        1,
+        {
+          cantidadSurtida: 3,
+          estadoSurtido: EstadoSurtido.PARCIAL,
+        },
+        usuarioBodega,
+      ),
     ).rejects.toThrow(/item cancelado/i);
   });
 
@@ -537,10 +593,15 @@ describe('T7/T8 — H5: marcarItem rechaza cantidades inválidas y cancelados', 
     });
 
     await expect(
-      marcar(1, 1, {
-        cantidadSurtida: 5,
-        estadoSurtido: EstadoSurtido.COMPLETO,
-      }, usuarioBodega),
+      marcar(
+        1,
+        1,
+        {
+          cantidadSurtida: 5,
+          estadoSurtido: EstadoSurtido.COMPLETO,
+        },
+        usuarioBodega,
+      ),
     ).resolves.toBeDefined();
   });
 });

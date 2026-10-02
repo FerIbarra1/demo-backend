@@ -150,18 +150,13 @@ export class RealtimeGateway
    * real (el backend emite a `pedido-{id}`, pero nadie se unía al room).
    */
   @SubscribeMessage('joinPedido')
-  async handleJoinPedido(
-    @MessageBody() pedidoId: number,
-    @ConnectedSocket() client: Socket,
-  ) {
+  async handleJoinPedido(@MessageBody() pedidoId: number, @ConnectedSocket() client: Socket) {
     const data = client.data as SocketData | undefined;
     if (!data || !pedidoId) return;
 
     if (await this.puedeVerPedido(client, pedidoId)) {
       await client.join(`pedido-${pedidoId}`);
-      this.logger.debug(
-        `WS ${client.id}: user=${data.userId} se unió a pedido-${pedidoId}`,
-      );
+      this.logger.debug(`WS ${client.id}: user=${data.userId} se unió a pedido-${pedidoId}`);
     }
   }
 
@@ -169,10 +164,7 @@ export class RealtimeGateway
    * Reusado por `joinPedido`. Valida que el caller tenga
    * derecho sobre el pedido: dueño, operador de la tienda, o admin global.
    */
-  private async puedeVerPedido(
-    client: Socket,
-    pedidoId: number,
-  ): Promise<boolean> {
+  private async puedeVerPedido(client: Socket, pedidoId: number): Promise<boolean> {
     const data = client.data as SocketData | undefined;
     if (!data) return false;
 
@@ -183,10 +175,23 @@ export class RealtimeGateway
     if (!pedido) return false;
 
     const esAdmin = data.rol === RolUsuario.ADMIN;
+    if (esAdmin) return true;
+
     const esDueno = pedido.usuarioId === data.userId;
-    const esDeSuTienda =
-      data.tiendaId != null && pedido.tiendaId === data.tiendaId;
-    return esAdmin || esDueno || esDeSuTienda;
+
+    // CLIENTE: sólo su propio pedido. Antes bastaba con que la tienda
+    // coincidiera, y como un CLIENTE también lleva `tiendaId` en el JWT
+    // (`jwt.strategy.ts`), cualquier cliente podía unirse al room de un pedido
+    // ajeno de su misma tienda y recibir en vivo `mensaje.creado`,
+    // `surtido.actualizado` y `pedido.estado` de ese pedido. Es la misma regla
+    // que aplica `PedidoAccessService.validar`; el gateway la reimplementó por
+    // su cuenta y le quedó más permisiva.
+    if (data.rol === RolUsuario.CLIENTE) return esDueno;
+
+    // Empleados (bodega, cajero, mostrador, ventas y sus monitores): el pedido
+    // debe ser de su tienda. La tienda sale SOLO del JWT (firmado), nunca de un
+    // valor del handshake.
+    return esDueno || (data.tiendaId != null && pedido.tiendaId === data.tiendaId);
   }
 
   handleDisconnect(client: Socket) {
