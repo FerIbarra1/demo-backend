@@ -11,6 +11,7 @@ import { NotificationsService } from '../../notifications/notifications.service'
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
+import { motivoNoAvisable } from '../core/llegada-aviso.util';
 import { PreciosService } from '../../precios/precios.service';
 import {
   precioDeLista,
@@ -428,48 +429,17 @@ export class ClienteService {
     if (!pedido || pedido.usuarioId !== usuarioId) {
       throw new NotFoundException('Pedido no encontrado');
     }
-    if (
-      pedido.modoEntrega !== ModoEntrega.RECOGER_TIENDA &&
-      pedido.modoEntrega !== ModoEntrega.KIOSKO
-    ) {
-      throw new BadRequestException('Este pedido no es para recoger en tienda');
-    }
-
     // F16 (sep 2026): solo se puede avisar llegada cuando el pedido YA ESTÁ
-    // LISTO para revisarse en tienda, es decir en `EN_MOSTRADOR`.
+    // LISTO para revisarse en tienda (`EN_MOSTRADOR`), y solo si se recoge en
+    // tienda. Antes de eso el pedido no está apartado, así que avisar no
+    // tendría sentido: el mostrador no tiene nada que mostrarle.
     //
-    // Ese estado es exactamente el punto en que bodega terminó de verificar
-    // (aprobó el pedido tal cual), o el cliente aprobó las modificaciones que
-    // bodega o ventas propusieron. Antes de eso el pedido no está apartado, así
-    // que avisar no tendría sentido: el mostrador no tiene nada que mostrarle.
-    //
-    // Antes solo se rechazaban COMPLETED y CANCELLED, así que el cliente podía
-    // avisar desde PENDING_REVIEW — y el pedido quedaba marcado "EN TIENDA"
-    // antes de que nadie lo hubiera surtido.
-    if (pedido.estado !== EstadoPedido.EN_MOSTRADOR) {
-      const mensajes: Partial<Record<EstadoPedido, string>> = {
-        [EstadoPedido.PENDING_REVIEW]:
-          'Tu pedido todavía está en cola de revisión. Te avisaremos cuando esté listo.',
-        [EstadoPedido.REVIEWING]:
-          'Bodega está preparando tu pedido. Podrás avisar tu llegada cuando esté listo.',
-        [EstadoPedido.WAITING_CUSTOMER_APPROVAL]:
-          'Tienes una propuesta pendiente de aprobar. Tu pedido estará listo cuando la respondas.',
-        [EstadoPedido.EN_ASESORIA]:
-          'Un asesor está viendo tu pedido. Podrás avisar tu llegada cuando esté listo.',
-        [EstadoPedido.PENDING_PAID]:
-          'Tu pedido ya pasó a caja. Pasa a la ventanilla que te indiquen.',
-        [EstadoPedido.PAID]:
-          'Tu pedido ya está pagado. Pasa a mostrador a recogerlo.',
-        [EstadoPedido.SHIPPED]:
-          'Tu pedido ya fue enviado.',
-        [EstadoPedido.COMPLETED]: 'Ese pedido ya fue entregado.',
-        [EstadoPedido.CANCELLED]: 'Ese pedido está cancelado.',
-      };
-      throw new BadRequestException(
-        mensajes[pedido.estado] ??
-          'Tu pedido todavía no está listo para revisarse en tienda.',
-      );
-    }
+    // Oct 2026: la regla y sus mensajes viven en un solo lugar
+    // (`pedidos/core/llegada-aviso.util.ts`). Antes estaban duplicados aquí y
+    // en `kiosko-llegada.service.ts`, y ya habían divergido: el mismo estado
+    // daba dos textos distintos según por dónde avisara el cliente.
+    const motivo = motivoNoAvisable(pedido);
+    if (motivo) throw new BadRequestException(motivo.message);
 
     return this.kioskoLlegada.confirmarDesdeCliente(pedidoId);
   }

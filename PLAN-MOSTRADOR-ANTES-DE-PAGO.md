@@ -343,6 +343,30 @@ La distinción kiosko/web importa: un pedido de kiosko se hizo **en la tienda**,
 así que el cliente está ahí por definición. Solo los pedidos web necesitan el
 aviso.
 
+#### Actualización (oct 2026): el operador puede abrir el gate
+
+El gate de D5 tiene un punto ciego que el negocio reportó: hay clientes que
+llegan a tienda y van **directo al mostrador**, sin teléfono a la mano o sin el
+folio. Su pedido web está listo, pero el gate lo esconde — y el operador no
+tenía forma de encontrarlo ni de hacerlo aparecer, aunque lo tuviera enfrente.
+
+Se agregaron tres cosas:
+
+- `POST /pedidos/mostrador/:id/marcar-llegada` — el operador marca la llegada en
+  nombre del cliente. Escribe `CanalLlegada.MOSTRADOR` (el valor que el enum
+  reservaba desde PR7 y nunca se usaba) y `llegadaAnunciadaPor` con el nombre
+  del operador. Registra en historial. **NO cambia el estado.**
+- `GET /pedidos/mostrador/sin-aviso` — la cara visible del contador `sinCliente`
+  del monitor: los pedidos web en `EN_MOSTRADOR` sin aviso vigente. Es la
+  pestaña "Sin aviso" de la consola.
+- `MostradorService.buscarPedidos` ahora incluye `EN_MOSTRADOR` (antes solo
+  PAID/SHIPPED, así que el buscador era ciego justo a los pedidos en revisión).
+
+La escritura del aviso se centralizó en `KioskoLlegadaService.registrarAviso` y
+la regla de "¿se puede avisar?" en `pedidos/core/llegada-aviso.util.ts` — los
+tres caminos (kiosko, app del cliente, mostrador) compartían lógica duplicada y
+sus mensajes ya habían divergido.
+
 ### 3.5 Quién hace qué
 
 | Rol | Antes | Ahora |

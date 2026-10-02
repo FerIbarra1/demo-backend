@@ -113,6 +113,41 @@ export class MostradorController {
     );
   }
 
+  /**
+   * Oct 2026: la cara visible del contador `sinCliente` del monitor.
+   *
+   * Son los pedidos web en `EN_MOSTRADOR` que nadie ha avisado que llegaron.
+   * El gate de D5 los esconde de la cola, así que sin esta lista el operador no
+   * tenía forma de encontrar al cliente que llegó sin teléfono ni folio.
+   *
+   * Ruta fija: va ANTES de `:id` por la misma razón que `cola` y `listos`.
+   */
+  @Get('sin-aviso')
+  @ApiOperation({
+    summary:
+      'Oct 2026: pedidos web listos que nadie ha avisado que llegaron. ' +
+      'El operador los identifica y marca la llegada con POST :id/marcar-llegada.',
+  })
+  @ApiQuery({ name: 'tiendaId', required: false, type: Number })
+  @ApiQuery({ name: 'pagina', required: false, type: Number })
+  @ApiQuery({ name: 'limite', required: false, type: Number })
+  async listarSinAviso(
+    @CurrentUser() user: any,
+    @Query('tiendaId') tiendaId?: string,
+    @Query('pagina') pagina?: string,
+    @Query('limite') limite?: string,
+  ) {
+    const tienda =
+      user.rol === RolUsuario.ADMIN && tiendaId
+        ? parseInt(tiendaId, 10)
+        : user.tiendaId;
+    return this.mostradorService.obtenerSinAviso(
+      tienda,
+      pagina ? parseInt(pagina, 10) : 1,
+      limite ? parseInt(limite, 10) : 20,
+    );
+  }
+
   @Get('buscar')
   @ApiOperation({
     summary:
@@ -186,6 +221,33 @@ export class MostradorController {
     @CurrentUser() user: any,
   ) {
     return this.mostradorService.descartarLlegada(id, user);
+  }
+
+  @Post(':id/marcar-llegada')
+  @ApiOperation({
+    summary:
+      'Oct 2026: el operador marca la llegada en nombre del cliente (llegó ' +
+      'sin teléfono o sin folio). Escribe CanalLlegada.MOSTRADOR y hace ' +
+      'aparecer el pedido en la cola. No cambia el estado.',
+  })
+  async marcarLlegada(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: any,
+  ) {
+    return this.mostradorService.marcarLlegada(id, user);
+  }
+
+  @Post(':id/devolver-a-cola')
+  @ApiOperation({
+    summary:
+      'Oct 2026: deshace un "Llamar por la TV". Saca el folio del panel ' +
+      '"Atendiendo" y lo regresa a la lista de espera. No cambia el estado.',
+  })
+  async devolverACola(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: any,
+  ) {
+    return this.mostradorService.devolverACola(id, user);
   }
 
   @Post(':id/liberar')

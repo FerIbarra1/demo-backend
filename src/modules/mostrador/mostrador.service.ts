@@ -9,6 +9,7 @@ import { recalcularTotalesPedido } from '../pedidos/core/totales.util';
 import { PreciosService } from '../precios/precios.service';
 import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../precios/precio-lista.util';
 import { ItemAjusteDto } from './dto/accion-mostrador.dto';
+import { KioskoLlegadaService } from '../kiosko/kiosko-llegada.service';
 import { UserContext } from '../../types/pedido.types';
 
 /**
@@ -51,6 +52,7 @@ export class MostradorService {
     private readonly reposicion: ReposicionService,
     private readonly realtime: RealtimeService,
     private readonly precios: PreciosService,
+    private readonly llegada: KioskoLlegadaService,
   ) {}
 
   /**
@@ -125,10 +127,18 @@ export class MostradorService {
   /**
    * Búsqueda rápida por número exacto o fragmento del nombre del cliente.
    * Restringe a la tienda del usuario (salvo ADMIN).
+   *
+   * Oct 2026: incluye `EN_MOSTRADOR`. Antes solo buscaba en PAID/SHIPPED, así
+   * que el buscador del mostrador era CIEGO a los pedidos que están esperando
+   * revisión — justo los que el operador necesita encontrar cuando el cliente
+   * llega sin folio. El caso de uso que lo motiva: el cliente llega a tienda,
+   * dice su nombre, y el operador no podía encontrarlo.
    */
   async buscarPedidos(q: string, usuario: UserContext, tiendaId?: number) {
     const where: Prisma.PedidoWhereInput = {
-      estado: { in: [EstadoPedido.PAID, EstadoPedido.SHIPPED] },
+      estado: {
+        in: [EstadoPedido.EN_MOSTRADOR, EstadoPedido.PAID, EstadoPedido.SHIPPED],
+      },
       OR: [
         { numeroPedido: { contains: q, mode: 'insensitive' } },
         { clienteNombre: { contains: q, mode: 'insensitive' } },
@@ -233,6 +243,73 @@ export class MostradorService {
       // excluye), así que en la práctica esto es true para todos los WEB.
       clienteEnTienda: Boolean(
         p.llegadaAnunciadaAt && !p.llegadaDescartadaAt,
+      ),
+    }));
+
+    return {
+      data,
+      meta: {
+        total,
+        pagina,
+        limite,
+        totalPaginas: Math.ceil(total / limite),
+      },
+    };
+  }
+
+  /**
+   * Oct 2026: pedidos web que están listos pero NADIE ha avisado que llegó.
+   *
+   * Es la cara visible del contador `sinCliente` del monitor
+   * (`mostrador-monitor.service.ts`). Existe porque el gate de D5 esconde
+   * estos pedidos de la cola: un cliente web en `EN_MOSTRADOR` sin aviso es
+   * invisible, y si llega a tienda sin teléfono o sin el folio, el operador no
+   * tenía forma de encontrarlo ni de hacerlo aparecer.
+   *
+   * El operador los ve aquí, identifica al cliente, y marca la llegada con
+   * `marcarLlegada` — momento en el que el pedido pasa a la cola normal con su
+   * badge EN TIENDA.
+   *
+   * Orden: los más viejos primero. Son los que llevan más tiempo atorados sin
+   * que nadie los persiga, así que son los que más urge atender.
+   */
+  async obtenerSinAviso(tiendaId: number, pagina = 1, limite = 20) {
+    const skip = (pagina - 1) * limite;
+    const where: Prisma.PedidoWhereInput = {
+      tiendaId,
+      estado: EstadoPedido.EN_MOSTRADOR,
+      canalOrigen: CanalOrigen.WEB,
+      // Mismo predicado que el contador `sinCliente` del monitor: sin aviso, o
+      // con el aviso descartado por el operador (el cliente no estaba).
+      OR: [
+        { llegadaAnunciadaAt: null },
+        { llegadaDescartadaAt: { not: null } },
+      ],
+    };
+
+    const [pedidos, total] = await Promise.all([
+      this.prisma.pedido.findMany({
+        where,
+        include: {
+          items: true,
+          tienda: true,
+          usuario: { select: { nombre: true, telefono: true, email: true } },
+        },
+        orderBy: [{ fechaPedido: 'asc' }, { id: 'asc' }],
+        skip,
+        take: limite,
+      }),
+      this.prisma.pedido.count({ where }),
+    ]);
+
+    const ahora = Date.now();
+    const data = pedidos.map((p) => ({
+      ...p,
+      // Mismo nombre que en el monitor, para que la consola y la TV hablen
+      // igual de "cuánto lleva esperando este pedido".
+      minutosEsperando: Math.max(
+        0,
+        Math.floor((ahora - p.fechaPedido.getTime()) / 60_000),
       ),
     }));
 
@@ -697,6 +774,92 @@ export class MostradorService {
 
     this.logger.log(
       `Pedido ${pedidoId} (${completo.numeroPedido}): aviso de llegada descartado por ${usuario.nombre}`,
+    );
+
+    return { ok: true, pedidoId };
+  }
+
+  /**
+   * Oct 2026: el operador marca la llegada EN NOMBRE del cliente.
+   *
+   * El caso que lo motiva: hay clientes que llegan a tienda y van directo al
+   * mostrador, sin teléfono a la mano o sin el folio. Con el gate de D5 su
+   * pedido web está OCULTO de la cola hasta que alguien avisa, así que sin esta
+   * acción el operador no tenía forma de hacerlo aparecer — el pedido quedaba
+   * atrapado aunque el cliente estuviera enfrente.
+   *
+   * Toda la escritura vive en `KioskoLlegadaService.confirmarDesdeMostrador`
+   * (idempotencia, límite de tasa, realtime e historial compartidos con los
+   * caminos del kiosko y de la app del cliente). Aquí solo se delega, para que
+   * la consola tenga su endpoint junto a las demás acciones del mostrador.
+   *
+   * NO cambia el estado del pedido: la llegada es ortogonal al ciclo de vida.
+   */
+  async marcarLlegada(pedidoId: number, usuario: UserContext) {
+    // Validación de tienda/rol aquí, no en el servicio de llegada: `KioskoModule`
+    // no puede importar `PedidosModule` (sería un ciclo, porque `PedidosModule`
+    // ya importa `KioskoModule`).
+    await this.access.cargarYValidar(pedidoId, usuario);
+    return this.llegada.confirmarDesdeMostrador(pedidoId, usuario);
+  }
+
+  /**
+   * Oct 2026: deshace un "Llamar por la TV".
+   *
+   * En cajero, tomar un pedido se puede deshacer (`liberarPedidoCajero` lo
+   * devuelve a la cola). En mostrador no había vuelta atrás: `llamar` movía el
+   * folio al panel "Atendiendo" de la TV y `PedidoStateService` solo limpiaba
+   * `llamadoAt` al SALIR de `EN_MOSTRADOR`. Si el operador se equivocaba de
+   * folio, el cliente equivocado quedaba anunciado en la pantalla y el correcto
+   * ya no estaba en la lista de espera.
+   *
+   * NO se llama `liberar` a propósito: en mostrador ese nombre ya significa
+   * `EN_MOSTRADOR → PENDING_PAID` (el pedido entra al ERP). Devolver a la cola
+   * es lo contrario de eso.
+   *
+   * Tampoco asigna el pedido a una persona: el mostrador es una cola lineal por
+   * decisión D16, no un modelo de ventanillas 1:1 como el cajero.
+   */
+  async devolverACola(pedidoId: number, usuario: UserContext) {
+    const pedido = await this.access.cargarYValidar(pedidoId, usuario);
+    this.exigirEstado(pedido.estado, 'devolver a la cola');
+
+    const completo = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      select: { numeroPedido: true, tiendaId: true, llamadoAt: true },
+    });
+    if (!completo) throw new BadRequestException('Pedido no encontrado');
+
+    if (completo.llamadoAt === null) {
+      throw new BadRequestException(
+        'Este pedido no está anunciado en la pantalla, así que no hay nada que regresar a la cola.',
+      );
+    }
+
+    await this.prisma.pedido.update({
+      where: { id: pedidoId },
+      data: { llamadoAt: null },
+    });
+
+    await this.prisma.historialPedido.create({
+      data: {
+        pedidoId,
+        estadoAnterior: pedido.estado,
+        estadoNuevo: pedido.estado,
+        observacion: `Devuelto a la cola por ${usuario.nombre}`,
+        usuarioId: usuario.userId,
+        usuarioNombre: usuario.nombre,
+      },
+    });
+
+    // La TV tiene que recomputar: el folio sale del panel "Atendiendo" y vuelve
+    // a la lista de espera. Sin esto seguiría anunciado hasta el siguiente poll.
+    this.realtime.emitToTienda(completo.tiendaId, 'monitor.invalidado', {
+      pedidoId,
+    });
+
+    this.logger.log(
+      `Pedido ${pedidoId} (${completo.numeroPedido}): devuelto a la cola por ${usuario.nombre}`,
     );
 
     return { ok: true, pedidoId };

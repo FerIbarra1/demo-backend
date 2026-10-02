@@ -5,6 +5,7 @@ import { MostradorMonitorService } from './mostrador-monitor.service';
 import { MostradorMonitorController } from './mostrador-monitor.controller';
 import { PedidosModule } from '../pedidos/pedidos.module';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { KioskoModule } from '../kiosko/kiosko.module';
 
 /**
  * Módulo Mostrador.
@@ -21,6 +22,12 @@ import { RealtimeModule } from '../realtime/realtime.module';
  *   - `MostradorMonitorController` (rol MOSTRADOR_MONITOR) — la TV de la pared,
  *     solo lectura.
  *
+ * Oct 2026: importa `KioskoModule` para reutilizar
+ * `KioskoLlegadaService.confirmarDesdeMostrador` — el operador puede marcar la
+ * llegada en nombre del cliente (el que llega sin teléfono o sin folio). La
+ * escritura, idempotencia, límite de tasa y realtime del aviso viven en un solo
+ * lugar, compartidas con los caminos del kiosko y de la app del cliente.
+ *
  * IMPORTANTE — orden de registro: el monitor va ANTES del controller de
  * operador. Ambos viven bajo `pedidos/mostrador`, y la ruta fija `monitor`
  * tiene que matchear antes que los `:id` genéricos, o el RolesGuard rechaza al
@@ -28,7 +35,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
  * para bodega y cajero.
  */
 @Module({
-  imports: [PedidosModule, RealtimeModule],
+  imports: [PedidosModule, RealtimeModule, KioskoModule],
   controllers: [MostradorMonitorController, MostradorController],
   providers: [MostradorService, MostradorMonitorService],
 })

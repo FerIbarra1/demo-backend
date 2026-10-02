@@ -89,7 +89,11 @@ describe('anunciarLlegada — solo cuando el pedido está listo (F16)', () => {
       ...pedidoBase,
       modoEntrega: ModoEntrega.DOMICILIO,
     });
-    await expect(svc.anunciarLlegada(1, 7)).rejects.toThrow(/recoger en tienda/i);
+    // Oct 2026: el texto se unificó con el del kiosko y el de mostrador
+    // (`pedidos/core/llegada-aviso.util.ts`). Antes este camino decía "no es
+    // para recoger en tienda" y el kiosko "es a domicilio, no se recoge en
+    // tienda" — dos textos para el mismo hecho.
+    await expect(svc.anunciarLlegada(1, 7)).rejects.toThrow(/domicilio/i);
   });
 
   it('acepta también un pedido de kiosko listo', async () => {
