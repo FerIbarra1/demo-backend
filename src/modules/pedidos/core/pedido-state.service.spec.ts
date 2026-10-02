@@ -30,11 +30,20 @@ function crearServicio(estadoActual: EstadoPedido) {
       updateMany,
     },
     historialPedido: { create: jest.fn().mockResolvedValue({}) },
-    pedidoPendienteEnvio: { create: jest.fn().mockResolvedValue({}) },
+    pedidoPendienteEnvio: {
+      create: jest.fn().mockResolvedValue({}),
+      // El guard de PENDING_PAID consulta si el pedido YA tiene fila en la
+      // cola del ERP. En estos tests no hay ninguna, así que el caller debe
+      // pasar `encolarFirebird: true` (que es lo que hace el código real).
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
   };
 
   const prisma = {
     $transaction: jest.fn(async (fn: any) => fn(tx)),
+    // `dispararEfectos` relee el pedido DESPUÉS del commit para mandar la
+    // notificación. Antes eso vivía dentro de la transacción y no hacía falta.
+    pedido: { findUnique: jest.fn().mockResolvedValue({ id: 1, tiendaId: 5 }) },
   };
 
   const svc = new PedidoStateService(
@@ -50,20 +59,26 @@ function crearServicio(estadoActual: EstadoPedido) {
 
 const usuario = { userId: 3, nombre: 'Operador', rol: 'MOSTRADOR' } as never;
 
-/** Intenta una transición y dice si la máquina la aceptó. */
+/**
+ * Intenta una transición y dice si la máquina la aceptó.
+ *
+ * Añade `encolarFirebird` cuando el destino es PENDING_PAID, porque la máquina
+ * lo exige (un pedido en ese estado sin fila en la cola del ERP es invisible
+ * al agente para siempre). El guard tiene su propio test más abajo; aquí sólo
+ * se pregunta qué aristas permite `TRANSICIONES`.
+ */
 async function intenta(
   desde: EstadoPedido,
   hacia: EstadoPedido,
   opts: Record<string, unknown> = {},
 ): Promise<boolean> {
   const { svc } = crearServicio(desde);
+  const opciones =
+    hacia === EstadoPedido.PENDING_PAID && opts.encolarFirebird === undefined
+      ? { ...opts, encolarFirebird: true }
+      : opts;
   try {
-    await svc.cambiarEstado(
-      1,
-      { nuevoEstado: hacia } as never,
-      usuario,
-      opts as never,
-    );
+    await svc.cambiarEstado(1, { nuevoEstado: hacia } as never, usuario, opciones as never);
     return true;
   } catch {
     return false;
@@ -77,9 +92,9 @@ describe('TRANSICIONES con EN_MOSTRADOR (F16)', () => {
     });
 
     it('WAITING_CUSTOMER_APPROVAL → EN_MOSTRADOR (el cliente aprobó)', async () => {
-      expect(
-        await intenta(EstadoPedido.WAITING_CUSTOMER_APPROVAL, EstadoPedido.EN_MOSTRADOR),
-      ).toBe(true);
+      expect(await intenta(EstadoPedido.WAITING_CUSTOMER_APPROVAL, EstadoPedido.EN_MOSTRADOR)).toBe(
+        true,
+      );
     });
 
     it('EN_ASESORIA → EN_MOSTRADOR (contrapropuesta sin pendientes)', async () => {
@@ -115,9 +130,9 @@ describe('TRANSICIONES con EN_MOSTRADOR (F16)', () => {
     });
 
     it('WAITING_CUSTOMER_APPROVAL → PENDING_PAID sigue permitido (domicilio)', async () => {
-      expect(
-        await intenta(EstadoPedido.WAITING_CUSTOMER_APPROVAL, EstadoPedido.PENDING_PAID),
-      ).toBe(true);
+      expect(await intenta(EstadoPedido.WAITING_CUSTOMER_APPROVAL, EstadoPedido.PENDING_PAID)).toBe(
+        true,
+      );
     });
 
     it('PENDING_REVIEW NO puede saltar a PENDING_PAID', async () => {
@@ -167,24 +182,60 @@ describe('TRANSICIONES con EN_MOSTRADOR (F16)', () => {
   describe('el encolado a Firebird solo aplica a PENDING_PAID', () => {
     it('liberar desde mostrador encola', async () => {
       const { svc, tx } = crearServicio(EstadoPedido.EN_MOSTRADOR);
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.PENDING_PAID } as never,
-        usuario,
-        { encolarFirebird: true } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.PENDING_PAID } as never, usuario, {
+        encolarFirebird: true,
+      } as never);
       expect(tx.pedidoPendienteEnvio.create).toHaveBeenCalled();
     });
 
     it('mandar a mostrador NO encola', async () => {
       const { svc, tx } = crearServicio(EstadoPedido.REVIEWING);
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.EN_MOSTRADOR } as never,
-        usuario,
-        { encolarFirebird: false } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.EN_MOSTRADOR } as never, usuario, {
+        encolarFirebird: false,
+      } as never);
       expect(tx.pedidoPendienteEnvio.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('INVARIANTE: PENDING_PAID exige encolar a Firebird', () => {
+    it('rechaza ir a PENDING_PAID sin encolarFirebird y sin fila previa', async () => {
+      // Un pedido en PENDING_PAID sin fila en `PedidoPendienteEnvio` es
+      // invisible al agente, nunca recibe folio y se queda atascado para
+      // siempre. El comentario de `encolarFirebird` ya lo declaraba
+      // obligatorio; este test fija que la máquina lo verifique.
+      expect(
+        await intenta(EstadoPedido.EN_MOSTRADOR, EstadoPedido.PENDING_PAID, {
+          encolarFirebird: false,
+        }),
+      ).toBe(false);
+    });
+
+    it('acepta ir a PENDING_PAID con encolarFirebird', async () => {
+      expect(
+        await intenta(EstadoPedido.EN_MOSTRADOR, EstadoPedido.PENDING_PAID, {
+          encolarFirebird: true,
+        }),
+      ).toBe(true);
+    });
+
+    it('acepta si el pedido YA tenía fila en la cola del ERP', async () => {
+      // Reintento idempotente: la fila la creó una transición anterior, así que
+      // no hace falta volver a encolar.
+      const { svc, tx } = crearServicio(EstadoPedido.EN_MOSTRADOR);
+      (tx.pedidoPendienteEnvio.findFirst as jest.Mock).mockResolvedValue({ id: 9 });
+      await expect(
+        svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.PENDING_PAID } as never, usuario, {
+          encolarFirebird: false,
+        } as never),
+      ).resolves.toBeDefined();
+    });
+
+    it('no exige el flag para otros destinos', async () => {
+      expect(
+        await intenta(EstadoPedido.EN_MOSTRADOR, EstadoPedido.REVIEWING, {
+          asignacion: 'limpiar',
+        }),
+      ).toBe(true);
     });
   });
 });

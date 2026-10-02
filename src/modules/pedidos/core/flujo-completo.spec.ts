@@ -1,5 +1,6 @@
 import { EstadoPedido, ModoEntrega, CanalOrigen, Prisma } from '@prisma/client';
 import { destinoTrasSurtido } from './destino-post-surtido.util';
+import { PedidoStateService } from './pedido-state.service';
 
 /**
  * F16 (sep 2026): tests del camino COMPLETO del flujo nuevo.
@@ -51,10 +52,13 @@ function crearServicio(estadoInicial: EstadoPedido, modoEntrega: ModoEntrega) {
     },
   };
 
-  const prisma = { $transaction: jest.fn(async (fn: any) => fn(tx)) };
+  const prisma = {
+    $transaction: jest.fn(async (fn: any) => fn(tx)),
+    // `cambiarEstadoPorSistema` lee el estado actual fuera de la transacción
+    // para poder saltarse la transición si el pedido ya está en ese estado.
+    pedido: { findUnique: jest.fn(async () => ({ estado })) },
+  };
 
-  // Import diferido para no acoplar el mock al constructor real.
-  const { PedidoStateService } = require('./pedido-state.service');
   const svc = new PedidoStateService(
     prisma as never,
     { enviar: jest.fn().mockResolvedValue(undefined) } as never,
@@ -78,12 +82,11 @@ describe('Camino completo del flujo (F16)', () => {
 
       // 1) Bodega confirma el surtido: el helper decide el destino.
       const destino = destinoTrasSurtido(ModoEntrega.KIOSKO);
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: destino.estado } as never,
-        usuario,
-        { asignacion: 'limpiar', reloj: 'detener', encolarFirebird: destino.encolarFirebird } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: destino.estado } as never, usuario, {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        encolarFirebird: destino.encolarFirebird,
+      } as never);
 
       expect(transiciones[0]).toEqual({
         de: EstadoPedido.REVIEWING,
@@ -93,12 +96,10 @@ describe('Camino completo del flujo (F16)', () => {
       expect(encolados).toHaveLength(0);
 
       // 2) Mostrador libera: AQUÍ entra al ERP.
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.PENDING_PAID } as never,
-        usuario,
-        { encolarFirebird: true, invalidarMonitor: true } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.PENDING_PAID } as never, usuario, {
+        encolarFirebird: true,
+        invalidarMonitor: true,
+      } as never);
 
       expect(transiciones[1]).toEqual({
         de: EstadoPedido.EN_MOSTRADOR,
@@ -116,12 +117,7 @@ describe('Camino completo del flujo (F16)', () => {
       });
 
       // 4) Mostrador entrega.
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.COMPLETED } as never,
-        usuario,
-        {},
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.COMPLETED } as never, usuario, {});
       expect(transiciones[3]).toEqual({
         de: EstadoPedido.PAID,
         a: EstadoPedido.COMPLETED,
@@ -138,48 +134,37 @@ describe('Camino completo del flujo (F16)', () => {
       );
 
       // El cliente pide cambios → vuelve a bodega SIN encolar.
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.REVIEWING } as never,
-        usuario,
-        { asignacion: 'limpiar', reloj: 'reanudar' } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.REVIEWING } as never, usuario, {
+        asignacion: 'limpiar',
+        reloj: 'reanudar',
+      } as never);
       expect(transiciones[0].a).toBe(EstadoPedido.REVIEWING);
       expect(encolados).toHaveLength(0);
 
       // Bodega surte lo nuevo → vuelve a mostrador, tampoco encola.
       const destino = destinoTrasSurtido(ModoEntrega.KIOSKO);
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: destino.estado } as never,
-        usuario,
-        { asignacion: 'limpiar', reloj: 'detener', encolarFirebird: destino.encolarFirebird } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: destino.estado } as never, usuario, {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        encolarFirebird: destino.encolarFirebird,
+      } as never);
       expect(transiciones[1].a).toBe(EstadoPedido.EN_MOSTRADOR);
       expect(encolados).toHaveLength(0);
 
       // El cliente queda conforme → libera → AHORA sí encola.
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.PENDING_PAID } as never,
-        usuario,
-        { encolarFirebird: true } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.PENDING_PAID } as never, usuario, {
+        encolarFirebird: true,
+      } as never);
       expect(encolados).toEqual([1]);
     });
 
     it('cancelar desde mostrador NO encola al ERP', async () => {
-      const { svc, encolados } = crearServicio(
-        EstadoPedido.EN_MOSTRADOR,
-        ModoEntrega.KIOSKO,
-      );
+      const { svc, encolados } = crearServicio(EstadoPedido.EN_MOSTRADOR, ModoEntrega.KIOSKO);
 
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.CANCELLED } as never,
-        usuario,
-        { asignacion: 'limpiar', reloj: 'detener' } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.CANCELLED } as never, usuario, {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+      } as never);
 
       // El pedido nunca llegó al ERP, así que no hay nada que sincronizar.
       expect(encolados).toHaveLength(0);
@@ -194,12 +179,11 @@ describe('Camino completo del flujo (F16)', () => {
       );
 
       const destino = destinoTrasSurtido(ModoEntrega.DOMICILIO);
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: destino.estado } as never,
-        usuario,
-        { asignacion: 'limpiar', reloj: 'detener', encolarFirebird: destino.encolarFirebird } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: destino.estado } as never, usuario, {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        encolarFirebird: destino.encolarFirebird,
+      } as never);
 
       expect(transiciones[0]).toEqual({
         de: EstadoPedido.REVIEWING,
@@ -211,18 +195,12 @@ describe('Camino completo del flujo (F16)', () => {
     });
 
     it('nunca pasa por EN_MOSTRADOR', async () => {
-      const { svc, transiciones } = crearServicio(
-        EstadoPedido.REVIEWING,
-        ModoEntrega.DOMICILIO,
-      );
+      const { svc, transiciones } = crearServicio(EstadoPedido.REVIEWING, ModoEntrega.DOMICILIO);
 
       const destino = destinoTrasSurtido(ModoEntrega.DOMICILIO);
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: destino.estado } as never,
-        usuario,
-        { encolarFirebird: true } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: destino.estado } as never, usuario, {
+        encolarFirebird: true,
+      } as never);
 
       expect(transiciones.every((t) => t.a !== EstadoPedido.EN_MOSTRADOR)).toBe(true);
     });

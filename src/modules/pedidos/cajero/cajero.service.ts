@@ -108,9 +108,7 @@ export class CajeroService {
       }
       // Un pedido a domicilio no se cobra en ventanilla.
       if (pedido.modoEntrega === ModoEntrega.DOMICILIO) {
-        throw new BadRequestException(
-          'Los pedidos a domicilio no se cobran en ventanilla',
-        );
+        throw new BadRequestException('Los pedidos a domicilio no se cobran en ventanilla');
       }
       if (pedido.cajeroAsignadoId !== null && pedido.cajeroAsignadoId !== usuario.userId) {
         throw new ConflictException('Este pedido ya está asignado a otra ventanilla');
@@ -138,27 +136,30 @@ export class CajeroService {
         },
       });
 
-      if (emitirRealtime) {
-        this.realtime.emitToTienda(pedido.tiendaId, 'pedido.cajero-asignado', {
-          id: pedidoId,
-          numeroPedido: pedidoActualizado.numeroPedido,
-          cajeroAsignadoId: usuario.userId,
-          cajeroAsignadoNombre: usuario.nombre,
-        });
-        this.realtime.emitToPedido(pedidoId, 'pedido.cajero-asignado', {
-          id: pedidoId,
-          cajeroAsignadoId: usuario.userId,
-        });
-      }
-
       return pedidoActualizado;
     });
+
+    // Realtime DESPUÉS del commit: emitir dentro del callback manda el evento
+    // antes de confirmar, y un rollback posterior dejaría a los clientes con
+    // un aviso de algo que nunca pasó.
+    if (emitirRealtime) {
+      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.cajero-asignado', {
+        id: pedidoId,
+        numeroPedido: pedido.numeroPedido,
+        cajeroAsignadoId: usuario.userId,
+        cajeroAsignadoNombre: usuario.nombre,
+      });
+      this.realtime.emitToPedido(pedidoId, 'pedido.cajero-asignado', {
+        id: pedidoId,
+        cajeroAsignadoId: usuario.userId,
+      });
+    }
 
     return pedido;
   }
 
   async liberarPedidoCajero(pedidoId: number, usuario: UserContext) {
-    return this.prisma.$transaction(async (tx) => {
+    const { actualizado, tiendaId } = await this.prisma.$transaction(async (tx) => {
       const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
@@ -191,14 +192,17 @@ export class CajeroService {
         },
       });
 
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.cajero-liberado', {
-        id: pedidoId,
-        numeroPedido: pedidoActualizado.numeroPedido,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.cajero-liberado', { id: pedidoId });
-
-      return pedidoActualizado;
+      return { actualizado: pedidoActualizado, tiendaId: pedido.tiendaId };
     });
+
+    // Realtime DESPUÉS del commit (mismo motivo que en `tomarPedidoCajero`).
+    this.realtime.emitToTienda(tiendaId, 'pedido.cajero-liberado', {
+      id: pedidoId,
+      numeroPedido: actualizado.numeroPedido,
+    });
+    this.realtime.emitToPedido(pedidoId, 'pedido.cajero-liberado', { id: pedidoId });
+
+    return actualizado;
   }
 
   async obtenerMisPedidosCajero(usuarioId: number, tiendaId?: number) {

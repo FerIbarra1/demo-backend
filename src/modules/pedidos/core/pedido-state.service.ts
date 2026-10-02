@@ -14,7 +14,7 @@ import { asignadoANombre } from './pedido-mapper';
 import { pausarReloj, reanudarReloj } from './atencion.util';
 import { CambiarEstadoDto } from '../admin/dto/cambiar-estado.dto';
 import { UserContext } from '../../../types/pedido.types';
-import { EstadoPedido, TipoNotificacion, Prisma } from '@prisma/client';
+import { EstadoPedido, TipoNotificacion, Prisma, RolUsuario } from '@prisma/client';
 
 /**
  * Máquina de estados B2B. Cada estado declara a qué otros puede transicionar.
@@ -258,11 +258,65 @@ export class PedidoStateService {
     // de ella. Es lo que permite que un cambio de estado y otra escritura
     // (ej. crear la propuesta y el mensaje de chat que la muestra) sean
     // atómicos: o quedan los dos, o no queda ninguno.
+    //
+    // En ese caso los efectos externos (realtime, notificación) NO se disparan
+    // aquí: los dispara el caller dueño de la transacción, después de
+    // confirmarla. Si los emitiéramos ahora, saldrían antes del commit.
     if (opts.tx) {
       return this.ejecutarCambio(opts.tx, pedidoId, dto, usuario, opts);
     }
 
-    return this.prisma.$transaction((tx) => this.ejecutarCambio(tx, pedidoId, dto, usuario, opts));
+    const { pedido, efectos } = await this.prisma.$transaction((tx) =>
+      this.ejecutarCambio(tx, pedidoId, dto, usuario, opts),
+    );
+    this.dispararEfectos(pedidoId, efectos);
+    return pedido;
+  }
+
+  /**
+   * Emite el realtime y la notificación de una transición ya confirmada.
+   *
+   * Vive fuera de `ejecutarCambio` a propósito: emitir dentro del callback de
+   * `$transaction` es emitir antes del commit, así que un rollback posterior
+   * dejaba a los clientes con un evento de un cambio que nunca ocurrió.
+   */
+  private dispararEfectos(
+    pedidoId: number,
+    e: {
+      tiendaId: number;
+      estadoAnterior: EstadoPedido;
+      estadoNuevo: EstadoPedido;
+      invalidarMonitor: boolean;
+      notifTipo: TipoNotificacion | null;
+    },
+  ): void {
+    this.realtime.emitToTienda(e.tiendaId, 'pedido.estado', {
+      id: pedidoId,
+      estadoAnterior: e.estadoAnterior,
+      estadoNuevo: e.estadoNuevo,
+    });
+    this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
+      id: pedidoId,
+      estadoAnterior: e.estadoAnterior,
+      estadoNuevo: e.estadoNuevo,
+    });
+    // F13: los monitores (bodega/cajeros) no reaccionan a `pedido.estado`;
+    // necesitan este evento para recomputar slots y colas.
+    if (e.invalidarMonitor) {
+      this.realtime.emitToTienda(e.tiendaId, 'monitor.invalidado', { pedidoId });
+    }
+
+    if (e.notifTipo) {
+      void this.prisma.pedido
+        .findUnique({ where: { id: pedidoId } })
+        .then((pedidoCompleto) => {
+          if (!pedidoCompleto) return;
+          return this.notifications.enviar(pedidoCompleto, e.notifTipo!);
+        })
+        .catch((err) =>
+          this.logger.error(`Error enviando notificación ${e.notifTipo}: ${err.message}`),
+        );
+    }
   }
 
   /**
@@ -299,6 +353,31 @@ export class PedidoStateService {
             "('caller' si un bodeguero lo toma, 'limpiar' si vuelve a la cola, " +
             "'mantener' si se conserva la asignación actual).",
         );
+      }
+
+      // INVARIANTE: `PENDING_PAID ⟺ fila en PedidoPendienteEnvio`.
+      //
+      // Un pedido en PENDING_PAID sin fila en la cola del ERP es invisible al
+      // agente, nunca recibe folio y se queda atascado para siempre. El
+      // comentario de `encolarFirebird` ya lo declaraba obligatorio, pero nada
+      // lo verificaba: un caller futuro que lo omitiera producía exactamente
+      // ese estado irrecuperable, en silencio.
+      //
+      // Se comprueba aquí y no en cada caller para que ninguna transición
+      // nueva pueda olvidarlo. Si el pedido YA tiene fila (p. ej. la creó una
+      // transición anterior) no hace falta volver a encolar.
+      if (estadoNuevo === EstadoPedido.PENDING_PAID && !opts.encolarFirebird) {
+        const yaEncolado = await tx.pedidoPendienteEnvio.findFirst({
+          where: { pedidoId },
+          select: { id: true },
+        });
+        if (!yaEncolado) {
+          throw new BadRequestException(
+            'Transición a PENDING_PAID requiere opts.encolarFirebird: un pedido ' +
+              'en ese estado sin fila en la cola del ERP es invisible al agente ' +
+              'y se queda atascado para siempre.',
+          );
+        }
       }
 
       const ahora = new Date();
@@ -358,41 +437,25 @@ export class PedidoStateService {
         `Pedido ${pedidoId}: ${estadoAnterior} → ${estadoNuevo} (por ${usuario.nombre})`,
       );
 
-      // Realtime: notificar a la tienda y al room del pedido.
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior,
-        estadoNuevo,
-        asignadoAId: pedidoActualizado.asignadoAId,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior,
-        estadoNuevo,
-      });
-      // F13: los monitores (bodega/cajeros) no reaccionan a `pedido.estado`;
-      // necesitan este evento para recomputar slots y colas.
-      if (opts.invalidarMonitor) {
-        this.realtime.emitToTienda(pedido.tiendaId, 'monitor.invalidado', { pedidoId });
-      }
-
-      // Notificar al cliente según el estado nuevo
+      // Los efectos externos (realtime y notificación) se DEVUELVEN en vez de
+      // emitirse aquí. Emitir dentro del callback de `$transaction` significa
+      // emitir ANTES del commit: si la transacción hace rollback después (por
+      // el encolado, por el historial, o por un `efectos` que falle), los
+      // clientes ya recibieron un evento de un cambio que nunca ocurrió.
+      //
+      // El caller los dispara cuando la transacción ya confirmó.
       const notifTipo = this.notifTipoParaEstado(estadoNuevo);
-      if (notifTipo) {
-        const pedidoCompleto = await tx.pedido.findUnique({ where: { id: pedidoId } });
-        if (pedidoCompleto) {
-          // Fire-and-forget fuera de la transacción
-          setImmediate(() => {
-            this.notifications
-              .enviar(pedidoCompleto, notifTipo)
-              .catch((err) =>
-                this.logger.error(`Error enviando notificación ${notifTipo}: ${err.message}`),
-              );
-          });
-        }
-      }
 
-      return pedidoActualizado;
+      return {
+        pedido: pedidoActualizado,
+        efectos: {
+          tiendaId: pedido.tiendaId,
+          estadoAnterior,
+          estadoNuevo,
+          invalidarMonitor: opts.invalidarMonitor ?? false,
+          notifTipo,
+        },
+      };
     }
   }
 
@@ -482,87 +545,44 @@ export class PedidoStateService {
 
   /**
    * Transición de estado disparada por un sistema externo (agente Firebird),
-   * sin guards de rol humano. Reutiliza la máquina de estados (TRANSICIONES)
-   * + historial + realtime + notificación, para que ninguna vía de cambio de
-   * estado duplique o salte la validación de transiciones.
+   * sin guards de rol humano.
    *
-   * No valida acceso (el caller ya lo hizo o es un sistema de confianza).
+   * Delega en `cambiarEstado` con un usuario SISTEMA en vez de reimplementar
+   * la transición. Antes era una segunda implementación de ~70 líneas que ya
+   * había divergido: no soportaba `invalidarMonitor`, no limpiaba `llamadoAt`
+   * al salir de EN_MOSTRADOR, y no aplicaba `reloj` ni `asignacion`. Con una
+   * sola implementación, cualquier arreglo futuro a la máquina (como el guard
+   * de `encolarFirebird`) vale también para el camino del agente.
+   *
+   * El rol ADMIN es el que usa el sistema a propósito: `PedidoAccessService`
+   * exime a ADMIN de la validación de tienda, que es justo lo que un proceso
+   * de confianza necesita. No hay escalada de privilegios: el caller de este
+   * método es el agente autenticado por `ApiKeyGuard`.
+   *
+   * `saltarSiIgual` conserva el comportamiento anterior: si el pedido ya está
+   * en ese estado, no hay transición que hacer y no se escribe historial.
    */
   async cambiarEstadoPorSistema(
     pedidoId: number,
     nuevoEstado: EstadoPedido,
     opts: { observacion?: string; usuarioNombre?: string } = {},
   ) {
-    return this.prisma.$transaction(async (tx) => {
-      const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
-      if (!pedido) throw new NotFoundException('Pedido no encontrado');
-
-      const estadoAnterior = pedido.estado;
-      if (estadoAnterior === nuevoEstado) return pedido;
-
-      const permitidas = TRANSICIONES[estadoAnterior];
-      if (!permitidas.includes(nuevoEstado)) {
-        throw new BadRequestException(
-          `Transición no permitida: ${estadoAnterior} → ${nuevoEstado}`,
-        );
-      }
-
-      const result = await tx.pedido.updateMany({
-        where: { id: pedidoId, estado: estadoAnterior },
-        data: { estado: nuevoEstado },
-      });
-      if (result.count !== 1) {
-        throw new ConflictException(
-          'El pedido cambió mientras se procesaba. Actualiza la pantalla e inténtalo de nuevo.',
-        );
-      }
-      const pedidoActualizado = await tx.pedido.findUnique({ where: { id: pedidoId } });
-      if (!pedidoActualizado) throw new NotFoundException('Pedido no encontrado');
-
-      await tx.historialPedido.create({
-        data: {
-          pedidoId,
-          estadoAnterior,
-          estadoNuevo: nuevoEstado,
-          observacion:
-            opts.observacion || `Cambio de estado por ${opts.usuarioNombre ?? 'sistema'}`,
-          usuarioId: null,
-          usuarioNombre: opts.usuarioNombre ?? 'SISTEMA',
-        },
-      });
-
-      this.logger.log(
-        `Pedido ${pedidoId}: ${estadoAnterior} → ${nuevoEstado} (por ${opts.usuarioNombre ?? 'sistema'})`,
-      );
-
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior,
-        estadoNuevo: nuevoEstado,
-        asignadoAId: pedidoActualizado.asignadoAId,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior,
-        estadoNuevo: nuevoEstado,
-      });
-
-      const notifTipo = this.notifTipoParaEstado(nuevoEstado);
-      if (notifTipo) {
-        const pedidoCompleto = await tx.pedido.findUnique({ where: { id: pedidoId } });
-        if (pedidoCompleto) {
-          setImmediate(() => {
-            this.notifications
-              .enviar(pedidoCompleto, notifTipo)
-              .catch((err) =>
-                this.logger.error(`Error enviando notificación ${notifTipo}: ${err.message}`),
-              );
-          });
-        }
-      }
-
-      return pedidoActualizado;
+    const actual = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      select: { estado: true },
     });
+    if (!actual) throw new NotFoundException('Pedido no encontrado');
+    if (actual.estado === nuevoEstado) return;
+
+    const nombre = opts.usuarioNombre ?? 'SISTEMA';
+    return this.cambiarEstado(
+      pedidoId,
+      {
+        nuevoEstado,
+        observacion: opts.observacion || `Cambio de estado por ${nombre}`,
+      },
+      { userId: 0, nombre, rol: RolUsuario.ADMIN },
+    );
   }
 
   /**

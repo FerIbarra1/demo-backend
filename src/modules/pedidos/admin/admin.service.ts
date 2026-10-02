@@ -57,7 +57,9 @@ export class AdminService {
       this.prisma.pedido.findMany({
         where,
         include: {
-          items: { select: { id: true, productoNombre: true, cantidad: true, precioUnitario: true } },
+          items: {
+            select: { id: true, productoNombre: true, cantidad: true, precioUnitario: true },
+          },
           tienda: { select: { nombre: true } },
           usuario: { select: { nombre: true, email: true } },
         },
@@ -163,7 +165,7 @@ export class AdminService {
     // evitar una race condition entre la lectura y la escritura.
     const estadoAnterior = pedido.estado;
 
-    return this.prisma.$transaction(async (tx) => {
+    const resultado = await this.prisma.$transaction(async (tx) => {
       const result = await tx.pedido.updateMany({
         // C3: la guarda de "ya está PAID" ahora vive dentro del WHERE del
         // update (race-safe atómico). Si el pedido ya está PAID, updateMany
@@ -183,7 +185,8 @@ export class AdminService {
           where: { id: pedidoId },
           select: { estado: true },
         });
-        if (actual?.estado === EstadoPedido.PAID) return actual;
+        // Idempotencia: si ya estaba PAID, no hay transición que anunciar.
+        if (actual?.estado === EstadoPedido.PAID) return { yaPagado: true as const };
         throw new ConflictException('El estado del pedido cambió durante el pago');
       }
       const pedidoActualizado = await tx.pedido.findUnique({ where: { id: pedidoId } });
@@ -194,38 +197,48 @@ export class AdminService {
           pedidoId,
           estadoAnterior,
           estadoNuevo: EstadoPedido.PAID,
-          observacion:
-            body?.referencia
-              ? `Pago confirmado (ref: ${body.referencia})`
-              : 'Pago confirmado por sistema externo',
+          observacion: body?.referencia
+            ? `Pago confirmado (ref: ${body.referencia})`
+            : 'Pago confirmado por sistema externo',
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
         },
       });
 
-      const pedidoCompleto = await tx.pedido.findUnique({ where: { id: pedidoId } });
-      if (pedidoCompleto) {
-        setImmediate(() => {
-          this.notifications
-            .enviar(pedidoCompleto, TipoNotificacion.PAGO_CONFIRMADO)
-            .catch((err) =>
-              this.logger.error(`Error enviando notificación PAGO_CONFIRMADO: ${err.message}`),
-            );
-        });
-      }
-
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.PENDING_PAID,
-        estadoNuevo: EstadoPedido.PAID,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-        id: pedidoId,
-        estadoAnterior: EstadoPedido.PENDING_PAID,
-        estadoNuevo: EstadoPedido.PAID,
-      });
-
-      return pedidoActualizado;
+      // Los efectos externos se devuelven y se disparan DESPUÉS del commit:
+      // emitirlos aquí los mandaría antes de confirmar, y un rollback
+      // posterior dejaría a los clientes con un evento de un cambio que nunca
+      // ocurrió.
+      return { yaPagado: false as const, pedido: pedidoActualizado, tiendaId: pedido.tiendaId };
     });
+
+    // Idempotente: el pedido ya estaba pagado, no se emite nada.
+    if (resultado.yaPagado) return resultado.pedido;
+
+    // `estadoAnterior` sale del pedido REAL, no de un literal. Antes el
+    // payload decía siempre `PENDING_PAID → PAID`, pero el agente puede
+    // llegar desde cualquier estado no-terminal (el cobro ya ocurrió en VFP),
+    // así que el evento mentía sobre el origen de la transición.
+    this.realtime.emitToTienda(resultado.tiendaId, 'pedido.estado', {
+      id: pedidoId,
+      estadoAnterior,
+      estadoNuevo: EstadoPedido.PAID,
+    });
+    this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
+      id: pedidoId,
+      estadoAnterior,
+      estadoNuevo: EstadoPedido.PAID,
+    });
+
+    const pedidoCompleto = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
+    if (pedidoCompleto) {
+      void this.notifications
+        .enviar(pedidoCompleto, TipoNotificacion.PAGO_CONFIRMADO)
+        .catch((err) =>
+          this.logger.error(`Error enviando notificación PAGO_CONFIRMADO: ${err.message}`),
+        );
+    }
+
+    return resultado.pedido;
   }
 }

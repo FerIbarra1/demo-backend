@@ -17,10 +17,7 @@ import {
   agruparColaPorZonaCompartida,
   type PedidoColaParaAgrupar,
 } from '../core/similitud.util';
-import {
-  MAX_PEDIDOS_POR_BODEGUERO,
-  ESTADOS_OCUPAN_SLOT_BODEGA,
-} from '../core/pedido-limits';
+import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/pedido-limits';
 import { zonaKey } from '../core/zona.util';
 import { asignadoANombre } from '../core/pedido-mapper';
 import { tiempoAtencionEn, pausarReloj } from '../core/atencion.util';
@@ -183,10 +180,7 @@ export class BodegaService {
     //
     // El arco de "ajustar" es EXCLUSIVO de mostrador: lo dispara el operador con
     // el cliente presente. Un bodeguero nunca debe iniciarlo.
-    if (
-      pedido.estado !== EstadoPedido.PENDING_REVIEW &&
-      pedido.estado !== EstadoPedido.REVIEWING
-    ) {
+    if (pedido.estado !== EstadoPedido.PENDING_REVIEW && pedido.estado !== EstadoPedido.REVIEWING) {
       throw new BadRequestException(
         `Solo se pueden tomar pedidos en la cola de bodega (actual: ${pedido.estado}).`,
       );
@@ -198,8 +192,7 @@ export class BodegaService {
         select: { nombre: true, apellido: true },
       });
       const nombreOtro =
-        `${asignado?.nombre ?? ''} ${asignado?.apellido ?? ''}`.trim() ||
-        'otro bodeguero';
+        `${asignado?.nombre ?? ''} ${asignado?.apellido ?? ''}`.trim() || 'otro bodeguero';
       throw new ConflictException(
         `Este pedido ya fue tomado por ${nombreOtro}. Pide que lo libere o selecciona otro pedido.`,
       );
@@ -270,8 +263,7 @@ export class BodegaService {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
     const esAdmin = usuario.rol === RolUsuario.ADMIN;
-    const esAsignado =
-      usuario.rol === RolUsuario.BODEGA && pedido.asignadoAId === usuario.userId;
+    const esAsignado = usuario.rol === RolUsuario.BODEGA && pedido.asignadoAId === usuario.userId;
 
     if (!esAdmin && !esAsignado) {
       throw new BadRequestException(
@@ -289,7 +281,7 @@ export class BodegaService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const actualizado = await this.prisma.$transaction(async (tx) => {
       // F13 (bug fix): al liberar, el tiempo del turno transcurrido se
       // ACUMULA antes de reiniciar. Antes se ponía `new Date()` sin guardar el
       // tramo, así que el tiempo que el bodeguero ya había trabajado el
@@ -299,10 +291,15 @@ export class BodegaService {
         where: { id: pedidoId },
         select: { tiempoAtencionBodegaMs: true, bodegaTurnoDesdeAt: true },
       });
-      const pedidoActualizado = await tx.pedido.update({
+      // NO escribe `estado`: liberar un pedido de bodega es desasignarlo, no
+      // moverlo. El pedido ya está en REVIEWING (el guard de arriba lo exige)
+      // y sigue ahí — lo que cambia es que vuelve a estar disponible para que
+      // otro bodeguero lo tome. Escribir el mismo estado que ya tenía hacía
+      // parecer una transición lo que es una desasignación, y era una de las
+      // escrituras de `estado` fuera de la máquina de estados.
+      const actualizado = await tx.pedido.update({
         where: { id: pedidoId },
         data: {
-          estado: EstadoPedido.REVIEWING,
           asignadoAId: null,
           asignadoAt: null,
           ...pausarReloj(
@@ -328,15 +325,20 @@ export class BodegaService {
         `Pedido ${pedidoId}: liberado por ${usuario.nombre} (volverá a estar disponible para tomar)`,
       );
 
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.liberado', {
-        id: pedidoId,
-        numeroPedido: pedidoActualizado.numeroPedido,
-        liberadoPor: usuario.nombre,
-      });
-      this.realtime.emitToPedido(pedidoId, 'pedido.liberado', { id: pedidoId });
-
-      return pedidoActualizado;
+      return actualizado;
     });
+
+    // Realtime DESPUÉS del commit: emitir dentro del callback manda el evento
+    // antes de confirmar, y un rollback posterior dejaría a los clientes con
+    // un aviso de algo que nunca pasó.
+    this.realtime.emitToTienda(pedido.tiendaId, 'pedido.liberado', {
+      id: pedidoId,
+      numeroPedido: actualizado.numeroPedido,
+      liberadoPor: usuario.nombre,
+    });
+    this.realtime.emitToPedido(pedidoId, 'pedido.liberado', { id: pedidoId });
+
+    return actualizado;
   }
 
   async marcarEnviado(pedidoId: number, usuario: UserContext) {
@@ -394,10 +396,7 @@ export class BodegaService {
       where: {
         asignadoAId: usuarioId,
         estado: {
-          in: [
-            EstadoPedido.REVIEWING,
-            EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-          ],
+          in: [EstadoPedido.REVIEWING, EstadoPedido.WAITING_CUSTOMER_APPROVAL],
         },
         tiendaId,
       },
@@ -514,9 +513,7 @@ export class BodegaService {
       const c = candidatosDetalle.get(r.id)!;
       const itemsCompartidos: SurtirJuntosPedidoDto['items'] = [];
       for (const it of c.items) {
-        const color = it.precioCO?.colorId != null
-          ? colorById.get(it.precioCO.colorId)
-          : undefined;
+        const color = it.precioCO?.colorId != null ? colorById.get(it.precioCO.colorId) : undefined;
         const key = zonaKey(it.productoId, it.precioCO?.colorId ?? null);
         const compartidoCon = zonaCompartidaConBodeguero.get(key);
         if (!compartidoCon || compartidoCon.size === 0) continue;
@@ -536,9 +533,7 @@ export class BodegaService {
         numeroPedido: r.numeroPedido,
         clienteNombre: c.clienteNombre,
         canalOrigen: c.canalOrigen,
-        minutosEnCola: Math.floor(
-          (ahora.getTime() - c.fechaPedido.getTime()) / 60000,
-        ),
+        minutosEnCola: Math.floor((ahora.getTime() - c.fechaPedido.getTime()) / 60000),
         itemsCompartidos: r.itemsCompartidos,
         score: r.score,
         items: itemsCompartidos,
@@ -646,9 +641,7 @@ export class BodegaService {
         numeroPedido: p.numeroPedido,
         clienteNombre: p.clienteNombre,
         canalOrigen: p.canalOrigen,
-        minutosEnCola: Math.floor(
-          (new Date().getTime() - p.fechaPedido.getTime()) / 60000,
-        ),
+        minutosEnCola: Math.floor((new Date().getTime() - p.fechaPedido.getTime()) / 60000),
       })),
     }));
   }
@@ -801,9 +794,7 @@ export class BodegaService {
     const encontrados = new Set(pedidos.map((p) => p.id));
     const faltantes = idsUnicos.filter((id) => !encontrados.has(id));
     if (faltantes.length > 0) {
-      throw new NotFoundException(
-        `Pedido(s) no encontrados en tu tienda: ${faltantes.join(', ')}`,
-      );
+      throw new NotFoundException(`Pedido(s) no encontrados en tu tienda: ${faltantes.join(', ')}`);
     }
 
     // Ninguno debe estar asignado a otro bodeguero.
@@ -865,6 +856,18 @@ export class BodegaService {
         // defensa: si entre la carga y la escritura el pedido pasó a
         // EN_MOSTRADOR (bodega lo surtió) o a PENDING_PAID (mostrador lo
         // liberó), `count` será 0 y no se lo arranca de esa cola.
+        //
+        // EXCEPCIÓN DELIBERADA a la máquina de estados: esta escritura NO pasa
+        // por `PedidoStateService`. El motivo es que toma un LOTE de pedidos y
+        // necesita que la guarda (`asignadoAId: null` + estado en cola) y la
+        // escritura sean la misma sentencia — es lo que cierra la carrera
+        // entre dos bodegueros. `cambiarEstado` resuelve un pedido a la vez y
+        // validaría después de leer, que es justo la ventana que este `where`
+        // cierra.
+        //
+        // La transición (`PENDING_REVIEW`/`REVIEWING` → `REVIEWING`) está
+        // cubierta por `TRANSICIONES`, y `pedido-state.service.spec.ts` la
+        // verifica: si alguien la quitara de la máquina, el test falla.
         const res = await tx.pedido.updateMany({
           where: {
             id: pedido.id,
