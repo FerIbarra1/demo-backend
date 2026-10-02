@@ -12,6 +12,7 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
 import { motivoNoAvisable } from '../core/llegada-aviso.util';
+import { construirItemPedido } from '../core/item-pedido.util';
 import { PreciosService } from '../../precios/precios.service';
 import {
   precioDeLista,
@@ -22,13 +23,7 @@ import { KioskoService } from '../../kiosko/kiosko.service';
 import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
 import { UserContext } from '../../../types/pedido.types';
-import {
-  EstadoPedido,
-  TipoNotificacion,
-  Prisma,
-  CanalOrigen,
-  ModoEntrega,
-} from '@prisma/client';
+import { EstadoPedido, TipoNotificacion, Prisma, CanalOrigen, ModoEntrega } from '@prisma/client';
 
 /**
  * Servicio del dominio CLIENTE.
@@ -114,9 +109,7 @@ export class ClienteService {
         where: { id: kioskoIdHeader, tiendaId, estado: 'ACTIVO' },
       });
       if (!kiosko) {
-        throw new BadRequestException(
-          'Kiosko inválido o inactivo para esta tienda',
-        );
+        throw new BadRequestException('Kiosko inválido o inactivo para esta tienda');
       }
       // Validar device token (timing-safe en el service).
       const tokenValido = await this.kioskoService.validarDeviceToken(
@@ -126,9 +119,7 @@ export class ClienteService {
       if (!tokenValido) {
         // Mismo mensaje genérico para "no tiene token" y "token incorrecto"
         // — no queremos leak de "existe vs token mal".
-        throw new BadRequestException(
-          'Kiosko sin device token configurado o token inválido',
-        );
+        throw new BadRequestException('Kiosko sin device token configurado o token inválido');
       }
       kioskoIdFinal = kiosko.id;
       canalOrigenFinal = CanalOrigen.KIOSKO;
@@ -144,11 +135,7 @@ export class ClienteService {
     }
 
     // F8 (jul 2026): validación centralizada del modo de entrega.
-    const modoEntregaFinal = resolverModoEntrega(
-      dto,
-      canalOrigenFinal,
-      kioskoIdFinal,
-    );
+    const modoEntregaFinal = resolverModoEntrega(dto, canalOrigenFinal, kioskoIdFinal);
 
     // A partir de aquí, modoEntregaFinal es la fuente de verdad. Limpiamos
     // los campos de envío que no aplican para no almacenarlos.
@@ -160,10 +147,12 @@ export class ClienteService {
       shippingColonia:
         modoEntregaFinal === ModoEntrega.DOMICILIO ? dto.shippingColonia?.trim() || null : null,
       shippingCodigoPostal:
-        modoEntregaFinal === ModoEntrega.DOMICILIO ? dto.shippingCodigoPostal?.trim() || null : null,
+        modoEntregaFinal === ModoEntrega.DOMICILIO
+          ? dto.shippingCodigoPostal?.trim() || null
+          : null,
       shippingPaqueteria:
         modoEntregaFinal === ModoEntrega.DOMICILIO && !dto.dejarAdminDecidePaqueteria
-          ? dto.shippingPaqueteria ?? null
+          ? (dto.shippingPaqueteria ?? null)
           : null,
       dejarAdminDecidePaqueteria:
         modoEntregaFinal === ModoEntrega.DOMICILIO && dto.dejarAdminDecidePaqueteria === true,
@@ -202,35 +191,18 @@ export class ClienteService {
     let subtotal = new Prisma.Decimal(0);
     const itemsData = dto.items.map((item) => {
       const pco = preciosCO.find((p) => p.id === item.precioCOId)!;
-      const precioUnitarioBase = precioDeLista(pco, columnaLista);
-      const precioUnitarioMayoreo = precioDeLista(pco, COLUMNA_MAYOREO);
-      const precioUnitario = precioConPromoVolumen(
-        precioUnitarioBase,
-        precioUnitarioMayoreo,
+      // El snapshot de precios y nombres vive en `construirItemPedido`, la
+      // misma función que usan mostrador y propuesta al agregar un producto.
+      // Aquí SÍ se conoce el total de piezas, así que el precio efectivo ya
+      // sale con la promo de volumen aplicada.
+      const data = construirItemPedido(pco, item.cantidad, {
+        columnaLista,
         totalPiezas,
-      );
-      const itemSubtotal = precioUnitario.mul(item.cantidad);
-      subtotal = subtotal.plus(itemSubtotal);
-      return {
-        productoId: pco.productoId,
-        precioCOId: pco.id,
-        cantidad: item.cantidad,
-        // C4: snapshot de la cantidad original al crear el pedido. El handler
-        // de MOVPED compara contra este valor para distinguir surtido COMPLETO
-        // vs PARCIAL cuando el bodeguero ajusta cantidades en VFP.
-        cantidadOriginal: item.cantidad,
-        precioUnitario,
-        precioUnitarioBase,
-        precioUnitarioMayoreo,
-        subtotal: itemSubtotal,
-        productoNombre: pco.producto.nombre,
-        productoCodigo: pco.producto.codigo,
-        corridaNombre: pco.corrida.nombre,
-        tallaNombre: pco.talla.nombre,
-        colorNombre: pco.color.nombre,
         original: true,
-        cancelada: false,
-      };
+        esNuevoDelPedido: true,
+      });
+      subtotal = subtotal.plus(data.subtotal as Prisma.Decimal);
+      return data;
     });
 
     let pedido: any = null;
@@ -310,9 +282,11 @@ export class ClienteService {
     });
 
     // Fire-and-forget: no bloqueamos la respuesta del cliente si el email tarda
-    void this.notifications.enviar(pedido as any, TipoNotificacion.PEDIDO_RECIBIDO).catch((err) =>
-      this.logger.error(`Error enviando notificación PEDIDO_RECIBIDO: ${err.message}`),
-    );
+    void this.notifications
+      .enviar(pedido as any, TipoNotificacion.PEDIDO_RECIBIDO)
+      .catch((err) =>
+        this.logger.error(`Error enviando notificación PEDIDO_RECIBIDO: ${err.message}`),
+      );
 
     return { ...pedido, mensaje: 'Pedido creado exitosamente' };
   }

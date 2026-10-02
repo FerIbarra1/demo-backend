@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Body, Param, Query, ParseIntPipe } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { MostradorService } from './mostrador.service';
+import { MostradorQueryService } from './mostrador-query.service';
 import { BuscarPedidoDto } from './dto/buscar-pedido.dto';
 import { AjustarPedidoDto, CancelarPedidoDto, EnviarAPagarDto } from './dto/accion-mostrador.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -30,7 +31,10 @@ import { RolUsuario } from '@prisma/client';
 @Roles(RolUsuario.MOSTRADOR, RolUsuario.ADMIN)
 @ApiBearerAuth()
 export class MostradorController {
-  constructor(private readonly mostradorService: MostradorService) {}
+  constructor(
+    private readonly mostradorService: MostradorService,
+    private readonly mostradorQuery: MostradorQueryService,
+  ) {}
 
   /**
    * F16: cola de pedidos apartados esperando que el cliente los revise.
@@ -57,7 +61,7 @@ export class MostradorController {
   ) {
     const tienda =
       user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
-    return this.mostradorService.obtenerCola(
+    return this.mostradorQuery.obtenerCola(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
@@ -87,7 +91,7 @@ export class MostradorController {
     // ADMIN puede ver todas las tiendas; el resto, sólo la suya.
     const tienda =
       user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
-    return this.mostradorService.obtenerPedidosListos(
+    return this.mostradorQuery.obtenerPedidosListos(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
@@ -121,7 +125,7 @@ export class MostradorController {
   ) {
     const tienda =
       user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
-    return this.mostradorService.obtenerSinAviso(
+    return this.mostradorQuery.obtenerSinAviso(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
@@ -136,7 +140,7 @@ export class MostradorController {
     if (!query.q || query.q.trim().length < 2) {
       return { data: [] };
     }
-    const data = await this.mostradorService.buscarPedidos(query.q.trim(), user, user.tiendaId);
+    const data = await this.mostradorQuery.buscarPedidos(query.q.trim(), user, user.tiendaId);
     return { data };
   }
 
@@ -145,7 +149,7 @@ export class MostradorController {
     summary: 'Detalle completo del pedido (items, mensajes, historial). Valida tienda.',
   })
   async obtenerPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
-    return this.mostradorService.obtenerPedido(id, user);
+    return this.mostradorQuery.obtenerPedido(id, user);
   }
 
   @Post(':id/entregar')

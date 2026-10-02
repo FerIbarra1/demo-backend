@@ -141,11 +141,7 @@ export class CrearPropuestaDto {
  *
  * El backend valida, no confía en el frontend.
  */
-export type DecisionPropuesta =
-  | 'APROBAR'
-  | 'RECHAZAR'
-  | 'CONTACTAR_ASESOR'
-  | 'CANCELAR_PEDIDO';
+export type DecisionPropuesta = 'APROBAR' | 'RECHAZAR' | 'CONTACTAR_ASESOR' | 'CANCELAR_PEDIDO';
 
 export class ResponderPropuestaDto {
   @ApiProperty({ enum: ['APROBAR', 'RECHAZAR', 'CONTACTAR_ASESOR', 'CANCELAR_PEDIDO'] })
@@ -153,10 +149,42 @@ export class ResponderPropuestaDto {
   decision: DecisionPropuesta;
 
   @ApiPropertyOptional({
-    description:
-      'Nota libre del cliente (motivo del rechazo, qué quiere negociar con el asesor).',
+    description: 'Nota libre del cliente (motivo del rechazo, qué quiere negociar con el asesor).',
   })
   @IsOptional()
   @IsString()
   nota?: string;
+}
+
+/**
+ * Un item de la propuesta tal como se guarda en `PedidoPropuesta.items` (JSON).
+ *
+ * Es la forma SERIALIZADA del snapshot: la propuesta guarda el item completo
+ * para que la tarjeta del chat pueda mostrar la foto, el productoId (para
+ * resolver la imagen de un `agregado`) y el "antes" de los tipos `cambio` y
+ * `parcial`, sin volver a consultar el pedido.
+ *
+ * Vivía declarada al final de `propuesta.service.ts`; se movió aquí porque es
+ * un tipo de transporte, no de servicio.
+ */
+export interface ItemPropuestaJson {
+  itemId: number;
+  tipo: 'completo' | 'cambio' | 'no-disponible' | 'parcial' | 'agregado';
+  producto: string;
+  variante: string;
+  productoImagen?: string | null;
+  cantidad: number;
+  precioUnitario: number;
+  subtotal: number;
+  productoOriginal?: string;
+  varianteOriginal?: string;
+  cantidadOriginal?: number;
+  productoNuevo?: string;
+  varianteNueva?: string;
+  cantidadNueva?: number;
+  precioUnitarioNuevo?: number;
+  subtotalNuevo?: number;
+  tempId?: number;
+  productoId?: number;
+  precioCOId?: number;
 }

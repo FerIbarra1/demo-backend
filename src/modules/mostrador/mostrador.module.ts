@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MostradorService } from './mostrador.service';
+import { MostradorQueryService } from './mostrador-query.service';
 import { MostradorController } from './mostrador.controller';
 import { MostradorMonitorService } from './mostrador-monitor.service';
 import { MostradorMonitorController } from './mostrador-monitor.controller';
@@ -37,6 +38,6 @@ import { KioskoModule } from '../kiosko/kiosko.module';
 @Module({
   imports: [PedidosModule, RealtimeModule, KioskoModule],
   controllers: [MostradorMonitorController, MostradorController],
-  providers: [MostradorService, MostradorMonitorService],
+  providers: [MostradorService, MostradorQueryService, MostradorMonitorService],
 })
 export class MostradorModule {}
