@@ -131,22 +131,15 @@ export class MostradorMonitorService {
           tiendaId,
           estado: EstadoPedido.EN_MOSTRADOR,
           canalOrigen: CanalOrigen.WEB,
-          OR: [
-            { llegadaAnunciadaAt: null },
-            { llegadaDescartadaAt: { not: null } },
-          ],
+          OR: [{ llegadaAnunciadaAt: null }, { llegadaDescartadaAt: { not: null } }],
         },
         select: { id: true, numeroPedido: true, clienteNombre: true, fechaPedido: true },
         orderBy: { fechaPedido: 'asc' },
       }),
     ]);
 
-    const cola: MonitorMostradorPedidoDto[] = colaRaw.map((p) =>
-      this.aDto(p, ahora),
-    );
-    const atendiendo: MonitorMostradorPedidoDto[] = atendiendoRaw.map((p) =>
-      this.aDto(p, ahora),
-    );
+    const cola: MonitorMostradorPedidoDto[] = colaRaw.map((p) => this.aDto(p, ahora));
+    const atendiendo: MonitorMostradorPedidoDto[] = atendiendoRaw.map((p) => this.aDto(p, ahora));
 
     // F16 (§5.4): antigüedad de los pedidos que nadie va a recoger.
     const sinCliente = sinClienteRaw.map((p) => ({
@@ -194,9 +187,7 @@ export class MostradorMonitorService {
     },
     ahora: Date,
   ): MonitorMostradorPedidoDto {
-    const clienteEnTienda = Boolean(
-      p.llegadaAnunciadaAt && !p.llegadaDescartadaAt,
-    );
+    const clienteEnTienda = Boolean(p.llegadaAnunciadaAt && !p.llegadaDescartadaAt);
     return {
       id: p.id,
       numeroPedido: p.numeroPedido,
@@ -206,14 +197,9 @@ export class MostradorMonitorService {
       total: Number(p.total),
       fechaPedido: p.fechaPedido.toISOString(),
       minutosEnCola: minutosEntre(p.fechaPedido, ahora),
-      llegadaAnunciadaAt: p.llegadaAnunciadaAt
-        ? p.llegadaAnunciadaAt.toISOString()
-        : null,
+      llegadaAnunciadaAt: p.llegadaAnunciadaAt ? p.llegadaAnunciadaAt.toISOString() : null,
       esperandoDesdeMin: clienteEnTienda
-        ? Math.max(
-            0,
-            Math.floor((ahora.getTime() - p.llegadaAnunciadaAt!.getTime()) / 60_000),
-          )
+        ? Math.max(0, Math.floor((ahora.getTime() - p.llegadaAnunciadaAt!.getTime()) / 60_000))
         : null,
       clienteEnTienda,
     };

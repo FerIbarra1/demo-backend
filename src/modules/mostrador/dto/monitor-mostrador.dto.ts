@@ -40,8 +40,7 @@ export class MonitorMostradorPedidoDto {
   })
   esperandoDesdeMin: number | null;
   @ApiProperty({
-    description:
-      'true si hay un cliente identificado esperando en tienda (avisó llegada)',
+    description: 'true si hay un cliente identificado esperando en tienda (avisó llegada)',
   })
   clienteEnTienda: boolean;
 }

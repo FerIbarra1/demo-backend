@@ -33,8 +33,7 @@ import { Type } from 'class-transformer';
 export class ItemAjusteDto {
   @ApiPropertyOptional({
     description:
-      'ID del item existente. Obligatorio para parcial/no-disponible; ' +
-      'ausente para agregado.',
+      'ID del item existente. Obligatorio para parcial/no-disponible; ' + 'ausente para agregado.',
   })
   @IsOptional()
   @IsInt()
@@ -70,8 +69,7 @@ export class ItemAjusteDto {
 
 export class AjustarPedidoDto {
   @ApiProperty({
-    description:
-      'Qué pidió cambiar el cliente. Queda en el historial del pedido.',
+    description: 'Qué pidió cambiar el cliente. Queda en el historial del pedido.',
     example: 'Quiere 2 playeras más en talla M',
   })
   @IsString()
@@ -104,11 +102,11 @@ export class CancelarPedidoDto {
   motivo!: string;
 }
 
-export class LiberarPedidoDto {
+export class EnviarAPagarDto {
   @ApiPropertyOptional({
     description:
-      'Nota opcional. Se usa cuando el operador libera SIN aviso de llegada ' +
-      'del cliente (decisión D2: puede hacerlo, pero queda registrado).',
+      'Nota opcional. Se usa cuando el operador manda a pagar SIN aviso de ' +
+      'llegada del cliente (decisión D2: puede hacerlo, pero queda registrado).',
     example: 'Cliente presente en tienda, no avisó por el kiosko',
   })
   @IsOptional()

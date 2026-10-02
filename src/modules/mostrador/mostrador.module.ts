@@ -18,7 +18,7 @@ import { KioskoModule } from '../kiosko/kiosko.module';
  *
  * F16 (sep 2026): tiene DOS controllers.
  *   - `MostradorController` (rol MOSTRADOR) — la consola del operador: cola,
- *     llamar, liberar, ajustar, cancelar, entregar.
+ *     llamar, enviar a pagar, ajustar, cancelar, entregar.
  *   - `MostradorMonitorController` (rol MOSTRADOR_MONITOR) — la TV de la pared,
  *     solo lectura.
  *

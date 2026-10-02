@@ -24,7 +24,7 @@ import { UserContext } from '../../types/pedido.types';
  *
  *   1. `EN_MOSTRADOR` — el pedido está apartado y el cliente lo revisa en
  *      tienda. El operador decide:
- *        - `liberar`  → PENDING_PAID (AQUÍ entra al ERP: Firebird solo ve
+ *        - `enviarAPagar` → PENDING_PAID (AQUÍ entra al ERP: Firebird solo ve
  *                       pedidos que el cliente ya confirmó).
  *        - `ajustar`  → REVIEWING (el cliente pidió cambios; bodega re-surte).
  *        - `cancelar` → CANCELLED + lista de reposición (la mercancía vuelve
@@ -323,11 +323,11 @@ export class MostradorService {
    * `PedidoPendienteEnvio` es invisible al agente, nunca recibe folio y se
    * queda atascado para siempre.
    */
-  async liberar(pedidoId: number, usuario: UserContext, nota?: string) {
+  async enviarAPagar(pedidoId: number, usuario: UserContext, nota?: string) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
-    this.exigirEstado(pedido.estado, 'liberar');
+    this.exigirEstado(pedido.estado, 'enviar a pagar');
 
-    // Decisión D2 del plan: el operador PUEDE liberar sin que el cliente haya
+    // Decisión D2 del plan: el operador PUEDE mandar a pagar sin que el cliente haya
     // avisado llegada (sabe más que el sistema). Queda registrado para poder
     // auditar cuántas veces se salta el gate.
     const completo = await this.prisma.pedido.findUnique({
@@ -653,7 +653,7 @@ export class MostradorService {
    * que un segundo intento no duplica.
    *
    * No se encola nada a Firebird: el pedido nunca llegó al ERP (con el flujo
-   * nuevo el encolado ocurre al liberar, no al surtir). Si el pedido ya estaba
+   * nuevo el encolado ocurre al enviar a pagar, no al surtir). Si el pedido ya estaba
    * en PENDING_PAID, la cancelación la sincroniza el agente por `SWCANCEL`.
    */
   async cancelar(pedidoId: number, usuario: UserContext, motivo: string) {
@@ -687,7 +687,7 @@ export class MostradorService {
    * "EN TIENDA" quedaba pegado y el operador llamaba a alguien que ya no está.
    *
    * No cambia el estado del pedido: el aviso es una señal de cola, ortogonal
-   * al ciclo de vida. El pedido sigue operable (liberar/ajustar/cancelar).
+   * al ciclo de vida. El pedido sigue operable (enviar a pagar / ajustar / cancelar).
    *
    * Se registra en el historial para poder auditar cuántos avisos resultan
    * falsos — es la señal de que el gate de llegada se está usando mal.

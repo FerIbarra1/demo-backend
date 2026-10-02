@@ -23,8 +23,7 @@ export class MostradorMonitorController {
 
   @Get()
   @ApiOperation({
-    summary:
-      'Snapshot del monitor de mostrador: cola de pedidos por revisar + contadores',
+    summary: 'Snapshot del monitor de mostrador: cola de pedidos por revisar + contadores',
   })
   async obtener(@CurrentUser() user: any) {
     const tiendaId = user.tiendaId;

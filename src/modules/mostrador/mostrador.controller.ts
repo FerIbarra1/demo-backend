@@ -2,7 +2,7 @@ import { Controller, Get, Post, Body, Param, Query, ParseIntPipe } from '@nestjs
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { MostradorService } from './mostrador.service';
 import { BuscarPedidoDto } from './dto/buscar-pedido.dto';
-import { AjustarPedidoDto, CancelarPedidoDto, LiberarPedidoDto } from './dto/accion-mostrador.dto';
+import { AjustarPedidoDto, CancelarPedidoDto, EnviarAPagarDto } from './dto/accion-mostrador.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -14,7 +14,7 @@ import { RolUsuario } from '@prisma/client';
  * Ahora tiene DOS colas y cinco acciones:
  *
  *   Cola "por revisar" (`EN_MOSTRADOR`):
- *     - `POST :id/liberar`  → PENDING_PAID (aquí entra al ERP)
+ *     - `POST :id/enviar-a-pagar` → PENDING_PAID (aquí entra al ERP)
  *     - `POST :id/ajustar`  → REVIEWING (el cliente pidió cambios)
  *     - `POST :id/cancelar` → CANCELLED + reposición
  *
@@ -219,18 +219,18 @@ export class MostradorController {
     return this.mostradorService.devolverACola(id, user);
   }
 
-  @Post(':id/liberar')
+  @Post(':id/enviar-a-pagar')
   @ApiOperation({
     summary:
       'EN_MOSTRADOR → PENDING_PAID. El cliente aprobó su pedido; pasa a caja. ' +
       'AQUÍ se encola a Firebird (el ERP solo ve pedidos ya confirmados).',
   })
-  async liberar(
+  async enviarAPagar(
     @Param('id', ParseIntPipe) id: number,
-    @Body() dto: LiberarPedidoDto,
+    @Body() dto: EnviarAPagarDto,
     @CurrentUser() user: any,
   ) {
-    return this.mostradorService.liberar(id, user, dto.nota);
+    return this.mostradorService.enviarAPagar(id, user, dto.nota);
   }
 
   @Post(':id/ajustar')

@@ -68,7 +68,13 @@ describe('Invariante: lo que se cobra es lo que se surtió', () => {
   describe('la red de seguridad de confirmarSurtido', () => {
     /** Réplica del guard que se agregó a `SurtidoService.confirmarSurtido`. */
     function detectaIncoherentes(
-      items: Array<{ id: number; cancelada: boolean; estadoSurtido: EstadoSurtido; cantidad: number; cantidadSurtida: number }>,
+      items: Array<{
+        id: number;
+        cancelada: boolean;
+        estadoSurtido: EstadoSurtido;
+        cantidad: number;
+        cantidadSurtida: number;
+      }>,
     ): number[] {
       return items
         .filter(
@@ -82,23 +88,53 @@ describe('Invariante: lo que se cobra es lo que se surtió', () => {
 
     it('detecta un item COMPLETO con menos piezas apartadas', () => {
       const items = [
-        { id: 1, cancelada: false, estadoSurtido: EstadoSurtido.COMPLETO, cantidad: 5, cantidadSurtida: 2 },
+        {
+          id: 1,
+          cancelada: false,
+          estadoSurtido: EstadoSurtido.COMPLETO,
+          cantidad: 5,
+          cantidadSurtida: 2,
+        },
       ];
       expect(detectaIncoherentes(items)).toEqual([1]);
     });
 
     it('no marca los items coherentes', () => {
       const items = [
-        { id: 1, cancelada: false, estadoSurtido: EstadoSurtido.COMPLETO, cantidad: 2, cantidadSurtida: 2 },
-        { id: 2, cancelada: false, estadoSurtido: EstadoSurtido.PARCIAL, cantidad: 5, cantidadSurtida: 3 },
-        { id: 3, cancelada: true, estadoSurtido: EstadoSurtido.COMPLETO, cantidad: 5, cantidadSurtida: 0 },
+        {
+          id: 1,
+          cancelada: false,
+          estadoSurtido: EstadoSurtido.COMPLETO,
+          cantidad: 2,
+          cantidadSurtida: 2,
+        },
+        {
+          id: 2,
+          cancelada: false,
+          estadoSurtido: EstadoSurtido.PARCIAL,
+          cantidad: 5,
+          cantidadSurtida: 3,
+        },
+        {
+          id: 3,
+          cancelada: true,
+          estadoSurtido: EstadoSurtido.COMPLETO,
+          cantidad: 5,
+          cantidadSurtida: 0,
+        },
       ];
       expect(detectaIncoherentes(items)).toEqual([]);
     });
 
     it('un item cancelado no cuenta aunque esté incoherente', () => {
       const items = [
-        { id: 1, cancelada: true, estadoSurtido: EstadoSurtido.COMPLETO, cantidad: 5, cantidadSurtida: 0 },
+        {
+          id: 1,
+          cancelada: true,
+          estadoSurtido: EstadoSurtido.COMPLETO,
+          cantidad: 5,
+          cantidadSurtida: 0,
+        },
       ];
       expect(detectaIncoherentes(items)).toEqual([]);
     });
