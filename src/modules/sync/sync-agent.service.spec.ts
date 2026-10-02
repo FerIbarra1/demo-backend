@@ -68,7 +68,12 @@ describe('SyncAgentService upload idempotency', () => {
       eventos: [makeEvent()],
     });
 
-    expect(result).toEqual({ procesados: 1, errores: 0, checkpointAvanzado: true });
+    expect(result).toEqual({
+      procesados: 1,
+      errores: 0,
+      checkpointAvanzado: true,
+      deadLetters: 0,
+    });
     expect(catalog.procesar).not.toHaveBeenCalled();
     expect(prisma.syncCheckpoint.upsert).toHaveBeenCalled();
   });
@@ -91,7 +96,15 @@ describe('SyncAgentService upload idempotency', () => {
       eventos: [event],
     });
 
-    expect(result).toEqual({ procesados: 0, errores: 1, checkpointAvanzado: false });
+    // Un DEAD_LETTER es terminal: NO cuenta como error y NO bloquea el
+    // checkpoint. Se reporta aparte para que el batch avance y el agente no
+    // quede atascado esperando un evento que nunca se va a recuperar.
+    expect(result).toEqual({
+      procesados: 0,
+      errores: 0,
+      checkpointAvanzado: true,
+      deadLetters: 1,
+    });
     expect(catalog.procesar).toHaveBeenCalledTimes(1);
     expect(prisma.syncEventInbox.update).toHaveBeenCalledWith({
       where: { eventId: event.eventId },
@@ -118,14 +131,16 @@ describe('SyncAgentService ACK ownership', () => {
 
     const result = await service.procesarPedidosAck({
       tiendaId: 5,
-      acks: [{
-        pedidoId: 100,
-        agentId: 'agent-b',
-        leaseToken: 'token-b',
-        externalIdPEDIDOS: 900,
-        externalFolio: '00000900',
-        exito: true,
-      }],
+      acks: [
+        {
+          pedidoId: 100,
+          agentId: 'agent-b',
+          leaseToken: 'token-b',
+          externalIdPEDIDOS: 900,
+          externalFolio: '00000900',
+          exito: true,
+        },
+      ],
     });
 
     expect(result).toEqual({ actualizados: 0, errores: 1 });

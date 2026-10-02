@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
 import { Prisma, EstadoPedido, RolUsuario, CanalOrigen } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PedidoStateService } from '../pedidos/core/pedido-state.service';
@@ -108,9 +108,10 @@ export class MostradorService {
     const ahora = Date.now();
     const data = pedidos.map((p) => ({
       ...p,
-      esperandoDesdeMin: p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
-        ? Math.max(0, Math.floor((ahora - p.llegadaAnunciadaAt.getTime()) / 60_000))
-        : null,
+      esperandoDesdeMin:
+        p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
+          ? Math.max(0, Math.floor((ahora - p.llegadaAnunciadaAt.getTime()) / 60_000))
+          : null,
     }));
 
     return {
@@ -187,11 +188,7 @@ export class MostradorService {
    * que ya usa `obtenerPedidosListos`, para que el badge "EN TIENDA" no
    * pierda sentido cuando hay varios pedidos en cola.
    */
-  async obtenerCola(
-    tiendaId: number,
-    pagina = 1,
-    limite = 20,
-  ) {
+  async obtenerCola(tiendaId: number, pagina = 1, limite = 20) {
     const skip = (pagina - 1) * limite;
     const where: Prisma.PedidoWhereInput = {
       tiendaId,
@@ -233,17 +230,12 @@ export class MostradorService {
       ...p,
       esperandoDesdeMin:
         p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
-          ? Math.max(
-              0,
-              Math.floor((ahora - p.llegadaAnunciadaAt.getTime()) / 60_000),
-            )
+          ? Math.max(0, Math.floor((ahora - p.llegadaAnunciadaAt.getTime()) / 60_000))
           : null,
       // La TV y la consola necesitan saber si hay alguien a quién llamar.
       // Un pedido web sin aviso no debería estar aquí (el gate de arriba lo
       // excluye), así que en la práctica esto es true para todos los WEB.
-      clienteEnTienda: Boolean(
-        p.llegadaAnunciadaAt && !p.llegadaDescartadaAt,
-      ),
+      clienteEnTienda: Boolean(p.llegadaAnunciadaAt && !p.llegadaDescartadaAt),
     }));
 
     return {
@@ -281,10 +273,7 @@ export class MostradorService {
       canalOrigen: CanalOrigen.WEB,
       // Mismo predicado que el contador `sinCliente` del monitor: sin aviso, o
       // con el aviso descartado por el operador (el cliente no estaba).
-      OR: [
-        { llegadaAnunciadaAt: null },
-        { llegadaDescartadaAt: { not: null } },
-      ],
+      OR: [{ llegadaAnunciadaAt: null }, { llegadaDescartadaAt: { not: null } }],
     };
 
     const [pedidos, total] = await Promise.all([
@@ -307,10 +296,7 @@ export class MostradorService {
       ...p,
       // Mismo nombre que en el monitor, para que la consola y la TV hablen
       // igual de "cuánto lleva esperando este pedido".
-      minutosEsperando: Math.max(
-        0,
-        Math.floor((ahora - p.fechaPedido.getTime()) / 60_000),
-      ),
+      minutosEsperando: Math.max(0, Math.floor((ahora - p.fechaPedido.getTime()) / 60_000)),
     }));
 
     return {
@@ -348,12 +334,8 @@ export class MostradorService {
       where: { id: pedidoId },
       select: { llegadaAnunciadaAt: true, llegadaDescartadaAt: true },
     });
-    const avisoVigente = Boolean(
-      completo?.llegadaAnunciadaAt && !completo.llegadaDescartadaAt,
-    );
-    const sufijoAviso = avisoVigente
-      ? ''
-      : ' (sin aviso de llegada del cliente)';
+    const avisoVigente = Boolean(completo?.llegadaAnunciadaAt && !completo.llegadaDescartadaAt);
+    const sufijoAviso = avisoVigente ? '' : ' (sin aviso de llegada del cliente)';
     const sufijoNota = nota ? ` — ${nota}` : '';
 
     return this.pedidoState.cambiarEstado(
@@ -398,12 +380,7 @@ export class MostradorService {
    * manda el pedido a bodega. Eso permite desplegar el backend antes que el
    * frontend sin romper nada.
    */
-  async ajustar(
-    pedidoId: number,
-    usuario: UserContext,
-    nota: string,
-    items?: ItemAjusteDto[],
-  ) {
+  async ajustar(pedidoId: number, usuario: UserContext, nota: string, items?: ItemAjusteDto[]) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
     this.exigirEstado(pedido.estado, 'ajustar');
 
@@ -447,12 +424,7 @@ export class MostradorService {
         invalidarMonitor: true,
         efectos: hayCambios
           ? async (tx) => {
-              resumenCambios = await this.aplicarAjuste(
-                tx,
-                pedidoCompleto,
-                items!,
-                columnaLista,
-              );
+              resumenCambios = await this.aplicarAjuste(tx, pedidoCompleto, items!, columnaLista);
             }
           : undefined,
       },
@@ -483,10 +455,12 @@ export class MostradorService {
   ): Promise<string[]> {
     const cambios: string[] = [];
     const idsActuales = new Set(
-      (await tx.itemPedido.findMany({
-        where: { pedidoId: pedido.id },
-        select: { id: true },
-      })).map((i) => i.id),
+      (
+        await tx.itemPedido.findMany({
+          where: { pedidoId: pedido.id },
+          select: { id: true },
+        })
+      ).map((i) => i.id),
     );
 
     for (const it of items) {
@@ -494,9 +468,7 @@ export class MostradorService {
 
       if (it.tipo === 'agregado') {
         if (!it.precioCOId) {
-          throw new BadRequestException(
-            'Un producto agregado requiere precioCOId.',
-          );
+          throw new BadRequestException('Un producto agregado requiere precioCOId.');
         }
         const pco = await tx.precioCO.findUnique({
           where: { id: it.precioCOId },
@@ -506,9 +478,7 @@ export class MostradorService {
           throw new BadRequestException(`PrecioCO ${it.precioCOId} no existe`);
         }
         if (pco.tiendaId !== pedido.tiendaId) {
-          throw new BadRequestException(
-            'El producto agregado pertenece a otra tienda.',
-          );
+          throw new BadRequestException('El producto agregado pertenece a otra tienda.');
         }
 
         const cantidad = Math.max(1, it.cantidad ?? 1);
@@ -656,28 +626,20 @@ export class MostradorService {
     for (const it of items) {
       if (it.tipo === 'agregado') {
         if (!it.precioCOId) {
-          throw new BadRequestException(
-            'Un producto agregado requiere precioCOId.',
-          );
+          throw new BadRequestException('Un producto agregado requiere precioCOId.');
         }
         continue;
       }
       if (it.tipo === 'completo') continue;
 
       if (it.itemId == null) {
-        throw new BadRequestException(
-          `El tipo "${it.tipo}" requiere itemId.`,
-        );
+        throw new BadRequestException(`El tipo "${it.tipo}" requiere itemId.`);
       }
       if (!ids.has(it.itemId)) {
-        throw new BadRequestException(
-          `El item ${it.itemId} no pertenece a este pedido.`,
-        );
+        throw new BadRequestException(`El item ${it.itemId} no pertenece a este pedido.`);
       }
       if (it.tipo === 'parcial' && (it.cantidad == null || it.cantidad < 1)) {
-        throw new BadRequestException(
-          'Un ajuste parcial requiere una cantidad mayor a 0.',
-        );
+        throw new BadRequestException('Un ajuste parcial requiere una cantidad mayor a 0.');
       }
     }
   }
@@ -866,6 +828,46 @@ export class MostradorService {
   }
 
   /**
+   * Manda a llamar al SIGUIENTE de la cola (FIFO), sin que el operador tenga
+   * que elegir el pedido. Es el espejo de `CajeroService.llamarSiguiente`.
+   *
+   * Por qué existe: en cajero el operador puede llamar al siguiente o tomar
+   * uno específico; en mostrador sólo estaba lo segundo. Con un cliente
+   * enfrente el operador busca su folio, pero cuando la fila está llena y
+   * nadie se acerca, llamar al siguiente es el flujo natural — y era el único
+   * caso donde el operador tenía que elegir un pedido a mano.
+   *
+   * Elige el PRIMERO de la cola de revisión: mismo orden que ve la consola
+   * (`fechaPedido asc`), así que "el siguiente" es literalmente la primera
+   * fila de la pestaña "Por revisar".
+   *
+   * Reutiliza `llamar` para no duplicar los efectos (llamadoAt, historial,
+   * realtime, invalidación del monitor).
+   */
+  async llamarSiguiente(usuario: UserContext) {
+    if (!usuario.tiendaId) {
+      throw new BadRequestException('Tu usuario no tiene tienda asignada');
+    }
+
+    const siguiente = await this.prisma.pedido.findFirst({
+      where: {
+        tiendaId: usuario.tiendaId,
+        estado: EstadoPedido.EN_MOSTRADOR,
+        // Un pedido ya llamado sigue en EN_MOSTRADOR pero ya está anunciado en
+        // la TV: volver a llamarlo lo dejaría pegado en el panel.
+        llamadoAt: null,
+      },
+      orderBy: { fechaPedido: 'asc' },
+      select: { id: true },
+    });
+    if (!siguiente) {
+      throw new NotFoundException('No hay pedidos en la cola por revisar');
+    }
+
+    return this.llamar(siguiente.id, usuario);
+  }
+
+  /**
    * Guard compartido de las tres acciones: solo se opera un pedido que está
    * esperando revisión. Si ya fue liberado (PENDING_PAID) o cancelado, la
    * acción no aplica y el mensaje dice cuál es el estado real.
@@ -975,10 +977,7 @@ export class MostradorService {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
     // 2. Validar estado.
-    if (
-      pedido.estado !== EstadoPedido.PAID &&
-      pedido.estado !== EstadoPedido.SHIPPED
-    ) {
+    if (pedido.estado !== EstadoPedido.PAID && pedido.estado !== EstadoPedido.SHIPPED) {
       throw new BadRequestException(
         `Sólo se pueden entregar pedidos en PAID o SHIPPED (actual: ${pedido.estado})`,
       );

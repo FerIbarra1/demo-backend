@@ -1,20 +1,8 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  Query,
-  ParseIntPipe,
-} from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, ParseIntPipe } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { MostradorService } from './mostrador.service';
 import { BuscarPedidoDto } from './dto/buscar-pedido.dto';
-import {
-  AjustarPedidoDto,
-  CancelarPedidoDto,
-  LiberarPedidoDto,
-} from './dto/accion-mostrador.dto';
+import { AjustarPedidoDto, CancelarPedidoDto, LiberarPedidoDto } from './dto/accion-mostrador.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -68,9 +56,7 @@ export class MostradorController {
     @Query('limite') limite?: string,
   ) {
     const tienda =
-      user.rol === RolUsuario.ADMIN && tiendaId
-        ? parseInt(tiendaId, 10)
-        : user.tiendaId;
+      user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
     return this.mostradorService.obtenerCola(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
@@ -80,8 +66,7 @@ export class MostradorController {
 
   @Get('listos')
   @ApiOperation({
-    summary:
-      'Pedidos de la tienda del usuario en PAID o SHIPPED, listos para entregar',
+    summary: 'Pedidos de la tienda del usuario en PAID o SHIPPED, listos para entregar',
   })
   @ApiQuery({ name: 'tiendaId', required: false, type: Number })
   @ApiQuery({ name: 'pagina', required: false, type: Number })
@@ -90,8 +75,7 @@ export class MostradorController {
     name: 'orden',
     required: false,
     enum: ['esperando', 'pago'],
-    description:
-      'esperando (default): avisos de llegada primero. pago: solo FIFO por fechaPago.',
+    description: 'esperando (default): avisos de llegada primero. pago: solo FIFO por fechaPago.',
   })
   async listarListos(
     @CurrentUser() user: any,
@@ -102,9 +86,7 @@ export class MostradorController {
   ) {
     // ADMIN puede ver todas las tiendas; el resto, sólo la suya.
     const tienda =
-      user.rol === RolUsuario.ADMIN && tiendaId
-        ? parseInt(tiendaId, 10)
-        : user.tiendaId;
+      user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
     return this.mostradorService.obtenerPedidosListos(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
@@ -138,9 +120,7 @@ export class MostradorController {
     @Query('limite') limite?: string,
   ) {
     const tienda =
-      user.rol === RolUsuario.ADMIN && tiendaId
-        ? parseInt(tiendaId, 10)
-        : user.tiendaId;
+      user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
     return this.mostradorService.obtenerSinAviso(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
@@ -150,45 +130,29 @@ export class MostradorController {
 
   @Get('buscar')
   @ApiOperation({
-    summary:
-      'Búsqueda rápida por número de pedido o nombre del cliente (sufijo/contains)',
+    summary: 'Búsqueda rápida por número de pedido o nombre del cliente (sufijo/contains)',
   })
-  async buscar(
-    @Query() query: BuscarPedidoDto,
-    @CurrentUser() user: any,
-  ) {
+  async buscar(@Query() query: BuscarPedidoDto, @CurrentUser() user: any) {
     if (!query.q || query.q.trim().length < 2) {
       return { data: [] };
     }
-    const data = await this.mostradorService.buscarPedidos(
-      query.q.trim(),
-      user,
-      user.tiendaId,
-    );
+    const data = await this.mostradorService.buscarPedidos(query.q.trim(), user, user.tiendaId);
     return { data };
   }
 
   @Get(':id')
   @ApiOperation({
-    summary:
-      'Detalle completo del pedido (items, mensajes, historial). Valida tienda.',
+    summary: 'Detalle completo del pedido (items, mensajes, historial). Valida tienda.',
   })
-  async obtenerPedido(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async obtenerPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.mostradorService.obtenerPedido(id, user);
   }
 
   @Post(':id/entregar')
   @ApiOperation({
-    summary:
-      'PAID|SHIPPED → COMPLETED. Confirma que el cliente recogió el pedido en tienda.',
+    summary: 'PAID|SHIPPED → COMPLETED. Confirma que el cliente recogió el pedido en tienda.',
   })
-  async entregar(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async entregar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.mostradorService.entregar(id, user);
   }
 
@@ -203,11 +167,25 @@ export class MostradorController {
       '`pedido.llamado-mostrador` para que la TV muestre la alerta. Es el ' +
       'canal de aviso del flujo (el cliente ve su folio en la pantalla).',
   })
-  async llamar(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async llamar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.mostradorService.llamar(id, user);
+  }
+
+  /**
+   * Oct 2026: manda a llamar al SIGUIENTE de la cola, sin elegir pedido.
+   *
+   * Ruta fija: va ANTES de `:id` por la misma razón que `cola` y `listos` —
+   * si no, NestJS matchea `siguiente` contra `@Get(':id')` y el ParseIntPipe
+   * falla con 400.
+   */
+  @Post('llamar-siguiente')
+  @ApiOperation({
+    summary:
+      'Oct 2026: manda a llamar al primer pedido de la cola de revisión ' +
+      '(FIFO). Espejo del `llamar-siguiente` del cajero.',
+  })
+  async llamarSiguiente(@CurrentUser() user: any) {
+    return this.mostradorService.llamarSiguiente(user);
   }
 
   @Post(':id/descartar-llegada')
@@ -216,10 +194,7 @@ export class MostradorController {
       'F16: descarta un aviso de llegada falso (el cliente no estaba). ' +
       'No cambia el estado — solo quita el badge "EN TIENDA".',
   })
-  async descartarLlegada(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async descartarLlegada(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.mostradorService.descartarLlegada(id, user);
   }
 
@@ -230,10 +205,7 @@ export class MostradorController {
       'sin teléfono o sin folio). Escribe CanalLlegada.MOSTRADOR y hace ' +
       'aparecer el pedido en la cola. No cambia el estado.',
   })
-  async marcarLlegada(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async marcarLlegada(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.mostradorService.marcarLlegada(id, user);
   }
 
@@ -243,10 +215,7 @@ export class MostradorController {
       'Oct 2026: deshace un "Llamar por la TV". Saca el folio del panel ' +
       '"Atendiendo" y lo regresa a la lista de espera. No cambia el estado.',
   })
-  async devolverACola(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async devolverACola(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.mostradorService.devolverACola(id, user);
   }
 
@@ -280,8 +249,7 @@ export class MostradorController {
 
   @Post(':id/cancelar')
   @ApiOperation({
-    summary:
-      'EN_MOSTRADOR → CANCELLED + lista de reposición. La mercancía vuelve al anaquel.',
+    summary: 'EN_MOSTRADOR → CANCELLED + lista de reposición. La mercancía vuelve al anaquel.',
   })
   async cancelar(
     @Param('id', ParseIntPipe) id: number,
