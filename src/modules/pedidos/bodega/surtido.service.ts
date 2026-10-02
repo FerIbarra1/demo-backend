@@ -1,17 +1,7 @@
-import {
-  Injectable,
-  Logger,
-  BadRequestException,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { StorageService } from '../../imagenes/storage.service';
-import {
-  EstadoPedido,
-  EstadoSurtido,
-  EstadoPropuesta,
-  Prisma,
-} from '@prisma/client';
+import { EstadoPedido, EstadoSurtido, EstadoPropuesta, Prisma } from '@prisma/client';
 import { UserContext } from '../../../types/pedido.types';
 import { MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { PedidoAccessService } from '../core/pedido-access.service';
@@ -20,10 +10,7 @@ import { destinoTrasSurtido } from '../core/destino-post-surtido.util';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { rankearSimilares } from '../core/similitud.util';
-import {
-  MAX_PEDIDOS_POR_BODEGUERO,
-  ESTADOS_OCUPAN_SLOT_BODEGA,
-} from '../core/pedido-limits';
+import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/pedido-limits';
 import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
 import { recalcularTotalesPedido } from '../core/totales.util';
 
@@ -150,10 +137,7 @@ export class SurtidoService {
       itemsCompartidos: number;
       minutosEnCola: number;
     }> = [];
-    if (
-      pedido.estado === EstadoPedido.PENDING_REVIEW ||
-      pedido.estado === EstadoPedido.REVIEWING
-    ) {
+    if (pedido.estado === EstadoPedido.PENDING_REVIEW || pedido.estado === EstadoPedido.REVIEWING) {
       pedidosSimilares = await this.calcularSimilaresParaPedido(pedido);
     }
 
@@ -558,14 +542,10 @@ export class SurtidoService {
 
   private validarCoherencia(dto: MarcarSurtidoItemDto) {
     if (dto.estadoSurtido === EstadoSurtido.PENDIENTE && dto.cantidadSurtida > 0) {
-      throw new BadRequestException(
-        'Si el estado es PENDIENTE, la cantidad surtida debe ser 0',
-      );
+      throw new BadRequestException('Si el estado es PENDIENTE, la cantidad surtida debe ser 0');
     }
     if (dto.estadoSurtido === EstadoSurtido.COMPLETO && dto.cantidadSurtida < 1) {
-      throw new BadRequestException(
-        'Si el estado es COMPLETO, la cantidad surtida debe ser >= 1',
-      );
+      throw new BadRequestException('Si el estado es COMPLETO, la cantidad surtida debe ser >= 1');
     }
     if (dto.estadoSurtido === EstadoSurtido.NO_DISPONIBLE && dto.cantidadSurtida !== 0) {
       throw new BadRequestException(

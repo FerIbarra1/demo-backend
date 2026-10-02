@@ -31,12 +31,7 @@ import { EstadoPedido, Prisma } from '@prisma/client';
  */
 export type FiltroCola = 'todos' | 'atender' | 'esperando' | 'respondidos';
 
-export const FILTROS_COLA: FiltroCola[] = [
-  'todos',
-  'atender',
-  'esperando',
-  'respondidos',
-];
+export const FILTROS_COLA: FiltroCola[] = ['todos', 'atender', 'esperando', 'respondidos'];
 
 /** Predicado de "el cliente ya me respondió una propuesta". */
 const RESPONDIO_PROPUESTA_VENTAS: Prisma.PedidoWhereInput = {
@@ -66,12 +61,7 @@ export class VentasService {
    * ya propuso y espera al cliente) — así el vendedor ve en una sola lista
    * todo lo que tiene entre manos, con un flag que distingue cada caso.
    */
-  async obtenerCola(
-    tiendaId: number,
-    pagina = 1,
-    limite = 20,
-    filtro: FiltroCola = 'todos',
-  ) {
+  async obtenerCola(tiendaId: number, pagina = 1, limite = 20, filtro: FiltroCola = 'todos') {
     const skip = (pagina - 1) * limite;
     const where: Prisma.PedidoWhereInput = {
       tiendaId,
@@ -82,68 +72,61 @@ export class VentasService {
           : filtro === 'respondidos'
             ? { estado: EstadoPedido.EN_ASESORIA, ...RESPONDIO_PROPUESTA_VENTAS }
             : {
-                OR: [
-                  { estado: EstadoPedido.EN_ASESORIA },
-                  ESPERANDO_CLIENTE,
-                ],
+                OR: [{ estado: EstadoPedido.EN_ASESORIA }, ESPERANDO_CLIENTE],
               }),
     };
 
-    const [pedidos, total, cTodos, cAtender, cEsperando, cRespondidos] =
-      await Promise.all([
-        this.prisma.pedido.findMany({
-          where,
-          include: {
-            items: { where: { cancelada: false }, orderBy: { id: 'asc' } },
-            tienda: { select: { id: true, nombre: true } },
-            usuario: { select: { id: true, nombre: true, email: true, telefono: true } },
-            // La propuesta de bodega que originó el escalado, para que el
-            // vendedor vea qué fue lo que el bodeguero no encontró.
-            propuestas: {
-              orderBy: { enviadaAt: 'desc' },
-              take: 3,
-              include: {
-                creadaPor: { select: { id: true, nombre: true, apellido: true } },
-              },
-            },
-            // Últimos mensajes para previsualizar la conversación.
-            mensajes: {
-              orderBy: { createdAt: 'desc' },
-              take: 1,
-              select: { id: true, contenido: true, createdAt: true, autorRol: true },
+    const [pedidos, total, cTodos, cAtender, cEsperando, cRespondidos] = await Promise.all([
+      this.prisma.pedido.findMany({
+        where,
+        include: {
+          items: { where: { cancelada: false }, orderBy: { id: 'asc' } },
+          tienda: { select: { id: true, nombre: true } },
+          usuario: { select: { id: true, nombre: true, email: true, telefono: true } },
+          // La propuesta de bodega que originó el escalado, para que el
+          // vendedor vea qué fue lo que el bodeguero no encontró.
+          propuestas: {
+            orderBy: { enviadaAt: 'desc' },
+            take: 3,
+            include: {
+              creadaPor: { select: { id: true, nombre: true, apellido: true } },
             },
           },
-          // En 'esperando' el pedido lleva ahí desde que se envió la
-          // propuesta, no desde que el cliente pidió asesor; ordenar por
-          // asesorSolicitadoAt dejaría arriba los más viejos por la razón
-          // equivocada. El id es un proxy de "propuesta más reciente".
-          orderBy:
-            filtro === 'esperando'
-              ? { id: 'desc' }
-              : { asesorSolicitadoAt: 'asc' },
-          skip,
-          take: limite,
-        }),
-        this.prisma.pedido.count({ where }),
-        // Conteos por filtro para las etiquetas de los tabs.
-        this.prisma.pedido.count({
-          where: {
-            tiendaId,
-            OR: [{ estado: EstadoPedido.EN_ASESORIA }, ESPERANDO_CLIENTE],
+          // Últimos mensajes para previsualizar la conversación.
+          mensajes: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { id: true, contenido: true, createdAt: true, autorRol: true },
           },
-        }),
-        this.prisma.pedido.count({
-          where: { tiendaId, estado: EstadoPedido.EN_ASESORIA },
-        }),
-        this.prisma.pedido.count({ where: { tiendaId, ...ESPERANDO_CLIENTE } }),
-        this.prisma.pedido.count({
-          where: {
-            tiendaId,
-            estado: EstadoPedido.EN_ASESORIA,
-            ...RESPONDIO_PROPUESTA_VENTAS,
-          },
-        }),
-      ]);
+        },
+        // En 'esperando' el pedido lleva ahí desde que se envió la
+        // propuesta, no desde que el cliente pidió asesor; ordenar por
+        // asesorSolicitadoAt dejaría arriba los más viejos por la razón
+        // equivocada. El id es un proxy de "propuesta más reciente".
+        orderBy: filtro === 'esperando' ? { id: 'desc' } : { asesorSolicitadoAt: 'asc' },
+        skip,
+        take: limite,
+      }),
+      this.prisma.pedido.count({ where }),
+      // Conteos por filtro para las etiquetas de los tabs.
+      this.prisma.pedido.count({
+        where: {
+          tiendaId,
+          OR: [{ estado: EstadoPedido.EN_ASESORIA }, ESPERANDO_CLIENTE],
+        },
+      }),
+      this.prisma.pedido.count({
+        where: { tiendaId, estado: EstadoPedido.EN_ASESORIA },
+      }),
+      this.prisma.pedido.count({ where: { tiendaId, ...ESPERANDO_CLIENTE } }),
+      this.prisma.pedido.count({
+        where: {
+          tiendaId,
+          estado: EstadoPedido.EN_ASESORIA,
+          ...RESPONDIO_PROPUESTA_VENTAS,
+        },
+      }),
+    ]);
 
     const ahora = new Date();
     return {

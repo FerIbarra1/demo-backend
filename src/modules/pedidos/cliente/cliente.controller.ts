@@ -27,10 +27,27 @@ export class ClienteController {
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Crear un nuevo pedido (estado inicial: PENDING_REVIEW)' })
-  @ApiHeader({ name: 'Idempotency-Key', required: false, description: 'UUID opcional para evitar duplicados' })
-  @ApiHeader({ name: 'X-Tienda-Id', required: false, description: 'Tienda activa del cliente (override de la tienda del usuario)' })
-  @ApiHeader({ name: 'X-Kiosko-Id', required: false, description: 'ID del kiosko si el pedido se origina en una tablet de tienda (fuerza canalOrigen=KIOSKO)' })
-  @ApiHeader({ name: 'X-Kiosko-Token', required: false, description: 'Device token del kiosko. OBLIGATORIO si X-Kiosko-Id viene presente (PR2).' })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description: 'UUID opcional para evitar duplicados',
+  })
+  @ApiHeader({
+    name: 'X-Tienda-Id',
+    required: false,
+    description: 'Tienda activa del cliente (override de la tienda del usuario)',
+  })
+  @ApiHeader({
+    name: 'X-Kiosko-Id',
+    required: false,
+    description:
+      'ID del kiosko si el pedido se origina en una tablet de tienda (fuerza canalOrigen=KIOSKO)',
+  })
+  @ApiHeader({
+    name: 'X-Kiosko-Token',
+    required: false,
+    description: 'Device token del kiosko. OBLIGATORIO si X-Kiosko-Id viene presente (PR2).',
+  })
   async crearPedido(
     @Body() dto: CreatePedidoDto,
     @CurrentUser() user: any,
@@ -92,10 +109,7 @@ export class ClienteController {
   @Post(':id/cancelar')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Cancelar mi pedido (sólo antes de PAID)' })
-  async cancelarPedido(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async cancelarPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.clienteService.cancelarPedido(id, user.userId, user);
   }
 }

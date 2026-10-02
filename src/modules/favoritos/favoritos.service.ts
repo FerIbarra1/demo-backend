@@ -98,10 +98,7 @@ export class FavoritosService {
               talla: { select: { nombre: true } },
               color: { select: { nombre: true, hex: true } },
             },
-            orderBy: [
-              { talla: { orden: 'asc' } },
-              { color: { nombre: 'asc' } },
-            ],
+            orderBy: [{ talla: { orden: 'asc' } }, { color: { nombre: 'asc' } }],
           }),
         ])
       : [[], []];

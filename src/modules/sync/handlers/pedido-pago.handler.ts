@@ -45,9 +45,7 @@ export class PedidoPagoHandler {
     private pedidoState: PedidoStateService,
   ) {}
 
-  async procesar(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  async procesar(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     try {
       const pedidoIdNube = await this.externalRefs.findSystemId(
         'PEDIDOS',
@@ -80,9 +78,7 @@ export class PedidoPagoHandler {
           select: { estado: true, fechaPago: true },
         });
         if (pedidoActual?.estado === EstadoPedido.PAID) {
-          this.logger.log(
-            `Pedido ${pedidoIdNube} ya estaba PAID (sync idempotente), omitido`,
-          );
+          this.logger.log(`Pedido ${pedidoIdNube} ya estaba PAID (sync idempotente), omitido`);
           return { ok: true, mensaje: 'PEDIDO ya estaba PAID — omitido (idempotente)' };
         }
 
@@ -100,9 +96,7 @@ export class PedidoPagoHandler {
 
       return { ok: true, mensaje: 'PEDIDO sin cambio relevante (SWCANCEL/FINALIZADA intactos)' };
     } catch (err) {
-      this.logger.error(
-        `Error procesando PEDIDO/${evento.localId}: ${(err as Error).message}`,
-      );
+      this.logger.error(`Error procesando PEDIDO/${evento.localId}: ${(err as Error).message}`);
       return { ok: false, mensaje: (err as Error).message };
     }
   }

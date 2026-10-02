@@ -15,8 +15,7 @@ function makeEvent(overrides: Record<string, unknown> = {}) {
 }
 
 function makeService(overrides: Record<string, any> = {}) {
-  let prisma: any;
-  prisma = {
+  const prisma: any = {
     syncEventInbox: {
       findUnique: jest.fn(),
       create: jest.fn(),

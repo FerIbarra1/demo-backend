@@ -1,10 +1,7 @@
 import { Module } from '@nestjs/common';
 import { KioskoController } from './kiosko.controller';
 import { KioskoPairingController } from './kiosko-pairing.controller';
-import {
-  KioskoLlegadaController,
-  PedidoLlegoQrController,
-} from './kiosko-llegada.controller';
+import { KioskoLlegadaController, PedidoLlegoQrController } from './kiosko-llegada.controller';
 import { KioskoLlegadaService } from './kiosko-llegada.service';
 import { KioskoService } from './kiosko.service';
 import { KioskoPairingService } from './kiosko-pairing.service';

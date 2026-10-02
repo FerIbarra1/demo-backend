@@ -112,7 +112,9 @@ export class KioskoPairingService {
       },
     });
 
-    this.logger.log(`Emparejamiento solicitado: ${pairing.id} (tienda hint ${datos.tiendaIdHint ?? '—'})`);
+    this.logger.log(
+      `Emparejamiento solicitado: ${pairing.id} (tienda hint ${datos.tiendaIdHint ?? '—'})`,
+    );
 
     return { pairingId: pairing.id, code, expiraAt, pollAfterMs: 3000 };
   }
@@ -201,8 +203,7 @@ export class KioskoPairingService {
     // tablet lo va a desconectar (su token viejo queda inválido). El admin debe
     // confirmarlo a sabiendas.
     const kioskoEnLinea =
-      !!kiosko.ultimoHeartbeat &&
-      Date.now() - kiosko.ultimoHeartbeat.getTime() < 3 * 60 * 1000;
+      !!kiosko.ultimoHeartbeat && Date.now() - kiosko.ultimoHeartbeat.getTime() < 3 * 60 * 1000;
 
     return { ok: true, kioskoEnLinea, kiosko };
   }
@@ -328,9 +329,7 @@ export class KioskoPairingService {
   async purgarVencidas(): Promise<void> {
     const ahora = new Date();
     const corteExpiradas = new Date(ahora.getTime() - KioskoPairingService.TTL_MS);
-    const corteTerminales = new Date(
-      ahora.getTime() - KioskoPairingService.RETENCION_TERMINAL_MS,
-    );
+    const corteTerminales = new Date(ahora.getTime() - KioskoPairingService.RETENCION_TERMINAL_MS);
     await this.prisma.kioskoPairing.deleteMany({
       where: {
         OR: [

@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Delete, Body, Param, Query, ParseIntPipe, UseGuards } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Delete,
+  Body,
+  Param,
+  Query,
+  ParseIntPipe,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
 import { Roles } from '../../../common/decorators/roles.decorator';
@@ -48,10 +58,7 @@ export class AdminController {
 
   @Get(':id/historial')
   @ApiOperation({ summary: 'Obtener historial de cambios de estado' })
-  async obtenerHistorial(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async obtenerHistorial(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.adminService.obtenerHistorialPedido(id, user);
   }
 
@@ -66,8 +73,7 @@ export class AdminController {
   @UseGuards(ApiKeyGuard)
   @ApiKeyAuth()
   @ApiOperation({
-    summary:
-      'Webhook del sistema externo (Firebird): PENDING_PAID → PAID. Auth X-Agent-Key.',
+    summary: 'Webhook del sistema externo (Firebird): PENDING_PAID → PAID. Auth X-Agent-Key.',
   })
   async marcarPagado(
     @Param('id', ParseIntPipe) id: number,
@@ -79,10 +85,7 @@ export class AdminController {
 
   @Delete(':id')
   @ApiOperation({ summary: 'Eliminar pedido cancelado (limpieza)' })
-  async eliminar(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async eliminar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.adminService.eliminarPedidoCancelado(id, user);
   }
 }

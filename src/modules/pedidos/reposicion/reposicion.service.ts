@@ -75,9 +75,7 @@ export class ReposicionService {
       },
     });
 
-    this.logger.log(
-      `Pedido ${pedidoId}: entrada de reposición creada (${items.length} item(s))`,
-    );
+    this.logger.log(`Pedido ${pedidoId}: entrada de reposición creada (${items.length} item(s))`);
   }
 
   /**
@@ -119,10 +117,7 @@ export class ReposicionService {
   /**
    * Bodega confirma que la mercancía volvió al anaquel.
    */
-  async confirmarRepuesto(
-    pedidoId: number,
-    usuario: UserContext,
-  ) {
+  async confirmarRepuesto(pedidoId: number, usuario: UserContext) {
     const reposicion = await this.prisma.pedidoReposicion.findUnique({
       where: { pedidoId },
       include: { pedido: { select: { tiendaId: true } } },
@@ -151,9 +146,7 @@ export class ReposicionService {
       pedidoId,
     });
 
-    this.logger.log(
-      `Pedido ${pedidoId}: reposición confirmada por ${usuario.nombre}`,
-    );
+    this.logger.log(`Pedido ${pedidoId}: reposición confirmada por ${usuario.nombre}`);
 
     return actualizada;
   }

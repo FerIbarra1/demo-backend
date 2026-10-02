@@ -18,9 +18,7 @@ describe('motivoNoAvisable', () => {
   });
 
   it('deja pasar un pedido de kiosko listo', () => {
-    expect(
-      motivoNoAvisable({ ...base, modoEntrega: ModoEntrega.KIOSKO }),
-    ).toBeNull();
+    expect(motivoNoAvisable({ ...base, modoEntrega: ModoEntrega.KIOSKO })).toBeNull();
   });
 
   it('rechaza un pedido a domicilio aunque esté listo', () => {
@@ -49,12 +47,10 @@ describe('motivoNoAvisable', () => {
   it('distingue un pedido ya entregado de uno cancelado', () => {
     // El frontend usa el `codigo` para elegir el copy, así que no pueden
     // colapsarse en el mismo valor.
-    expect(
-      motivoNoAvisable({ ...base, estado: EstadoPedido.COMPLETED })?.codigo,
-    ).toBe('YA_ENTREGADO');
-    expect(
-      motivoNoAvisable({ ...base, estado: EstadoPedido.CANCELLED })?.codigo,
-    ).toBe('CANCELADO');
+    expect(motivoNoAvisable({ ...base, estado: EstadoPedido.COMPLETED })?.codigo).toBe(
+      'YA_ENTREGADO',
+    );
+    expect(motivoNoAvisable({ ...base, estado: EstadoPedido.CANCELLED })?.codigo).toBe('CANCELADO');
   });
 
   it('da un mensaje para TODOS los estados no avisables', () => {

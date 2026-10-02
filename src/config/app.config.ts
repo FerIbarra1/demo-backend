@@ -21,7 +21,9 @@ export default registerAs('app', () => ({
   // Orígenes CORS permitidos en producción. Se derivan de FRONTEND_URL o de
   // CORS_ORIGINS (lista separada por comas). En dev se permite cualquier origen.
   corsOrigins: process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
+    ? process.env.CORS_ORIGINS.split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
     : process.env.FRONTEND_URL
       ? [process.env.FRONTEND_URL]
       : [],
@@ -69,9 +71,6 @@ export default registerAs('app', () => ({
         ? `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION || 'us-west-2'}.amazonaws.com/branding/logo.png`
         : ''),
     frontendUrl: process.env.FRONTEND_URL || 'http://localhost:3001',
-    passwordResetExpiresMin: parseInt(
-      process.env.PASSWORD_RESET_EXPIRES_MIN || '60',
-      10,
-    ),
+    passwordResetExpiresMin: parseInt(process.env.PASSWORD_RESET_EXPIRES_MIN || '60', 10),
   },
 }));

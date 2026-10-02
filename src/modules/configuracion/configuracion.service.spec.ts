@@ -32,11 +32,7 @@ describe('ConfiguracionService — logo', () => {
       get: () => 'http://localhost:3001/Logo.png',
     } as unknown as ConfigService;
     return {
-      svc: new ConfiguracionService(
-        prisma as never,
-        storage as never,
-        config,
-      ),
+      svc: new ConfiguracionService(prisma as never, storage as never, config),
       prisma,
       storage,
     };
@@ -45,23 +41,17 @@ describe('ConfiguracionService — logo', () => {
   describe('obtenerLogoUrl', () => {
     it('usa el logo de la BD cuando existe', async () => {
       const { svc } = crear({ fila: { valor: 'branding/logo/x.png' } });
-      await expect(svc.obtenerLogoUrl()).resolves.toBe(
-        'https://cdn.test/branding/logo/x.png',
-      );
+      await expect(svc.obtenerLogoUrl()).resolves.toBe('https://cdn.test/branding/logo/x.png');
     });
 
     it('cae al fallback de la env cuando no hay logo en BD', async () => {
       const { svc } = crear({ fila: null });
-      await expect(svc.obtenerLogoUrl()).resolves.toBe(
-        'http://localhost:3001/Logo.png',
-      );
+      await expect(svc.obtenerLogoUrl()).resolves.toBe('http://localhost:3001/Logo.png');
     });
 
     it('cae al fallback si la fila existe pero el valor está vacío', async () => {
       const { svc } = crear({ fila: { valor: '' } });
-      await expect(svc.obtenerLogoUrl()).resolves.toBe(
-        'http://localhost:3001/Logo.png',
-      );
+      await expect(svc.obtenerLogoUrl()).resolves.toBe('http://localhost:3001/Logo.png');
     });
   });
 
@@ -79,10 +69,7 @@ describe('ConfiguracionService — logo', () => {
       const { svc, prisma, storage } = crear();
       await svc.subirLogo(archivo());
 
-      const [file, key] = storage.subirImagen.mock.calls[0] as [
-        Express.Multer.File,
-        string,
-      ];
+      const [file, key] = storage.subirImagen.mock.calls[0] as [Express.Multer.File, string];
       expect(key).toMatch(/^branding\/logo\/[0-9a-f-]+\.png$/);
       expect(file.mimetype).toBe('image/png');
       expect(prisma.configuracionSitio.upsert).toHaveBeenCalledWith(
@@ -104,9 +91,9 @@ describe('ConfiguracionService — logo', () => {
 
     it('rechaza un archivo vacío', async () => {
       const { svc } = crear();
-      await expect(
-        svc.subirLogo(archivo({ buffer: Buffer.alloc(0), size: 0 })),
-      ).rejects.toThrow(BadRequestException);
+      await expect(svc.subirLogo(archivo({ buffer: Buffer.alloc(0), size: 0 }))).rejects.toThrow(
+        BadRequestException,
+      );
     });
 
     it('borra el logo anterior tras persistir el nuevo', async () => {
@@ -114,9 +101,7 @@ describe('ConfiguracionService — logo', () => {
         fila: { valor: 'branding/logo/viejo.png' },
       });
       await svc.subirLogo(archivo());
-      expect(storage.eliminarImagen).toHaveBeenCalledWith(
-        'branding/logo/viejo.png',
-      );
+      expect(storage.eliminarImagen).toHaveBeenCalledWith('branding/logo/viejo.png');
     });
 
     it('no intenta borrar si no había logo previo', async () => {

@@ -50,9 +50,9 @@ export const PedidoListoEnTienda = ({
             lineHeight: '1.6',
           }}
         >
-          Revisa las piezas en el mostrador: si todo está como lo pediste,
-          confírmalo y pasa a pagar. Si algo no te convence, puedes ajustarlo
-          ahí mismo o responder desde el chat del pedido.
+          Revisa las piezas en el mostrador: si todo está como lo pediste, confírmalo y pasa a
+          pagar. Si algo no te convence, puedes ajustarlo ahí mismo o responder desde el chat del
+          pedido.
         </Text>
       </>
     }

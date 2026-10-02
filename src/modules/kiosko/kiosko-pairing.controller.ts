@@ -1,12 +1,4 @@
-import {
-  Controller,
-  Post,
-  Get,
-  Body,
-  Param,
-  Query,
-  Req,
-} from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, Query, Req } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
@@ -103,10 +95,7 @@ export class KioskoPairingController {
   @ApiBearerAuth()
   @Post(':pairingId/cancelar')
   @ApiOperation({ summary: 'Cancela una solicitud de emparejamiento (Admin)' })
-  cancelar(
-    @Param('pairingId') pairingId: string,
-    @CurrentUser('userId') adminUserId: number,
-  ) {
+  cancelar(@Param('pairingId') pairingId: string, @CurrentUser('userId') adminUserId: number) {
     return this.pairing.cancelar(pairingId, adminUserId);
   }
 }

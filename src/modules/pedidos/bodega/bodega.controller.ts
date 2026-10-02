@@ -63,9 +63,7 @@ export class BodegaController {
       : undefined;
     const tiendaSolicitada = tiendaId ? parseInt(tiendaId, 10) : undefined;
     const tiendaEfectiva =
-      user.rol === RolUsuario.ADMIN
-        ? tiendaSolicitada ?? user.tiendaId
-        : user.tiendaId;
+      user.rol === RolUsuario.ADMIN ? (tiendaSolicitada ?? user.tiendaId) : user.tiendaId;
     return this.bodegaService.obtenerPedidosBodega(
       tiendaEfectiva,
       estado,
@@ -108,7 +106,8 @@ export class BodegaController {
   })
   @ApiResponse({
     status: 200,
-    description: '{ zonas, pedidos } — zonas para el picking agrupado, pedidos para confirmar cada uno.',
+    description:
+      '{ zonas, pedidos } — zonas para el picking agrupado, pedidos para confirmar cada uno.',
   })
   async surtirJuntosLote(@CurrentUser() user: any) {
     return this.bodegaService.obtenerLoteSurtirJuntos(user.userId, user.tiendaId);

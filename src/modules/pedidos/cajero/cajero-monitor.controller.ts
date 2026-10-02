@@ -19,8 +19,7 @@ export class CajeroMonitorController {
    */
   @Get()
   @ApiOperation({
-    summary:
-      'Snapshot del monitor de ventanillas (cajeros + cola + contadores)',
+    summary: 'Snapshot del monitor de ventanillas (cajeros + cola + contadores)',
   })
   async obtener(@CurrentUser() user: any) {
     const tiendaId = user.tiendaId;

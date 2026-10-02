@@ -104,9 +104,9 @@ describe('PostgreSQL sync integration', () => {
     };
     await prisma.syncEventInbox.create({ data: event });
 
-    await expect(
-      prisma.syncEventInbox.create({ data: event }),
-    ).rejects.toMatchObject({ code: 'P2002' });
+    await expect(prisma.syncEventInbox.create({ data: event })).rejects.toMatchObject({
+      code: 'P2002',
+    });
   });
 
   it('processes a valid ACK atomically with its ExternalRef', async () => {
@@ -123,14 +123,16 @@ describe('PostgreSQL sync integration', () => {
 
     const result = await service.procesarPedidosAck({
       tiendaId: tiendaExternalId,
-      acks: [{
-        pedidoId,
-        agentId: 'agent-a',
-        leaseToken: 'lease-valid',
-        externalIdPEDIDOS: 9101,
-        externalFolio: 'F-9101',
-        exito: true,
-      }],
+      acks: [
+        {
+          pedidoId,
+          agentId: 'agent-a',
+          leaseToken: 'lease-valid',
+          externalIdPEDIDOS: 9101,
+          externalFolio: 'F-9101',
+          exito: true,
+        },
+      ],
     });
 
     expect(result).toEqual({ actualizados: 1, errores: 0 });
@@ -156,10 +158,13 @@ describe('PostgreSQL sync integration', () => {
       exito: true,
     };
 
-    await expect(service.procesarPedidosAck({ tiendaId: tiendaExternalId, acks: [ack] }))
-      .resolves.toEqual({ actualizados: 1, errores: 0 });
+    await expect(
+      service.procesarPedidosAck({ tiendaId: tiendaExternalId, acks: [ack] }),
+    ).resolves.toEqual({ actualizados: 1, errores: 0 });
     expect(
-      await prisma.externalRef.count({ where: { systemEntity: 'PEDIDO', systemId: pedidoId, localId: 9101 } }),
+      await prisma.externalRef.count({
+        where: { systemEntity: 'PEDIDO', systemId: pedidoId, localId: 9101 },
+      }),
     ).toBe(1);
   });
 
@@ -169,21 +174,25 @@ describe('PostgreSQL sync integration', () => {
 
     const result = await service.procesarPedidosAck({
       tiendaId: tiendaExternalId,
-      acks: [{
-        pedidoId,
-        agentId: 'agent-b',
-        leaseToken: 'lease-wrong',
-        externalIdPEDIDOS: 9200,
-        externalFolio: 'F-9200',
-        exito: true,
-      }],
+      acks: [
+        {
+          pedidoId,
+          agentId: 'agent-b',
+          leaseToken: 'lease-wrong',
+          externalIdPEDIDOS: 9200,
+          externalFolio: 'F-9200',
+          exito: true,
+        },
+      ],
     });
 
     expect(result).toEqual({ actualizados: 0, errores: 1 });
     const unchanged = await prisma.pedidoPendienteEnvio.findUnique({ where: { pedidoId } });
     expect(unchanged?.id).toBe(queue?.id);
     expect(unchanged?.externalIdPEDIDOS).toBe(9101);
-    expect(await prisma.externalRef.count({ where: { systemId: pedidoId, localId: 9200 } })).toBe(0);
+    expect(await prisma.externalRef.count({ where: { systemId: pedidoId, localId: 9200 } })).toBe(
+      0,
+    );
   });
 
   it('allows only one atomic claim for a pending order delivery', async () => {

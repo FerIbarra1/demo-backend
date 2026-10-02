@@ -17,13 +17,7 @@ import { Prisma } from '@prisma/client';
  */
 
 /** Columna de `PrecioCO` que corresponde a la lista de precios del cliente. */
-export type ColumnaLista =
-  | 'lista1'
-  | 'lista2'
-  | 'lista3'
-  | 'lista4'
-  | 'lista5'
-  | 'lista6';
+export type ColumnaLista = 'lista1' | 'lista2' | 'lista3' | 'lista4' | 'lista5' | 'lista6';
 
 /**
  * Shape mínimo de un `PrecioCO` para resolver su precio. Acepta cualquier
@@ -45,9 +39,7 @@ export interface PrecioConListas {
  * columna de `PrecioCO`. Cualquier valor desconocido, vacío o ausente cae a
  * `lista1`, que es el comportamiento histórico.
  */
-export function columnaDesdeCodigo(
-  codigo: string | null | undefined,
-): ColumnaLista {
+export function columnaDesdeCodigo(codigo: string | null | undefined): ColumnaLista {
   switch ((codigo ?? '').trim()) {
     case '2':
       return 'lista2';
@@ -90,10 +82,7 @@ export function resolverColumnaLista(
  * Devuelve `Decimal` para no introducir error de punto flotante en los
  * subtotales del pedido.
  */
-export function precioDeLista(
-  pco: PrecioConListas,
-  columna: ColumnaLista,
-): Prisma.Decimal {
+export function precioDeLista(pco: PrecioConListas, columna: ColumnaLista): Prisma.Decimal {
   const deLista = new Prisma.Decimal(pco[columna] ?? 0);
   return deLista.greaterThan(0) ? deLista : new Prisma.Decimal(pco.precio);
 }

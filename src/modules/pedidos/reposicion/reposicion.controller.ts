@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Param, Query, ParseIntPipe, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Query,
+  ParseIntPipe,
+  BadRequestException,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { ReposicionService } from './reposicion.service';
 import { Roles } from '../../../common/decorators/roles.decorator';
@@ -52,10 +60,7 @@ export class ReposicionController {
   @ApiOperation({
     summary: 'Confirmar que la mercancía de un pedido cancelado volvió al anaquel',
   })
-  async confirmar(
-    @Param('pedidoId', ParseIntPipe) pedidoId: number,
-    @CurrentUser() user: any,
-  ) {
+  async confirmar(@Param('pedidoId', ParseIntPipe) pedidoId: number, @CurrentUser() user: any) {
     return this.reposicionService.confirmarRepuesto(pedidoId, user);
   }
 }

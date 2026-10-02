@@ -48,8 +48,7 @@ const MENSAJES_POR_ESTADO: Partial<Record<EstadoPedido, string>> = {
     'Tu pedido ya está pagado. Acércate al mostrador con tu folio y te lo entregamos.',
   [EstadoPedido.SHIPPED]: 'Tu pedido ya fue enviado.',
   [EstadoPedido.COMPLETED]: 'Ese pedido ya fue entregado.',
-  [EstadoPedido.CANCELLED]:
-    'Ese pedido está cancelado. Pasa al mostrador para revisarlo.',
+  [EstadoPedido.CANCELLED]: 'Ese pedido está cancelado. Pasa al mostrador para revisarlo.',
 };
 
 /**

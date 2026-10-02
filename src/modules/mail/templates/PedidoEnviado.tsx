@@ -11,12 +11,7 @@ export interface PedidoEnviadoProps {
   frontendUrl: string;
 }
 
-export const PedidoEnviado = ({
-  pedido,
-  pedidoUrl,
-  logoUrl,
-  frontendUrl,
-}: PedidoEnviadoProps) => (
+export const PedidoEnviado = ({ pedido, pedidoUrl, logoUrl, frontendUrl }: PedidoEnviadoProps) => (
   <PedidoEmailShell
     preview={`Tu pedido ${folioVisible(pedido)} ya va en camino`}
     title={`¡Tu pedido va en camino!`}
@@ -44,8 +39,8 @@ export const PedidoEnviado = ({
             lineHeight: '1.6',
           }}
         >
-          Recibirás otro correo en cuanto tu pedido sea entregado. Si necesitas
-          rastrearlo, contáctanos con tu folio {folioVisible(pedido)}.
+          Recibirás otro correo en cuanto tu pedido sea entregado. Si necesitas rastrearlo,
+          contáctanos con tu folio {folioVisible(pedido)}.
         </Text>
       </>
     }

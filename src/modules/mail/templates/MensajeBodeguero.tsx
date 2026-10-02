@@ -1,11 +1,7 @@
 import * as React from 'react';
 import { Heading, Section, Text } from '@react-email/components';
 import { EmailLayout } from './Layout';
-import {
-  parsePropuestaContenido,
-  resumenPropuesta,
-  type ItemPropuestaJson,
-} from '../propuesta';
+import { parsePropuestaContenido, resumenPropuesta, type ItemPropuestaJson } from '../propuesta';
 import { PedidoEmailData, folioVisible } from '../mail.templates';
 
 export interface MensajeBodegueroProps {
@@ -45,13 +41,14 @@ const fmtMoney = (n: number) =>
     currency: 'MXN',
   }).format(Number.isFinite(n) ? n : 0);
 
-const TIPO_LABEL: Record<ItemPropuestaJson['tipo'], { label: string; bg: string; color: string }> = {
-  completo: { label: 'OK', bg: '#dcfce7', color: '#166534' },
-  parcial: { label: 'Parcial', bg: '#fef3c7', color: '#92400e' },
-  cambio: { label: 'Cambio', bg: '#dbeafe', color: '#1e40af' },
-  'no-disponible': { label: 'No disp.', bg: '#fee2e2', color: '#991b1b' },
-  agregado: { label: 'Nuevo', bg: '#ede9fe', color: '#5b21b6' },
-};
+const TIPO_LABEL: Record<ItemPropuestaJson['tipo'], { label: string; bg: string; color: string }> =
+  {
+    completo: { label: 'OK', bg: '#dcfce7', color: '#166534' },
+    parcial: { label: 'Parcial', bg: '#fef3c7', color: '#92400e' },
+    cambio: { label: 'Cambio', bg: '#dbeafe', color: '#1e40af' },
+    'no-disponible': { label: 'No disp.', bg: '#fee2e2', color: '#991b1b' },
+    agregado: { label: 'Nuevo', bg: '#ede9fe', color: '#5b21b6' },
+  };
 
 export const MensajeBodeguero = ({
   pedido,
@@ -91,8 +88,8 @@ export const MensajeBodeguero = ({
           lineHeight: '1.6',
         }}
       >
-        Hola, {pedido.clienteNombre}. {nombreBodeguero} te ha escrito sobre tu
-        pedido <strong>{folioVisible(pedido)}</strong>.
+        Hola, {pedido.clienteNombre}. {nombreBodeguero} te ha escrito sobre tu pedido{' '}
+        <strong>{folioVisible(pedido)}</strong>.
       </Text>
 
       <Section
@@ -170,9 +167,9 @@ export const MensajeBodeguero = ({
           lineHeight: '1.6',
         }}
       >
-        Puedes responder directamente desde el chat del pedido. Te avisamos
-        por correo sólo en este primer mensaje — el resto de la conversación la
-        puedes seguir en tiempo real dentro de la página.
+        Puedes responder directamente desde el chat del pedido. Te avisamos por correo sólo en este
+        primer mensaje — el resto de la conversación la puedes seguir en tiempo real dentro de la
+        página.
       </Text>
 
       <Section style={{ textAlign: 'center', margin: '8px 0' }}>
@@ -238,15 +235,9 @@ const PropuestaTabla: React.FC<PropuestaTablaProps> = ({ propuesta }) => {
       <thead>
         <tr>
           <th style={{ ...headerCell, textAlign: 'left' as const }}>Producto</th>
-          <th style={{ ...headerCell, textAlign: 'center' as const, width: '80px' }}>
-            Tipo
-          </th>
-          <th style={{ ...headerCell, textAlign: 'right' as const, width: '50px' }}>
-            Cant.
-          </th>
-          <th style={{ ...headerCell, textAlign: 'right' as const, width: '90px' }}>
-            Subtotal
-          </th>
+          <th style={{ ...headerCell, textAlign: 'center' as const, width: '80px' }}>Tipo</th>
+          <th style={{ ...headerCell, textAlign: 'right' as const, width: '50px' }}>Cant.</th>
+          <th style={{ ...headerCell, textAlign: 'right' as const, width: '90px' }}>Subtotal</th>
         </tr>
       </thead>
       <tbody>

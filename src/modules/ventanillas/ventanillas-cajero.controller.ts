@@ -34,19 +34,13 @@ export class VentanillasCajeroController {
 
   @Post('elegir')
   @ApiOperation({ summary: 'Elegir la ventanilla donde trabaja el cajero' })
-  async elegir(
-    @CurrentUser() user: any,
-    @Body() body: { ventanillaId: number },
-  ) {
+  async elegir(@CurrentUser() user: any, @Body() body: { ventanillaId: number }) {
     return this.service.elegir(user.userId, user.tiendaId, body.ventanillaId);
   }
 
   @Post('liberar')
   @ApiOperation({ summary: 'Liberar la ventanilla del cajero (logout / cambio)' })
-  async liberar(
-    @CurrentUser() user: any,
-    @Body() body: { ventanillaId?: number },
-  ) {
+  async liberar(@CurrentUser() user: any, @Body() body: { ventanillaId?: number }) {
     return this.service.liberar(user.userId, user.tiendaId, body.ventanillaId);
   }
 }

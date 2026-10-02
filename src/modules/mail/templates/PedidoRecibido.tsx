@@ -33,8 +33,8 @@ export const PedidoRecibido = ({
           lineHeight: '1.6',
         }}
       >
-        Te avisaremos por correo cada vez que tu pedido avance: propuesta del
-        bodeguero, listo para revisar en tienda, pago confirmado y entrega.
+        Te avisaremos por correo cada vez que tu pedido avance: propuesta del bodeguero, listo para
+        revisar en tienda, pago confirmado y entrega.
       </Text>
     }
   />

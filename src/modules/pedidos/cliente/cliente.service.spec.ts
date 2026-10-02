@@ -73,9 +73,7 @@ function crearServicio(opts: {
       findUnique: jest.fn().mockResolvedValue({
         listaPrecioCodigo: opts.listaPrecioCodigo ?? null,
         tiendasCliente:
-          opts.listaPorTienda !== undefined
-            ? [{ listaPrecioCodigo: opts.listaPorTienda }]
-            : [],
+          opts.listaPorTienda !== undefined ? [{ listaPrecioCodigo: opts.listaPorTienda }] : [],
       }),
     },
   };

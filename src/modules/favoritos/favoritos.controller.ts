@@ -1,12 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Delete,
-  Param,
-  ParseIntPipe,
-  Headers,
-} from '@nestjs/common';
+import { Controller, Get, Post, Delete, Param, ParseIntPipe, Headers } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -30,10 +22,7 @@ export class FavoritosController {
    */
   @Get()
   @ApiOperation({ summary: 'Mis favoritos' })
-  async listar(
-    @CurrentUser() user: any,
-    @Headers('x-tienda-id') tiendaIdHeader?: string,
-  ) {
+  async listar(@CurrentUser() user: any, @Headers('x-tienda-id') tiendaIdHeader?: string) {
     const tiendaId = tiendaIdHeader ? parseInt(tiendaIdHeader, 10) : undefined;
     return this.favoritosService.listar(
       user.userId,
@@ -44,20 +33,14 @@ export class FavoritosController {
   /** Marca un producto como favorito (idempotente). */
   @Post(':productoId')
   @ApiOperation({ summary: 'Marcar producto como favorito' })
-  async agregar(
-    @Param('productoId', ParseIntPipe) productoId: number,
-    @CurrentUser() user: any,
-  ) {
+  async agregar(@Param('productoId', ParseIntPipe) productoId: number, @CurrentUser() user: any) {
     return this.favoritosService.agregar(user.userId, productoId);
   }
 
   /** Quita un producto de favoritos (idempotente). */
   @Delete(':productoId')
   @ApiOperation({ summary: 'Quitar producto de favoritos' })
-  async quitar(
-    @Param('productoId', ParseIntPipe) productoId: number,
-    @CurrentUser() user: any,
-  ) {
+  async quitar(@Param('productoId', ParseIntPipe) productoId: number, @CurrentUser() user: any) {
     return this.favoritosService.quitar(user.userId, productoId);
   }
 }

@@ -26,8 +26,7 @@ const fmtMoney = (v: number | string | { toNumber?: () => number; toString: () =
 };
 
 const cell = {
-  fontFamily:
-    '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+  fontFamily: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
   fontSize: '14px',
   color: colors.foreground,
   padding: '14px 0',
@@ -45,8 +44,7 @@ const nombre = {
 
 const codigo = {
   fontSize: '11px',
-  fontFamily:
-    'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+  fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
   color: colors.foregroundSubtle,
   letterSpacing: '0.02em',
   margin: '0 0 4px 0',
@@ -168,10 +166,7 @@ export const ItemList: React.FC<ItemListProps> = ({ items }) => {
                       cargados sin variante: se omiten en vez de dejar un
                       separador colgando ("Talla  · "). */}
                   <Text style={variante}>
-                    {[
-                      it.tallaNombre ? `Talla ${it.tallaNombre}` : null,
-                      it.colorNombre || null,
-                    ]
+                    {[it.tallaNombre ? `Talla ${it.tallaNombre}` : null, it.colorNombre || null]
                       .filter(Boolean)
                       .join(' · ')}
                   </Text>
@@ -179,9 +174,7 @@ export const ItemList: React.FC<ItemListProps> = ({ items }) => {
                       verifica contra su lista de precios. Se enviaba desde el
                       servicio pero nunca se pintaba. */}
                   {it.precioUnitario != null ? (
-                    <Text style={precioUnitario}>
-                      {fmtMoney(it.precioUnitario)} c/u
-                    </Text>
+                    <Text style={precioUnitario}>{fmtMoney(it.precioUnitario)} c/u</Text>
                   ) : null}
                 </td>
                 <td style={cantidad}>×{it.cantidad}</td>

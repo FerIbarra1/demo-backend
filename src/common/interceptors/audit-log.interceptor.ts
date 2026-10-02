@@ -1,10 +1,4 @@
-import {
-  Injectable,
-  NestInterceptor,
-  ExecutionContext,
-  CallHandler,
-  Logger,
-} from '@nestjs/common';
+import { Injectable, NestInterceptor, ExecutionContext, CallHandler, Logger } from '@nestjs/common';
 import { Observable, tap, catchError, throwError } from 'rxjs';
 import { PrismaService } from '../../prisma/prisma.service';
 
@@ -67,9 +61,16 @@ export class AuditLogInterceptor implements NestInterceptor {
 
     return next.handle().pipe(
       tap(() => {
-        this.registrar(usuarioId, usuarioNombre, accion, descripcion, ipAddress, userAgent, metadata, null).catch(
-          (err) => this.logger.warn(`audit log falló: ${err.message}`),
-        );
+        this.registrar(
+          usuarioId,
+          usuarioNombre,
+          accion,
+          descripcion,
+          ipAddress,
+          userAgent,
+          metadata,
+          null,
+        ).catch((err) => this.logger.warn(`audit log falló: ${err.message}`));
       }),
       catchError((err) => {
         this.registrar(

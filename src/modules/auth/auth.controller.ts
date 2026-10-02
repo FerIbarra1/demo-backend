@@ -1,4 +1,15 @@
-import { Controller, Post, Body, Get, UseGuards, HttpCode, HttpStatus, BadRequestException, Req, Res } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Get,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
+  BadRequestException,
+  Req,
+  Res,
+} from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Response, Request } from 'express';
@@ -13,9 +24,7 @@ import { ForgotPasswordDto, ResetPasswordDto } from './dto/password-reset.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
-import {
-  RolUsuario,
-} from '@prisma/client';
+import { RolUsuario } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
 
 @ApiTags('Autenticación')
@@ -64,7 +73,10 @@ export class AuthController {
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Registrar nuevo usuario' })
-  async register(@Body() dto: RegisterDto, @Res({ passthrough: true }) res: Response): Promise<AuthResponseDto> {
+  async register(
+    @Body() dto: RegisterDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponseDto> {
     const result = await this.authService.register(dto);
     this.setRefreshCookie(res, result.refreshToken);
     return result;
@@ -75,7 +87,10 @@ export class AuthController {
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Iniciar sesión' })
-  async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response): Promise<AuthResponseDto> {
+  async login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponseDto> {
     const result = await this.authService.login(dto);
     this.setRefreshCookie(res, result.refreshToken);
     return result;
@@ -105,10 +120,12 @@ export class AuthController {
   @Post('kiosk-login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary:
-      'Intercambia un kiosk token por sesión completa (usado tras escanear QR)',
+    summary: 'Intercambia un kiosk token por sesión completa (usado tras escanear QR)',
   })
-  async kioskLogin(@Body() dto: KioskLoginDto, @Res({ passthrough: true }) res: Response): Promise<AuthResponseDto> {
+  async kioskLogin(
+    @Body() dto: KioskLoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<AuthResponseDto> {
     const result = await this.authService.loginByKioskToken(dto);
     this.setRefreshCookie(res, result.refreshToken);
     return result;
@@ -140,9 +157,7 @@ export class AuthController {
     const headerValue = Array.isArray(header) ? header[0] : header;
     const headerTiendaId = Number(headerValue);
     const tiendaId =
-      Number.isInteger(headerTiendaId) && headerTiendaId > 0
-        ? headerTiendaId
-        : jwtTiendaId;
+      Number.isInteger(headerTiendaId) && headerTiendaId > 0 ? headerTiendaId : jwtTiendaId;
 
     if (!tiendaId) {
       throw new BadRequestException(
@@ -223,10 +238,7 @@ export class AuthController {
   )
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Actualizar perfil del usuario' })
-  async updateProfile(
-    @CurrentUser('userId') userId: number,
-    @Body() dto: UpdateUserDto,
-  ) {
+  async updateProfile(@CurrentUser('userId') userId: number, @Body() dto: UpdateUserDto) {
     return this.authService.updateProfile(userId, dto);
   }
 
@@ -249,10 +261,7 @@ export class AuthController {
   )
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Cambiar contraseña del usuario' })
-  async changePassword(
-    @CurrentUser('userId') userId: number,
-    @Body() dto: ChangePasswordDto,
-  ) {
+  async changePassword(@CurrentUser('userId') userId: number, @Body() dto: ChangePasswordDto) {
     return this.authService.changePassword(userId, dto);
   }
 
@@ -276,8 +285,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({
-    summary:
-      'Heartbeat del operador (cada 5min desde la tablet). Actualiza ultimoHeartbeat.',
+    summary: 'Heartbeat del operador (cada 5min desde la tablet). Actualiza ultimoHeartbeat.',
   })
   async heartbeat(@CurrentUser('userId') userId: number) {
     return this.authService.heartbeat(userId);

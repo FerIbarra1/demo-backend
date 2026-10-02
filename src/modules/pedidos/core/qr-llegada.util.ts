@@ -69,7 +69,11 @@ export function verificarLlegoQr(token: string, secret: string): VerificarLlegoR
     return { valido: false };
   }
 
-  if (payload.v !== VERSION || !Number.isFinite(payload.pedidoId) || !Number.isFinite(payload.tiendaId)) {
+  if (
+    payload.v !== VERSION ||
+    !Number.isFinite(payload.pedidoId) ||
+    !Number.isFinite(payload.tiendaId)
+  ) {
     return { valido: false };
   }
   return { valido: true, pedidoId: payload.pedidoId, tiendaId: payload.tiendaId };

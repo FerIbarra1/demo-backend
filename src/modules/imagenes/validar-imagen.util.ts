@@ -32,19 +32,14 @@ export function detectarMimeImagen(buffer: Buffer): MimeImagen | null {
   if (!buffer || buffer.length < 12) return null;
 
   for (const firma of FIRMAS) {
-    const coincide = firma.bytes.every(
-      (b, i) => buffer[firma.offset + i] === b,
-    );
+    const coincide = firma.bytes.every((b, i) => buffer[firma.offset + i] === b);
     if (!coincide) continue;
 
     // WEBP necesita además "WEBP" en el offset 8: un .wav también empieza
     // con "RIFF" y sin esta comprobación pasaría como imagen.
     if (firma.mime === 'image/webp') {
       const esWebp =
-        buffer[8] === 0x57 &&
-        buffer[9] === 0x45 &&
-        buffer[10] === 0x42 &&
-        buffer[11] === 0x50;
+        buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50;
       if (!esWebp) continue;
     }
 

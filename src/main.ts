@@ -34,9 +34,7 @@ async function bootstrap() {
   // permite falsificar QRs y reclamar pedidos ajenos.
   const kioskoQrSecret = configService.get<string>('app.kioskoQrSecret');
   if (!kioskoQrSecret) {
-    throw new Error(
-      'KIOSKO_QR_SECRET es obligatorio. Genera uno con: openssl rand -base64 48',
-    );
+    throw new Error('KIOSKO_QR_SECRET es obligatorio. Genera uno con: openssl rand -base64 48');
   }
   if (kioskoQrSecret.length < 32) {
     throw new Error(

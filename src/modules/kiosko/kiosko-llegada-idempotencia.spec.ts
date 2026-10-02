@@ -16,9 +16,9 @@ import { KioskoLlegadaService } from './kiosko-llegada.service';
  * inmediato), así que también es `true`.
  */
 function crearServicio(pedido: Record<string, unknown>) {
-  const update = jest.fn().mockImplementation(({ data }) =>
-    Promise.resolve({ ...pedido, ...data }),
-  );
+  const update = jest
+    .fn()
+    .mockImplementation(({ data }) => Promise.resolve({ ...pedido, ...data }));
   const emitToTienda = jest.fn();
   const emitToPedido = jest.fn();
 
@@ -143,8 +143,7 @@ describe('registrarAviso — el contrato de reanudado', () => {
 
   it('marcar desde mostrador escribe el canal y el autor', async () => {
     const { svc } = crearServicio({ ...base });
-    const prisma = (svc as never as { prisma: { pedido: { update: jest.Mock } } })
-      .prisma;
+    const prisma = (svc as never as { prisma: { pedido: { update: jest.Mock } } }).prisma;
 
     await svc.confirmarDesdeMostrador(1, usuario);
 
@@ -165,9 +164,7 @@ describe('registrarAviso — el contrato de reanudado', () => {
       estado: EstadoPedido.REVIEWING,
     });
 
-    await expect(svc.confirmarDesdeMostrador(1, usuario)).rejects.toThrow(
-      /preparando tu pedido/i,
-    );
+    await expect(svc.confirmarDesdeMostrador(1, usuario)).rejects.toThrow(/preparando tu pedido/i);
     expect(emitToTienda).not.toHaveBeenCalled();
   });
 });

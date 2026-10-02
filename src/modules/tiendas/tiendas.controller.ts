@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Body, Patch, Param, Delete, ParseIntPipe, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Patch,
+  Param,
+  Delete,
+  ParseIntPipe,
+  Query,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { TiendasService } from './tiendas.service';
 import { CreateTiendaDto } from './dto/create-tienda.dto';
@@ -15,10 +25,7 @@ export class TiendasController {
   @Get()
   @Public()
   @ApiOperation({ summary: 'Listar todas las tiendas activas' })
-  findAll(
-    @Query('estado') estado?: string,
-    @Query('ciudad') ciudad?: string,
-  ) {
+  findAll(@Query('estado') estado?: string, @Query('ciudad') ciudad?: string) {
     if (estado || ciudad) {
       return this.tiendasService.findAllWithFilters(estado, ciudad);
     }

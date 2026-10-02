@@ -116,9 +116,7 @@ export class CatalogHandler {
 
   // -------------------- CORRIDAS --------------------
 
-  private async procesarCorrida(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  private async procesarCorrida(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     const d = evento.datos as { DESCRIP?: string; TALLAS?: string };
     const nombre = (d.DESCRIP ?? '').trim();
     if (!nombre) return { ok: false, mensaje: 'CORRIDAS sin DESCRIP' };
@@ -134,7 +132,9 @@ export class CatalogHandler {
 
     // Si viene la lista CSV de tallas, añadimos las que falten (no borrar nunca).
     if (d.TALLAS && typeof d.TALLAS === 'string') {
-      const tallas = d.TALLAS.split(',').map((t) => t.trim()).filter(Boolean);
+      const tallas = d.TALLAS.split(',')
+        .map((t) => t.trim())
+        .filter(Boolean);
       for (let i = 0; i < tallas.length; i++) {
         const t = tallas[i];
         await this.prisma.talla.upsert({
@@ -165,10 +165,7 @@ export class CatalogHandler {
     const nombre = (d.TALLA ?? '').trim();
     if (!localCorridaId || !nombre) return { ok: true };
 
-    const corridaSystemId = await this.externalRefs.findSystemId(
-      'CORRIDAS',
-      localCorridaId,
-    );
+    const corridaSystemId = await this.externalRefs.findSystemId('CORRIDAS', localCorridaId);
     if (!corridaSystemId) {
       // La corrida padre aún no se ha sincronizado. Se procesará en su
       // próximo evento. Skip silencioso.
@@ -186,9 +183,7 @@ export class CatalogHandler {
 
   // -------------------- COLORES --------------------
 
-  private async procesarColor(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  private async procesarColor(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     const d = evento.datos as { IDCOLOR?: number; DESCRIP?: string; COLOR?: number };
     const codigo = String(d.IDCOLOR ?? evento.localId);
     const nombre = (d.DESCRIP ?? '').trim();
@@ -212,9 +207,7 @@ export class CatalogHandler {
 
   // -------------------- LINEAS --------------------
 
-  private async procesarLinea(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  private async procesarLinea(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     const d = evento.datos as { DESCRIP?: string };
     const nombre = (d.DESCRIP ?? '').trim();
     if (!nombre) return { ok: false, mensaje: 'LINEAS sin DESCRIP' };
@@ -233,9 +226,7 @@ export class CatalogHandler {
 
   // -------------------- PRECIOS (producto × tienda, 6 listas) --------------------
 
-  private async procesarPrecio(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  private async procesarPrecio(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     const d = evento.datos as {
       IDPRODUCTO?: number;
       IDTIENDA?: number;
@@ -252,10 +243,7 @@ export class CatalogHandler {
       return { ok: false, mensaje: 'PRECIOS sin IDPRODUCTO/IDTIENDA' };
     }
 
-    const productoSystemId = await this.externalRefs.findSystemId(
-      'PRODUCTOS',
-      localProductoId,
-    );
+    const productoSystemId = await this.externalRefs.findSystemId('PRODUCTOS', localProductoId);
     if (!productoSystemId) {
       // Producto aún no sincronizado: skip (se procesará cuando el evento
       // PRODUCTOS llegue).
@@ -296,14 +284,24 @@ export class CatalogHandler {
       },
       update: {
         precioBase: lista1,
-        lista1, lista2, lista3, lista4, lista5, lista6,
+        lista1,
+        lista2,
+        lista3,
+        lista4,
+        lista5,
+        lista6,
         activo: true,
       },
       create: {
         productoId: productoSystemId,
         tiendaId: tienda.id,
         precioBase: lista1,
-        lista1, lista2, lista3, lista4, lista5, lista6,
+        lista1,
+        lista2,
+        lista3,
+        lista4,
+        lista5,
+        lista6,
         activo: true,
       },
     });
@@ -345,10 +343,7 @@ export class CatalogHandler {
       return { ok: false, mensaje: 'PRECIOSCO sin IDPRODUCTO/IDTIENDA' };
     }
 
-    const productoSystemId = await this.externalRefs.findSystemId(
-      'PRODUCTOS',
-      localProductoId,
-    );
+    const productoSystemId = await this.externalRefs.findSystemId('PRODUCTOS', localProductoId);
     const tienda = await this.prisma.tienda.findFirst({
       where: { externalId: localTiendaId },
       select: { id: true },
@@ -399,7 +394,12 @@ export class CatalogHandler {
       },
       update: {
         precio: lista1,
-        lista1, lista2, lista3, lista4, lista5, lista6,
+        lista1,
+        lista2,
+        lista3,
+        lista4,
+        lista5,
+        lista6,
         sku,
       },
       create: {
@@ -409,7 +409,12 @@ export class CatalogHandler {
         tallaId: talla.id,
         colorId: colorSystemId,
         precio: lista1,
-        lista1, lista2, lista3, lista4, lista5, lista6,
+        lista1,
+        lista2,
+        lista3,
+        lista4,
+        lista5,
+        lista6,
         sku,
       },
     });
@@ -427,9 +432,7 @@ export class CatalogHandler {
 
   // -------------------- TIENDAS --------------------
 
-  private async procesarTienda(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  private async procesarTienda(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     const d = evento.datos as {
       NOMBRE?: string;
       DIRECCION?: string;

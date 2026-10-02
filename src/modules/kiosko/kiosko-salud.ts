@@ -40,10 +40,7 @@ interface KioskoParaSalud {
  * Deriva la salud de un kiosko. Es una función PURA: recibe `ahora` para que
  * sea determinista y testeable (nada de `Date.now()` interno).
  */
-export function calcularSaludKiosko(
-  kiosko: KioskoParaSalud,
-  ahora: number,
-): SaludKiosko {
+export function calcularSaludKiosko(kiosko: KioskoParaSalud, ahora: number): SaludKiosko {
   // El admin lo apagó: es una decisión, no una falla. Se revisa PRIMERO porque
   // un kiosko apagado no debe reportarse como caído aunque no lata.
   if (kiosko.estado !== 'ACTIVO') {
@@ -87,9 +84,7 @@ export interface ResumenSalud {
 }
 
 /** Agrega el conteo por salud para los tiles del panel. */
-export function resumirSalud(
-  kioskos: Array<{ salud: SaludKiosko }>,
-): ResumenSalud {
+export function resumirSalud(kioskos: Array<{ salud: SaludKiosko }>): ResumenSalud {
   let sanas = 0;
   let latidoLento = 0;
   let requierenAtencion = 0;

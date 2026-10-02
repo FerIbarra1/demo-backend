@@ -27,8 +27,7 @@ export class ConfiguracionController {
   @Get('logo')
   @ApiOperation({
     summary: 'Logo actual de los correos (Admin)',
-    description:
-      'Devuelve la URL resuelta, la key de storage y el fallback de la env.',
+    description: 'Devuelve la URL resuelta, la key de storage y el fallback de la env.',
   })
   obtenerLogo() {
     return this.configuracion.obtenerLogo();
@@ -73,11 +72,7 @@ export class ConfiguracionController {
     summary: 'Actualiza el copy del kiosko (título, subtítulo, slideMs)',
   })
   actualizarBrandingKiosko(
-    @Body() body: {
-      titulo?: string;
-      subtitulo?: string;
-      slideMs?: number;
-    },
+    @Body() body: { titulo?: string; subtitulo?: string; slideMs?: number },
   ) {
     return this.configuracion
       .actualizarBrandingKiosko(body)

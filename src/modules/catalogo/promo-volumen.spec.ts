@@ -30,10 +30,7 @@ function precioCOMock(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function crearServicio(
-  preciosCO: ReturnType<typeof precioCOMock>[],
-  columna: string,
-) {
+function crearServicio(preciosCO: ReturnType<typeof precioCOMock>[], columna: string) {
   const prisma = {
     precioCO: { findMany: jest.fn().mockResolvedValue(preciosCO) },
   };
@@ -89,10 +86,7 @@ describe('CatalogoService.evaluarPromoVolumen', () => {
     // cae al precio base, así que el precio efectivo de este cliente es el de
     // lista1 (60) y la promo sí le baja a 57. Es el caso donde un gate por
     // nombre de columna divergiría de la creación del pedido.
-    const { svc } = crearServicio(
-      [precioCOMock({ lista3: new Prisma.Decimal('0') })],
-      'lista3',
-    );
+    const { svc } = crearServicio([precioCOMock({ lista3: new Prisma.Decimal('0') })], 'lista3');
 
     const r = await svc.evaluarPromoVolumen([{ precioCOId: 1, cantidad: 12 }], 1, 42);
 
@@ -118,10 +112,7 @@ describe('CatalogoService.evaluarPromoVolumen', () => {
       },
     ]);
     // La suma de las líneas tiene que dar el total.
-    const sumaLineas = r.items.reduce(
-      (acc, i) => acc + i.precioUnitario * i.cantidad,
-      0,
-    );
+    const sumaLineas = r.items.reduce((acc, i) => acc + i.precioUnitario * i.cantidad, 0);
     expect(sumaLineas).toBe(r.total);
   });
 
@@ -131,18 +122,12 @@ describe('CatalogoService.evaluarPromoVolumen', () => {
     const r = await svc.evaluarPromoVolumen([{ precioCOId: 1, cantidad: 11 }], 1, 8);
 
     expect(r.items[0].precioUnitario).toBe(60);
-    const sumaLineas = r.items.reduce(
-      (acc, i) => acc + i.precioUnitario * i.cantidad,
-      0,
-    );
+    const sumaLineas = r.items.reduce((acc, i) => acc + i.precioUnitario * i.cantidad, 0);
     expect(sumaLineas).toBe(r.total);
   });
 
   it('suma las piezas de todos los items para decidir el umbral', async () => {
-    const { svc } = crearServicio(
-      [precioCOMock({ id: 1 }), precioCOMock({ id: 2 })],
-      'lista1',
-    );
+    const { svc } = crearServicio([precioCOMock({ id: 1 }), precioCOMock({ id: 2 })], 'lista1');
 
     const r = await svc.evaluarPromoVolumen(
       [

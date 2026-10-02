@@ -37,8 +37,7 @@ const colors = {
 const styles = {
   body: {
     backgroundColor: colors.background,
-    fontFamily:
-      '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+    fontFamily: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     margin: 0,
     padding: 0,
     WebkitFontSmoothing: 'antialiased' as const,
@@ -93,12 +92,7 @@ const styles = {
   },
 };
 
-export const EmailLayout = ({
-  preview,
-  logoUrl,
-  frontendUrl,
-  children,
-}: EmailLayoutProps) => {
+export const EmailLayout = ({ preview, logoUrl, frontendUrl, children }: EmailLayoutProps) => {
   const year = new Date().getFullYear();
   return (
     <Html>
@@ -138,9 +132,7 @@ export const EmailLayout = ({
           <Section style={styles.content}>{children}</Section>
           <Hr style={{ borderColor: colors.borderSubtle, margin: 0 }} />
           <Section style={styles.footer}>
-            <Text style={{ margin: '0 0 8px 0' }}>
-              © {year} Punto Textil Mayoreo
-            </Text>
+            <Text style={{ margin: '0 0 8px 0' }}>© {year} Punto Textil Mayoreo</Text>
             <Text style={{ margin: '0 0 8px 0' }}>
               <Link href={`${frontendUrl}/pedidos`} style={styles.footerLink}>
                 Mis pedidos
@@ -155,9 +147,8 @@ export const EmailLayout = ({
               </Link>
             </Text>
             <Text style={{ margin: 0, fontSize: '11px' }}>
-              Recibes este correo porque hiciste un pedido en Punto Textil
-              Mayoreo. Si tienes dudas sobre tu cuenta o tus pedidos, responde a
-              este correo.
+              Recibes este correo porque hiciste un pedido en Punto Textil Mayoreo. Si tienes dudas
+              sobre tu cuenta o tus pedidos, responde a este correo.
             </Text>
           </Section>
         </Container>

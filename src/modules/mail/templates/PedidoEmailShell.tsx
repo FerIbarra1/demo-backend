@@ -76,11 +76,7 @@ export const PedidoEmailShell = ({
   logoUrl,
   frontendUrl,
 }: PedidoEmailShellProps) => (
-  <EmailLayout
-    preview={preview}
-    logoUrl={logoUrl}
-    frontendUrl={frontendUrl}
-  >
+  <EmailLayout preview={preview} logoUrl={logoUrl} frontendUrl={frontendUrl}>
     <Heading
       style={{
         fontSize: '24px',
@@ -160,13 +156,12 @@ export const PedidoEmailShell = ({
       {pedido.tiendaNombre && pedido.tiendaTelefono ? (
         <>
           ¿Dudas con tu pedido? Llama a {pedido.tiendaNombre} al{' '}
-          <strong>{pedido.tiendaTelefono}</strong>, o responde directamente a
-          este correo.
+          <strong>{pedido.tiendaTelefono}</strong>, o responde directamente a este correo.
         </>
       ) : (
         <>
-          Si tienes dudas con tu pedido, responde directamente a este correo y
-          con gusto te ayudamos.
+          Si tienes dudas con tu pedido, responde directamente a este correo y con gusto te
+          ayudamos.
         </>
       )}
     </Text>

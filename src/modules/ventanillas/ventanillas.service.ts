@@ -183,9 +183,7 @@ export class VentanillasService {
         data: { cajeroId: usuarioId },
       });
       if (asignado.count !== 1) {
-        throw new ConflictException(
-          `La ventanilla ${v.numero} está ocupada por otro cajero`,
-        );
+        throw new ConflictException(`La ventanilla ${v.numero} está ocupada por otro cajero`);
       }
 
       return tx.ventanilla.findUnique({

@@ -16,7 +16,4 @@
  *
  * Vive aquí (y no en el DTO) porque lo comparten el service y el DTO.
  */
-export type MotivoReingreso =
-  | 'LIBERADO'
-  | 'AJUSTE_MOSTRADOR'
-  | 'PROPUESTA_VENTAS';
+export type MotivoReingreso = 'LIBERADO' | 'AJUSTE_MOSTRADOR' | 'PROPUESTA_VENTAS';

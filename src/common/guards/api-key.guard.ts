@@ -1,9 +1,4 @@
-import {
-  Injectable,
-  CanActivate,
-  ExecutionContext,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { IS_API_KEY_AUTH_KEY } from '../decorators/api-key.decorator';
@@ -65,8 +60,6 @@ export class ApiKeyGuard implements CanActivate {
       return true;
     }
 
-    throw new UnauthorizedException(
-      'Acceso denegado: requiere X-Agent-Key válida o JWT de ADMIN',
-    );
+    throw new UnauthorizedException('Acceso denegado: requiere X-Agent-Key válida o JWT de ADMIN');
   }
 }

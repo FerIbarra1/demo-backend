@@ -69,10 +69,7 @@ export class VentasController {
   @ApiOperation({
     summary: 'Detalle del pedido con items, historial y propuestas (para negociar)',
   })
-  async detalle(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async detalle(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     // Valida acceso (tienda) reutilizando el access service compartido.
     await this.pedidoState.obtenerDetalle(id, user);
     return this.ventasService.obtenerDetalle(id, user.tiendaId);

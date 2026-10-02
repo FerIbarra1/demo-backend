@@ -1,19 +1,11 @@
-import {
-  Controller,
-  Get,
-  Query,
-} from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { RolUsuario } from '@prisma/client';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { PedidoAccessService } from './pedido-access.service';
 import { PrismaService } from '../../../prisma/prisma.service';
-import {
-  responsableDe,
-  puedeOperar,
-  mensajeNoEsTuyo,
-} from './escaneo.util';
+import { responsableDe, puedeOperar, mensajeNoEsTuyo } from './escaneo.util';
 import { estadoPedidoLabel } from '../../mail/estado-labels';
 
 /**
@@ -40,10 +32,7 @@ export class PedidoBusquedaController {
       'Busca un pedido por folio (VFP externalFolio o numeroPedido interno). Valida tienda del empleado.',
   })
   @ApiQuery({ name: 'folio', required: true, type: String })
-  async buscarPorFolio(
-    @Query('folio') folio: string,
-    @CurrentUser() user: any,
-  ) {
+  async buscarPorFolio(@Query('folio') folio: string, @CurrentUser() user: any) {
     return this.access.buscarPorFolio(folio, user);
   }
 
@@ -69,10 +58,7 @@ export class PedidoBusquedaController {
       'con el estado, quién lo tiene y si a este usuario le toca operarlo.',
   })
   @ApiQuery({ name: 'folio', required: true, type: String })
-  async resolverEscaneo(
-    @Query('folio') folio: string,
-    @CurrentUser() user: any,
-  ) {
+  async resolverEscaneo(@Query('folio') folio: string, @CurrentUser() user: any) {
     // Reusa la búsqueda existente: resuelve el folio (interno o de VFP) y
     // valida tienda/rol. Lanza 404 si no existe, 403 si es de otra tienda.
     const base = await this.access.buscarPorFolio(folio, user);

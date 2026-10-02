@@ -84,9 +84,7 @@ export async function aplicarCambiosFisicos(
       }
       const itemActual = await tx.itemPedido.findUnique({ where: { id: item.id } });
       if (!itemActual) throw new Error(`Item ${item.id} no existe`);
-      const nuevoSubtotal = new Prisma.Decimal(itemActual.precioUnitario).mul(
-        nuevaCantidad,
-      );
+      const nuevoSubtotal = new Prisma.Decimal(itemActual.precioUnitario).mul(nuevaCantidad);
       await tx.itemPedido.update({
         where: { id: item.id },
         data: {

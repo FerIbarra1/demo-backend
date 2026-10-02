@@ -34,8 +34,8 @@ export const PedidoEntregado = ({
           lineHeight: '1.6',
         }}
       >
-        Gracias por tu compra. Si tienes algún problema con los productos,
-        acércate a la tienda o contáctanos — estamos para ayudarte.
+        Gracias por tu compra. Si tienes algún problema con los productos, acércate a la tienda o
+        contáctanos — estamos para ayudarte.
       </Text>
     }
   />

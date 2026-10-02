@@ -119,10 +119,7 @@ export class PedidoLlegoQrController {
   @ApiOperation({
     summary: 'Genera el QR firmado HMAC para avisar llegada a tienda',
   })
-  async generarQr(
-    @Param('id', ParseIntPipe) pedidoId: number,
-    @CurrentUser() user: any,
-  ) {
+  async generarQr(@Param('id', ParseIntPipe) pedidoId: number, @CurrentUser() user: any) {
     // Validación: el cliente solo puede pedir el QR de SU pedido.
     // ADMIN/MOSTRADOR pueden pedir cualquiera.
     //

@@ -1,13 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  ParseIntPipe,
-  Query,
-  Req,
-} from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, ParseIntPipe, Query, Req } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
@@ -28,10 +19,7 @@ export class CatalogoController {
   @Public()
   @ApiOperation({ summary: 'Listar productos del catálogo' })
   @ApiQuery({ name: 'tiendaId', required: true, type: Number })
-  async obtenerProductos(
-    @Query() filtros: FiltroCatalogoDto,
-    @Req() req: Request,
-  ) {
+  async obtenerProductos(@Query() filtros: FiltroCatalogoDto, @Req() req: Request) {
     // El endpoint es @Public. Si el cliente envía JWT, lo leemos para
     // inyectar esFavorito por producto. Si no viene o es inválido, no falla.
     const userId = this.leerUserIdOpcional(req);
@@ -46,26 +34,16 @@ export class CatalogoController {
     @Param('tiendaId', ParseIntPipe) tiendaId: number,
     @Req() req: Request,
   ) {
-    return this.catalogoService.obtenerProductoDetalle(
-      id,
-      tiendaId,
-      this.leerUserIdOpcional(req),
-    );
+    return this.catalogoService.obtenerProductoDetalle(id, tiendaId, this.leerUserIdOpcional(req));
   }
 
   @Get('filtros/:tiendaId')
   @Public()
   @ApiOperation({ summary: 'Obtener opciones de filtro disponibles' })
-  async obtenerFiltros(
-    @Param('tiendaId', ParseIntPipe) tiendaId: number,
-    @Req() req: Request,
-  ) {
+  async obtenerFiltros(@Param('tiendaId', ParseIntPipe) tiendaId: number, @Req() req: Request) {
     // `precioMaximo` depende de la lista del cliente: sin el JWT el tope sale
     // de lista1. Ver `CatalogoService.precioMaximoDeLista`.
-    return this.catalogoService.obtenerFiltrosDisponibles(
-      tiendaId,
-      this.leerUserIdOpcional(req),
-    );
+    return this.catalogoService.obtenerFiltrosDisponibles(tiendaId, this.leerUserIdOpcional(req));
   }
 
   @Get('precios')

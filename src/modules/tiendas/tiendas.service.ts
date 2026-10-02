@@ -38,7 +38,7 @@ export class TiendasService {
       distinct: ['estado'],
       orderBy: { estado: 'asc' },
     });
-    return result.map(t => t.estado);
+    return result.map((t) => t.estado);
   }
 
   async getCiudadesPorEstado(estado: string): Promise<string[]> {
@@ -48,7 +48,7 @@ export class TiendasService {
       distinct: ['ciudad'],
       orderBy: { ciudad: 'asc' },
     });
-    return result.map(t => t.ciudad);
+    return result.map((t) => t.ciudad);
   }
 
   async findOne(id: number) {

@@ -33,9 +33,7 @@ describe('responsableDe', () => {
   it('el cliente es el responsable de una propuesta pendiente', () => {
     // No es un rol interno, pero el operador necesita saber que la pelota
     // no está de su lado.
-    expect(
-      responsableDe(EstadoPedido.WAITING_CUSTOMER_APPROVAL).rol,
-    ).toBe(RolUsuario.CLIENTE);
+    expect(responsableDe(EstadoPedido.WAITING_CUSTOMER_APPROVAL).rol).toBe(RolUsuario.CLIENTE);
   });
 });
 

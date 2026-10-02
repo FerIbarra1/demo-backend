@@ -44,9 +44,8 @@ export const Bienvenida = ({ nombre, logoUrl, frontendUrl }: BienvenidaProps) =>
         lineHeight: '1.6',
       }}
     >
-      Te damos la bienvenida a <strong>Punto Textil Mayoreo</strong>. Tu cuenta
-      ya está activa para que consultes precios de mayoreo y armes tus pedidos
-      en línea.
+      Te damos la bienvenida a <strong>Punto Textil Mayoreo</strong>. Tu cuenta ya está activa para
+      que consultes precios de mayoreo y armes tus pedidos en línea.
     </Text>
     <Text
       style={{
@@ -63,16 +62,12 @@ export const Bienvenida = ({ nombre, logoUrl, frontendUrl }: BienvenidaProps) =>
         Consultar el catálogo completo con precios de mayoreo por talla y color
       </Text>
       <Text style={tip}>
-        Armar tu pedido y elegir entrega a domicilio o recoger en cualquiera de
-        nuestras sucursales
+        Armar tu pedido y elegir entrega a domicilio o recoger en cualquiera de nuestras sucursales
       </Text>
       <Text style={tip}>
-        Seguir el avance de cada pedido en tiempo real: revisión de bodega,
-        pago, envío y entrega
+        Seguir el avance de cada pedido en tiempo real: revisión de bodega, pago, envío y entrega
       </Text>
-      <Text style={tip}>
-        Guardar tus productos frecuentes para volver a pedirlos en segundos
-      </Text>
+      <Text style={tip}>Guardar tus productos frecuentes para volver a pedirlos en segundos</Text>
     </div>
     <Button href={`${frontendUrl}/catalogo`}>Ver catálogo</Button>
     <Text
@@ -84,8 +79,8 @@ export const Bienvenida = ({ nombre, logoUrl, frontendUrl }: BienvenidaProps) =>
         lineHeight: '1.5',
       }}
     >
-      ¿Necesitas factura o tienes dudas sobre precios y mínimos de compra?
-      Responde a este correo y te atendemos.
+      ¿Necesitas factura o tienes dudas sobre precios y mínimos de compra? Responde a este correo y
+      te atendemos.
     </Text>
   </EmailLayout>
 );

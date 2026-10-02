@@ -31,14 +31,7 @@ export class UsuariosService {
   constructor(private readonly prisma: PrismaService) {}
 
   async listar(query: ListarUsuariosQueryDto) {
-    const {
-      rol,
-      tiendaId,
-      busqueda,
-      soloEmpleados,
-      pagina = 1,
-      limite = 20,
-    } = query;
+    const { rol, tiendaId, busqueda, soloEmpleados, pagina = 1, limite = 20 } = query;
 
     const where: any = { deletedAt: null };
     if (rol) where.rol = rol;

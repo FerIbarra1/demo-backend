@@ -38,9 +38,7 @@ describe('destinoTrasSurtido (F16)', () => {
     // invisible al agente y se quedaría atascado para siempre.
     for (const modo of Object.values(ModoEntrega)) {
       const destino = destinoTrasSurtido(modo);
-      expect(destino.encolarFirebird).toBe(
-        destino.estado === EstadoPedido.PENDING_PAID,
-      );
+      expect(destino.encolarFirebird).toBe(destino.estado === EstadoPedido.PENDING_PAID);
     }
   });
 

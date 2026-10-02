@@ -27,7 +27,11 @@ export class PedidoAckItemDto {
   @MaxLength(80)
   leaseToken: string;
 
-  @ApiProperty({ example: 987, required: false, description: 'IDPEDIDO devuelto por GRABAR_PEDIDOS' })
+  @ApiProperty({
+    example: 987,
+    required: false,
+    description: 'IDPEDIDO devuelto por GRABAR_PEDIDOS',
+  })
   @IsOptional()
   @IsInt()
   @Min(0)

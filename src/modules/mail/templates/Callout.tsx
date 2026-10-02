@@ -63,11 +63,7 @@ const variantStyles: Record<
  * emails de pedido para mensajes del bodeguero, motivos de cancelación,
  * direcciones de envío, etc. Variante default `info` (neutro).
  */
-export const Callout: React.FC<CalloutProps> = ({
-  variant = 'info',
-  label,
-  children,
-}) => {
+export const Callout: React.FC<CalloutProps> = ({ variant = 'info', label, children }) => {
   const s = variantStyles[variant];
   return (
     <Section

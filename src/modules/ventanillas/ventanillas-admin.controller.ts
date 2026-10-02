@@ -1,13 +1,4 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Patch,
-  Delete,
-  Body,
-  Param,
-  ParseIntPipe,
-} from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Body, Param, ParseIntPipe } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -37,10 +28,7 @@ export class VentanillasAdminController {
   @ApiOperation({
     summary: 'Crear N ventanillas nuevas (numeradas correlativamente)',
   })
-  crear(
-    @Param('tiendaId', ParseIntPipe) tiendaId: number,
-    @Body() body: { cantidad: number },
-  ) {
+  crear(@Param('tiendaId', ParseIntPipe) tiendaId: number, @Body() body: { cantidad: number }) {
     return this.service.crearN(tiendaId, body.cantidad);
   }
 
@@ -56,10 +44,7 @@ export class VentanillasAdminController {
 
   @Delete(':tiendaId/:id')
   @ApiOperation({ summary: 'Borrar una ventanilla libre (no ocupada)' })
-  borrar(
-    @Param('tiendaId', ParseIntPipe) tiendaId: number,
-    @Param('id', ParseIntPipe) id: number,
-  ) {
+  borrar(@Param('tiendaId', ParseIntPipe) tiendaId: number, @Param('id', ParseIntPipe) id: number) {
     return this.service.borrar(tiendaId, id);
   }
 }

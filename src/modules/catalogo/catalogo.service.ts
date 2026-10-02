@@ -112,10 +112,7 @@ export class CatalogoService {
                   talla: true,
                   color: true,
                 },
-                orderBy: [
-                  { talla: { orden: 'asc' } },
-                  { color: { nombre: 'asc' } },
-                ],
+                orderBy: [{ talla: { orden: 'asc' } }, { color: { nombre: 'asc' } }],
               },
             },
           },
@@ -227,10 +224,7 @@ export class CatalogoService {
         preciosCO: {
           where: { tiendaId },
           include: { corrida: true, talla: true, color: true },
-          orderBy: [
-            { talla: { orden: 'asc' } },
-            { color: { nombre: 'asc' } },
-          ],
+          orderBy: [{ talla: { orden: 'asc' } }, { color: { nombre: 'asc' } }],
         },
       },
     });
@@ -286,10 +280,7 @@ export class CatalogoService {
   }
 
   async obtenerFiltrosDisponibles(tiendaId: number, usuarioId?: number) {
-    const columnaLista = await this.precios.columnaParaUsuario(
-      usuarioId,
-      tiendaId,
-    );
+    const columnaLista = await this.precios.columnaParaUsuario(usuarioId, tiendaId);
 
     const [categorias, corridas, colores, precioMaximo] = await Promise.all([
       this.prisma.producto.groupBy({
@@ -337,10 +328,7 @@ export class CatalogoService {
    * Se consideran variantes (`PrecioCO`) y precios de producto (`Precio`): el
    * frontend filtra por la primera variante y cae a `precioBase` si no hay.
    */
-  private async precioMaximoDeLista(
-    tiendaId: number,
-    columnaLista: ColumnaLista,
-  ): Promise<number> {
+  private async precioMaximoDeLista(tiendaId: number, columnaLista: ColumnaLista): Promise<number> {
     // `Precio` tiene `activo`; `PrecioCO` no (la variante viva es la fila).
     const productoVisible = {
       producto: {
@@ -376,10 +364,7 @@ export class CatalogoService {
       prodLista._max[columnaLista],
       prodBase._max.precioBase,
     ];
-    return candidatos.reduce<number>(
-      (max, valor) => Math.max(max, Number(valor ?? 0)),
-      0,
-    );
+    return candidatos.reduce<number>((max, valor) => Math.max(max, Number(valor ?? 0)), 0);
   }
 
   /**
@@ -409,29 +394,25 @@ export class CatalogoService {
       const precioLista = Number(p[columnaLista] ?? 0);
       // Imagen del color de la variante (si el producto tiene imágenes
       // asociadas a ese color); fallback a la imagen principal del producto.
-      const imagenColor = p.producto.imagenesProducto.find(
-        (img) => img.colorId === p.colorId,
-      )?.url;
+      const imagenColor = p.producto.imagenesProducto.find((img) => img.colorId === p.colorId)?.url;
       return {
-      id: p.id,
-      tiendaId: p.tiendaId,
-      precio: precioLista > 0 ? precioLista : Number(p.precio),
-      producto: {
-        id: p.producto.id,
-        codigo: p.producto.codigo,
-        nombre: p.producto.nombre,
-        imagenPrincipal: this.storage.resolverImagen(p.producto.imagenPrincipal),
-      },
-      variante: {
-        corrida: p.corrida.nombre,
-        talla: p.talla.nombre,
-        colorId: p.colorId,
-        color: p.color.nombre,
-        colorHex: p.color.hex,
-        imagen: this.storage.resolverImagen(
-          imagenColor ?? p.producto.imagenPrincipal,
-        ),
-      },
+        id: p.id,
+        tiendaId: p.tiendaId,
+        precio: precioLista > 0 ? precioLista : Number(p.precio),
+        producto: {
+          id: p.producto.id,
+          codigo: p.producto.codigo,
+          nombre: p.producto.nombre,
+          imagenPrincipal: this.storage.resolverImagen(p.producto.imagenPrincipal),
+        },
+        variante: {
+          corrida: p.corrida.nombre,
+          talla: p.talla.nombre,
+          colorId: p.colorId,
+          color: p.color.nombre,
+          colorHex: p.color.hex,
+          imagen: this.storage.resolverImagen(imagenColor ?? p.producto.imagenPrincipal),
+        },
       };
     });
   }

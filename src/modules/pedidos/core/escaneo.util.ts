@@ -79,10 +79,7 @@ const RESPONSABLES: Record<EstadoPedido, Responsable> = {
 };
 
 /** Estados terminales: ya no hay nada que operar. */
-const TERMINALES = new Set<EstadoPedido>([
-  EstadoPedido.COMPLETED,
-  EstadoPedido.CANCELLED,
-]);
+const TERMINALES = new Set<EstadoPedido>([EstadoPedido.COMPLETED, EstadoPedido.CANCELLED]);
 
 export function responsableDe(estado: EstadoPedido): Responsable {
   return RESPONSABLES[estado];
@@ -99,10 +96,7 @@ export function responsableDe(estado: EstadoPedido): Responsable {
  * siguen validando lo suyo (asignación de bodeguero, ventanilla elegida, etc.).
  * Esto solo evita ofrecer un botón que va a fallar.
  */
-export function puedeOperar(
-  estado: EstadoPedido,
-  rol: RolUsuario | undefined,
-): boolean {
+export function puedeOperar(estado: EstadoPedido, rol: RolUsuario | undefined): boolean {
   if (!rol) return false;
   // Los terminales van primero: en COMPLETED/CANCELLED no hay acción que
   // ofrecer, ni siquiera para ADMIN. Devolver `true` ahí pintaría un botón

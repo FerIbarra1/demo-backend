@@ -54,8 +54,8 @@ export const ResetPassword = ({
         lineHeight: '1.6',
       }}
     >
-      Recibimos una solicitud para restablecer la contraseña de tu cuenta. Si
-      no fuiste tú, puedes ignorar este correo — tu contraseña seguirá igual.
+      Recibimos una solicitud para restablecer la contraseña de tu cuenta. Si no fuiste tú, puedes
+      ignorar este correo — tu contraseña seguirá igual.
     </Text>
     <Text
       style={{
@@ -65,9 +65,8 @@ export const ResetPassword = ({
         lineHeight: '1.6',
       }}
     >
-      Para crear una nueva contraseña haz clic en el siguiente botón. Este
-      enlace expira en <strong>{expiresInMin} minutos</strong> y sólo puede
-      usarse una vez.
+      Para crear una nueva contraseña haz clic en el siguiente botón. Este enlace expira en{' '}
+      <strong>{expiresInMin} minutos</strong> y sólo puede usarse una vez.
     </Text>
     <Button href={resetUrl}>Restablecer mi contraseña</Button>
     <Text

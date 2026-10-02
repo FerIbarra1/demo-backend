@@ -93,9 +93,7 @@ export class ConfiguracionService {
     // El mimetype lo declara el cliente: se valida el contenido real.
     const mimeReal = detectarMimeImagen(file.buffer);
     if (!mimeReal) {
-      throw new BadRequestException(
-        'El archivo no es una imagen válida. Usa JPG, PNG o WEBP.',
-      );
+      throw new BadRequestException('El archivo no es una imagen válida. Usa JPG, PNG o WEBP.');
     }
     file.mimetype = mimeReal;
 
@@ -234,9 +232,7 @@ export class ConfiguracionService {
     }
     const mimeReal = detectarMimeImagen(file.buffer);
     if (!mimeReal) {
-      throw new BadRequestException(
-        'El archivo no es una imagen válida. Usa JPG, PNG o WEBP.',
-      );
+      throw new BadRequestException('El archivo no es una imagen válida. Usa JPG, PNG o WEBP.');
     }
     file.mimetype = mimeReal;
     const ext = mimeReal === 'image/png' ? '.png' : mimeReal === 'image/webp' ? '.webp' : '.jpg';

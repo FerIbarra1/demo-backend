@@ -1,15 +1,8 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { EstadoPedido, RolUsuario, CanalOrigen } from '@prisma/client';
-import {
-  MonitorResponseDto,
-  MonitorPedidoDto,
-  MonitorBodegueroDto,
-} from './dto/monitor.dto';
-import {
-  MAX_PEDIDOS_POR_BODEGUERO,
-  ESTADOS_OCUPAN_SLOT_BODEGA,
-} from '../core/pedido-limits';
+import { MonitorResponseDto, MonitorPedidoDto, MonitorBodegueroDto } from './dto/monitor.dto';
+import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/pedido-limits';
 import { asignadoANombre } from '../core/pedido-mapper';
 import type { MotivoReingreso } from '../core/motivo-reingreso';
 
@@ -77,10 +70,7 @@ export class MonitorService {
         rol: RolUsuario.BODEGA,
         tiendaId,
         activo: true,
-        OR: [
-          { lastLogin: { gte: limiteLogueo } },
-          { ultimoHeartbeat: { gte: limiteLogueo } },
-        ],
+        OR: [{ lastLogin: { gte: limiteLogueo } }, { ultimoHeartbeat: { gte: limiteLogueo } }],
       },
       select: {
         id: true,
@@ -110,9 +100,7 @@ export class MonitorService {
       // actividad" del bodeguero es el asignadoAt más reciente de sus
       // pedidos en curso, o su lastLogin si está libre.
       const slots = b.pedidosAsignados.map((p) => {
-        const minutosEnProceso = p.asignadoAt
-          ? this.minutosEntre(p.asignadoAt, ahora)
-          : 0;
+        const minutosEnProceso = p.asignadoAt ? this.minutosEntre(p.asignadoAt, ahora) : 0;
         return {
           id: p.id,
           numeroPedido: p.numeroPedido,
@@ -274,9 +262,7 @@ export class MonitorService {
         const raw = pedidosRaw.find((r) => r.id === p.id);
         const productoIds = Array.from(
           new Set(
-            (raw?.items ?? [])
-              .map((i) => i.productoId)
-              .filter((v): v is number => v != null),
+            (raw?.items ?? []).map((i) => i.productoId).filter((v): v is number => v != null),
           ),
         );
         return { id: p.id, minutosEnCola: p.minutosEnCola, productoIds };
@@ -413,8 +399,7 @@ export class MonitorService {
     // Acumular score y contar items compartidos (los que matchean por variante
     // o por producto; categoría sola NO cuenta como compartido).
     for (const item of itemsEnCola) {
-      const matchVariante =
-        item.precioCOId && precioCOIdsEnProceso.has(item.precioCOId);
+      const matchVariante = item.precioCOId && precioCOIdsEnProceso.has(item.precioCOId);
       const matchProducto = productoIdsEnProceso.has(item.productoId);
       if (!matchVariante && !matchProducto) {
         // ¿categoría? entonces es match suave, no cuenta como compartido

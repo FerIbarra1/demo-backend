@@ -1,10 +1,6 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import {
-  S3Client,
-  PutObjectCommand,
-  DeleteObjectCommand,
-} from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { randomUUID } from 'crypto';
 import { resolve, dirname } from 'path';
@@ -66,9 +62,7 @@ export class StorageService {
     // `https://.s3.us-east-1.amazonaws.com/...` y subiría a un bucket ''. Fallar
     // al arrancar es preferible a un fallback silencioso que rompa en producción.
     if (accessKeyId && secretAccessKey && !this.bucket) {
-      throw new Error(
-        'AWS_S3_BUCKET es obligatorio cuando hay credenciales AWS configuradas.',
-      );
+      throw new Error('AWS_S3_BUCKET es obligatorio cuando hay credenciales AWS configuradas.');
     }
 
     // Sólo instanciar S3 si hay credenciales. Sin ellas → disco local.
@@ -141,9 +135,7 @@ export class StorageService {
             `o las subidas fallarán y las URLs públicas quedarán rotas.`,
         );
       } else if (codigo === 'NoSuchBucket' || status === 404) {
-        this.logger.error(
-          `Storage: el bucket ${this.bucket} no existe. Revisa AWS_S3_BUCKET.`,
-        );
+        this.logger.error(`Storage: el bucket ${this.bucket} no existe. Revisa AWS_S3_BUCKET.`);
       } else {
         this.logger.error(
           `Storage: S3 no responde (bucket ${this.bucket}, ${this.region}). ` +
@@ -229,9 +221,7 @@ export class StorageService {
 
     if (this.usaS3) {
       try {
-        await this.s3!.send(
-          new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
-        );
+        await this.s3!.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
       } catch (err) {
         // No fallar el borrado de BD si S3 ya no tiene el objeto.
         this.logger.warn(`No se pudo borrar de S3: ${(err as Error).message}`);
@@ -324,10 +314,7 @@ export class StorageService {
     );
   }
 
-  private async guardarLocal(
-    file: Express.Multer.File,
-    key: string,
-  ): Promise<void> {
+  private async guardarLocal(file: Express.Multer.File, key: string): Promise<void> {
     const destino = this.rutaLocalSegura(key);
     await mkdir(dirname(destino), { recursive: true });
     await writeFile(destino, file.buffer);

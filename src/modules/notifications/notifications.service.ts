@@ -42,9 +42,7 @@ export class NotificationsService {
    */
   async enviar(pedido: Pedido, tipo: TipoNotificacion) {
     if (!pedido.clienteEmail) {
-      this.logger.warn(
-        `Pedido ${pedido.id} sin clienteEmail — no se envía notificación ${tipo}`,
-      );
+      this.logger.warn(`Pedido ${pedido.id} sin clienteEmail — no se envía notificación ${tipo}`);
       return [{ canal: 'EMAIL', exitosa: false, errorMsg: 'sin email', destinatario: '' }];
     }
 
@@ -308,15 +306,9 @@ export class NotificationsService {
     const delProducto = it.producto?.imagenesProducto ?? [];
     const colorId = it.precioCO?.colorId ?? null;
 
-    const delColor = colorId
-      ? delProducto.filter((i) => i.colorId === colorId)
-      : [];
+    const delColor = colorId ? delProducto.filter((i) => i.colorId === colorId) : [];
 
-    const elegida =
-      delColor[0]?.url ??
-      it.producto?.imagenPrincipal ??
-      delProducto[0]?.url ??
-      null;
+    const elegida = delColor[0]?.url ?? it.producto?.imagenPrincipal ?? delProducto[0]?.url ?? null;
 
     return this.storage.resolverImagen(elegida);
   }
@@ -329,9 +321,7 @@ export class NotificationsService {
    */
   async enviarListoParaPagar(pedido: Pedido, externalFolio: string) {
     if (!pedido.clienteEmail) {
-      this.logger.warn(
-        `Pedido ${pedido.id} sin clienteEmail — no se envía email listo para pagar`,
-      );
+      this.logger.warn(`Pedido ${pedido.id} sin clienteEmail — no se envía email listo para pagar`);
       return;
     }
 

@@ -1,4 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+  Logger,
+} from '@nestjs/common';
 import { randomBytes, createHash, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ActivarKioskoDto } from './dto/activar-kiosko.dto';
@@ -236,10 +242,7 @@ export class KioskoService {
       };
     }
 
-    if (
-      kiosko.estado === EstadoKiosko.INACTIVO &&
-      kiosko.desactivadoAt === null
-    ) {
+    if (kiosko.estado === EstadoKiosko.INACTIVO && kiosko.desactivadoAt === null) {
       // El kiosko está INACTIVO pero el admin nunca lo desactivó
       // explícitamente. Reactivamos por heartbeat. Cubre dos casos:
       // 1) Primera conexión: kiosko dado de alta por admin, nunca
@@ -370,7 +373,10 @@ export class KioskoService {
    *  - tablets comprometidas / robadas: el admin regenera desde el panel
    *    y la tablet atacante queda bloqueada.
    */
-  async regenerarDeviceToken(kioskoId: number, adminUserId: number): Promise<{ kiosko: any; deviceTokenPlain: string }> {
+  async regenerarDeviceToken(
+    kioskoId: number,
+    adminUserId: number,
+  ): Promise<{ kiosko: any; deviceTokenPlain: string }> {
     const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
     if (!kiosko) {
       throw new NotFoundException('Kiosko no encontrado');
@@ -387,9 +393,7 @@ export class KioskoService {
       },
       include: this.includeCompleto,
     });
-    this.logger.log(
-      `Device token regenerado para kiosko ${kioskoId} por admin ${adminUserId}`,
-    );
+    this.logger.log(`Device token regenerado para kiosko ${kioskoId} por admin ${adminUserId}`);
     return { kiosko: actualizado, deviceTokenPlain };
   }
 

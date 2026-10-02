@@ -23,8 +23,7 @@ export class SmtpAdapter {
     const user = this.config.get<string>('app.smtp.user') ?? '';
     const pass = this.config.get<string>('app.smtp.pass') ?? '';
     const secure = this.config.get<boolean>('app.smtp.secure') ?? false;
-    this.fromAddress =
-      this.config.get<string>('app.smtp.from') ?? 'no-reply@tienda.local';
+    this.fromAddress = this.config.get<string>('app.smtp.from') ?? 'no-reply@tienda.local';
     // Los correos invitan a "contesta este correo", pero el remitente es
     // no-reply: sin replyTo la respuesta se perdía en un buzón inexistente.
     // Vacío = se omite y el cliente responde al `from`.

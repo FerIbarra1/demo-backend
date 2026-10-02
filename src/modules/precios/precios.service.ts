@@ -1,9 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import {
-  ColumnaLista,
-  resolverColumnaLista,
-} from './precio-lista.util';
+import { ColumnaLista, resolverColumnaLista } from './precio-lista.util';
 
 /**
  * Fase 0 (sep 2026): resuelve qué lista de precios le toca a un cliente.
@@ -35,10 +32,7 @@ export class PreciosService {
    * Sin `usuarioId` (visitante anónimo, o caller que no tiene el dato) cae a
    * `lista1`, igual que el catálogo público.
    */
-  async columnaParaUsuario(
-    usuarioId?: number,
-    tiendaId?: number,
-  ): Promise<ColumnaLista> {
+  async columnaParaUsuario(usuarioId?: number, tiendaId?: number): Promise<ColumnaLista> {
     if (!usuarioId) return 'lista1';
 
     const usuario = await this.prisma.usuario.findUnique({
@@ -68,9 +62,7 @@ export class PreciosService {
    * está ajustando (un asesor de ventas o un operador de mostrador no tienen
    * lista de precios de cliente).
    */
-  async columnaParaPedido(
-    pedido: { usuarioId: number; tiendaId: number },
-  ): Promise<ColumnaLista> {
+  async columnaParaPedido(pedido: { usuarioId: number; tiendaId: number }): Promise<ColumnaLista> {
     return this.columnaParaUsuario(pedido.usuarioId, pedido.tiendaId);
   }
 }

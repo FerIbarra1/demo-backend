@@ -68,9 +68,7 @@ export function rankearSimilares(
   if (itemsReferencia.length === 0) return [];
 
   // Zonas de referencia: combinación productoId:colorId (colorId null → "sin color").
-  const zonasRef = new Set(
-    itemsReferencia.map((i) => zonaKey(i.productoId, i.colorId)),
-  );
+  const zonasRef = new Set(itemsReferencia.map((i) => zonaKey(i.productoId, i.colorId)));
 
   const ahora = opts.ahora ?? new Date();
   const top = opts.top ?? TOP_POR_PEDIDO;
@@ -91,9 +89,7 @@ export function rankearSimilares(
         numeroPedido: c.numeroPedido,
         score,
         itemsCompartidos: zonasCompartidas.size,
-        minutosEnCola: Math.floor(
-          (ahora.getTime() - c.fechaPedido.getTime()) / 60000,
-        ),
+        minutosEnCola: Math.floor((ahora.getTime() - c.fechaPedido.getTime()) / 60000),
       };
     })
     .filter((r) => r.score >= UMBRAL_SCORE_MINIMO && r.itemsCompartidos > 0)
@@ -199,15 +195,11 @@ export function agruparColaPorZonaCompartida(
     // Zonas compartidas por al menos 2 pedidos del cluster.
     const zonasCompartidas = Array.from(pedidosPorZona.entries())
       .filter(([, ids]) => {
-        const enCluster = Array.from(ids).filter((id) =>
-          arr.some((p) => p.id === id),
-        );
+        const enCluster = Array.from(ids).filter((id) => arr.some((p) => p.id === id));
         return enCluster.length >= 2;
       })
       .map(([z]) => z);
-    const ordenados = [...arr].sort(
-      (a, b) => a.fechaPedido.getTime() - b.fechaPedido.getTime(),
-    );
+    const ordenados = [...arr].sort((a, b) => a.fechaPedido.getTime() - b.fechaPedido.getTime());
     const grupoId = ordenados
       .map((p) => p.id)
       .sort((a, b) => a - b)
@@ -220,10 +212,7 @@ export function agruparColaPorZonaCompartida(
   }
 
   // Ordenar clusters por el pedido más viejo (los más urgentes primero).
-  clusters.sort(
-    (a, b) =>
-      a.pedidos[0].fechaPedido.getTime() - b.pedidos[0].fechaPedido.getTime(),
-  );
+  clusters.sort((a, b) => a.pedidos[0].fechaPedido.getTime() - b.pedidos[0].fechaPedido.getTime());
 
   return clusters;
 }

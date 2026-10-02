@@ -1,11 +1,4 @@
-import {
-  Controller,
-  Post,
-  Get,
-  Body,
-  Param,
-  ParseIntPipe,
-} from '@nestjs/common';
+import { Controller, Post, Get, Body, Param, ParseIntPipe } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { PropuestaService } from './propuesta.service';
 import { CrearPropuestaDto, ResponderPropuestaDto } from './dto/propuesta.dto';
@@ -66,12 +59,7 @@ export class PropuestaController {
           itemId: it.itemId,
           // El DTO de entrada usa string (ClassValidator); el de adjunto
           // exige el union literal. Cast explícito: ya validamos arriba.
-          tipo: it.tipo as
-            | 'completo'
-            | 'cambio'
-            | 'no-disponible'
-            | 'parcial'
-            | 'agregado',
+          tipo: it.tipo as 'completo' | 'cambio' | 'no-disponible' | 'parcial' | 'agregado',
           producto: it.producto,
           variante: it.variante,
           // Se reenvían tal cual para que el snapshot guarde el item completo
@@ -149,10 +137,7 @@ export class PropuestaController {
   @Get('pedidos/:id/propuestas')
   @Roles(RolUsuario.BODEGA, RolUsuario.VENTAS, RolUsuario.ADMIN, RolUsuario.CLIENTE)
   @ApiOperation({ summary: 'Lista las propuestas de un pedido (historial).' })
-  async listarPropuestas(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async listarPropuestas(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.propuestaService.listarPropuestas(id, user);
   }
 }

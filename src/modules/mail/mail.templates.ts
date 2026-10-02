@@ -17,10 +17,7 @@ import { PedidoEnviado } from './templates/PedidoEnviado';
 import { PedidoListoEnTienda } from './templates/PedidoListoEnTienda';
 import { PedidoRecibido } from './templates/PedidoRecibido';
 import { ResetPassword } from './templates/ResetPassword';
-import {
-  RevisionPropuesta,
-  type OrigenPropuesta,
-} from './templates/RevisionPropuesta';
+import { RevisionPropuesta, type OrigenPropuesta } from './templates/RevisionPropuesta';
 
 export interface ItemPedidoSnapshot {
   productoNombre: string;
@@ -73,57 +70,76 @@ export interface MailContext {
 }
 
 export const mailTemplates = {
-  Bienvenida: (props: { nombre: string } & MailContext): ReactElement =>
-    Bienvenida(props),
-  ResetPassword: (props: {
-    nombre: string;
-    resetUrl: string;
-    expiresInMin: number;
-  } & MailContext): ReactElement => ResetPassword(props),
-  PedidoRecibido: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-  } & MailContext): ReactElement => PedidoRecibido(props),
-  PedidoListoEnTienda: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-  } & MailContext): ReactElement => PedidoListoEnTienda(props),
-  RevisionPropuesta: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-    mensajeBodeguero?: string;
-    // Quién escribe: bodega (faltantes), ventas (contrapropuesta) o asesor
-    // (el cliente pidió uno). El texto cambia porque antes decía "bodeguero"
-    // incluso cuando el mensaje venía de un asesor de ventas.
-    origen?: OrigenPropuesta;
-  } & MailContext): ReactElement => RevisionPropuesta(props),
-  PedidoAprobado: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-    qrDataUrl?: string | null;
-  } & MailContext): ReactElement => PedidoAprobado(props),
-  PagoConfirmado: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-  } & MailContext): ReactElement => PagoConfirmado(props),
-  PedidoEnviado: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-  } & MailContext): ReactElement => PedidoEnviado(props),
-  PedidoEntregado: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-  } & MailContext): ReactElement => PedidoEntregado(props),
-  PedidoCancelado: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-  } & MailContext): ReactElement => PedidoCancelado(props),
-  MensajeBodeguero: (props: {
-    pedido: PedidoEmailData;
-    pedidoUrl: string;
-    mensaje: string;
-    nombreBodeguero: string;
-  } & MailContext): ReactElement => MensajeBodeguero(props),
+  Bienvenida: (props: { nombre: string } & MailContext): ReactElement => Bienvenida(props),
+  ResetPassword: (
+    props: {
+      nombre: string;
+      resetUrl: string;
+      expiresInMin: number;
+    } & MailContext,
+  ): ReactElement => ResetPassword(props),
+  PedidoRecibido: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+    } & MailContext,
+  ): ReactElement => PedidoRecibido(props),
+  PedidoListoEnTienda: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+    } & MailContext,
+  ): ReactElement => PedidoListoEnTienda(props),
+  RevisionPropuesta: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+      mensajeBodeguero?: string;
+      // Quién escribe: bodega (faltantes), ventas (contrapropuesta) o asesor
+      // (el cliente pidió uno). El texto cambia porque antes decía "bodeguero"
+      // incluso cuando el mensaje venía de un asesor de ventas.
+      origen?: OrigenPropuesta;
+    } & MailContext,
+  ): ReactElement => RevisionPropuesta(props),
+  PedidoAprobado: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+      qrDataUrl?: string | null;
+    } & MailContext,
+  ): ReactElement => PedidoAprobado(props),
+  PagoConfirmado: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+    } & MailContext,
+  ): ReactElement => PagoConfirmado(props),
+  PedidoEnviado: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+    } & MailContext,
+  ): ReactElement => PedidoEnviado(props),
+  PedidoEntregado: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+    } & MailContext,
+  ): ReactElement => PedidoEntregado(props),
+  PedidoCancelado: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+    } & MailContext,
+  ): ReactElement => PedidoCancelado(props),
+  MensajeBodeguero: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+      mensaje: string;
+      nombreBodeguero: string;
+    } & MailContext,
+  ): ReactElement => MensajeBodeguero(props),
 };
 
 export const mailSubjects = {
@@ -144,9 +160,7 @@ export const mailSubjects = {
   MENSAJE_BODEGUERO: (n: string) =>
     `Tu asesor de ventas te ha enviado un mensaje sobre tu pedido ${n}`,
   // F13: el cliente pidió un asesor de ventas desde una propuesta.
-  ASESOR_SOLICITADO: (n: string) =>
-    `Un asesor de ventas atenderá tu pedido ${n}`,
+  ASESOR_SOLICITADO: (n: string) => `Un asesor de ventas atenderá tu pedido ${n}`,
   // F13: el asesor envió una contrapropuesta.
-  PROPUESTA_VENTAS: (n: string) =>
-    `Tu asesor de ventas tiene una propuesta para el pedido ${n}`,
+  PROPUESTA_VENTAS: (n: string) => `Tu asesor de ventas tiene una propuesta para el pedido ${n}`,
 };

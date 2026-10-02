@@ -34,12 +34,7 @@
 export const PROPUESTA_PREFIX = '@@PROPUESTA@@';
 export const PROPUESTA_SUFFIX = '@@/PROPUESTA@@';
 
-export type TipoItemPropuesta =
-  | 'completo'
-  | 'cambio'
-  | 'no-disponible'
-  | 'parcial'
-  | 'agregado';
+export type TipoItemPropuesta = 'completo' | 'cambio' | 'no-disponible' | 'parcial' | 'agregado';
 
 export interface ItemPropuestaJson {
   itemId: number;
@@ -93,10 +88,13 @@ export function parsePropuestaContenido(contenido: string): PropuestaParseada | 
     return null;
   }
 
-  const textoLibre =
-    (contenido.slice(0, startIdx) + ' ' + contenido.slice(endIdx + PROPUESTA_SUFFIX.length))
-      .trim()
-      .replace(/\s+/g, ' ');
+  const textoLibre = (
+    contenido.slice(0, startIdx) +
+    ' ' +
+    contenido.slice(endIdx + PROPUESTA_SUFFIX.length)
+  )
+    .trim()
+    .replace(/\s+/g, ' ');
 
   return { propuesta, textoLibre };
 }

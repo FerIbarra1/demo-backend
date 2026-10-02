@@ -14,5 +14,4 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     await this.$disconnect();
     this.logger.log('Conexión a base de datos cerrada');
   }
-
 }

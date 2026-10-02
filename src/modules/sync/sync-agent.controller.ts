@@ -39,18 +39,14 @@ export class SyncAgentController {
   @ApiOperation({
     summary: 'Heartbeat del agente. Actualiza ultimoHeartbeatAt del checkpoint.',
   })
-  async heartbeat(
-    @Body() dto: HeartbeatDto,
-    @Headers('x-sucursal-id') sucursalIdHeader: string,
-  ) {
+  async heartbeat(@Body() dto: HeartbeatDto, @Headers('x-sucursal-id') sucursalIdHeader: string) {
     const tiendaId = this.parseTiendaId(sucursalIdHeader);
     return this.service.heartbeat(tiendaId, dto);
   }
 
   @Get('poll-pedidos')
   @ApiOperation({
-    summary:
-      'Cola de pedidos pendientes para bajar a Firebird. Query: ?sucursalId=X&limit=N',
+    summary: 'Cola de pedidos pendientes para bajar a Firebird. Query: ?sucursalId=X&limit=N',
   })
   async pollPedidos(
     @Headers('x-sucursal-id') sucursalIdHeader: string,
@@ -72,10 +68,7 @@ export class SyncAgentController {
     summary:
       'Batch de cambios desde Firebird (catálogo/clientes/pagos). Avanza checkpoint a hastaBANDEJAId si todos OK.',
   })
-  async upload(
-    @Body() dto: UploadBatchDto,
-    @Headers('x-sucursal-id') sucursalIdHeader: string,
-  ) {
+  async upload(@Body() dto: UploadBatchDto, @Headers('x-sucursal-id') sucursalIdHeader: string) {
     const tiendaId = this.parseTiendaId(sucursalIdHeader);
     if (dto.tiendaId !== tiendaId) {
       throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
@@ -88,10 +81,7 @@ export class SyncAgentController {
     summary:
       'Confirmación del agente: pedidos subidos a Firebird o errores. Marca PedidoPendienteEnvio.',
   })
-  async pedidosAck(
-    @Body() dto: PedidosAckDto,
-    @Headers('x-sucursal-id') sucursalIdHeader: string,
-  ) {
+  async pedidosAck(@Body() dto: PedidosAckDto, @Headers('x-sucursal-id') sucursalIdHeader: string) {
     const tiendaId = this.parseTiendaId(sucursalIdHeader);
     if (dto.tiendaId !== tiendaId) {
       throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
@@ -104,7 +94,8 @@ export class SyncAgentController {
     summary: 'Reporte de error transitorio en un pedido (incrementa intentos).',
   })
   async pedidosError(
-    @Body() body: {
+    @Body()
+    body: {
       pedidoId: number;
       error: string;
       tiendaId: number;
@@ -119,22 +110,22 @@ export class SyncAgentController {
     }
     return this.service.procesarPedidosAck({
       tiendaId,
-      acks: [{
-        pedidoId: body.pedidoId,
-        agentId: body.agentId,
-        leaseToken: body.leaseToken,
-        exito: false,
-        error: body.error,
-      }],
+      acks: [
+        {
+          pedidoId: body.pedidoId,
+          agentId: body.agentId,
+          leaseToken: body.leaseToken,
+          exito: false,
+          error: body.error,
+        },
+      ],
     });
   }
 
   private parseTiendaId(header: string | undefined): number {
     const v = parseInt(header ?? '', 10);
     if (!Number.isFinite(v) || v <= 0) {
-      throw new BadRequestException(
-        'Header X-Sucursal-Id es obligatorio y debe ser numérico',
-      );
+      throw new BadRequestException('Header X-Sucursal-Id es obligatorio y debe ser numérico');
     }
     return v;
   }

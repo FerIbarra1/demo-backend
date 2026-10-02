@@ -78,8 +78,7 @@ export class AuthService {
 
   private async enviarBienvenida(usuario: Usuario) {
     const logoUrl = await this.configuracion.obtenerLogoUrl();
-    const frontendUrl =
-      this.configService.get<string>('app.mail.frontendUrl') ?? '';
+    const frontendUrl = this.configService.get<string>('app.mail.frontendUrl') ?? '';
 
     const template = mailTemplates.Bienvenida({
       nombre: usuario.nombre,
@@ -327,7 +326,13 @@ export class AuthService {
     // Generar un refresh token con jti único y persistirlo en BD (hash).
     const jti = randomUUID();
     const refreshToken = this.jwtService.sign(
-      { sub: usuario.id, email: usuario.email, rol: usuario.rol, tiendaId: usuario.tiendaId ?? undefined, jti },
+      {
+        sub: usuario.id,
+        email: usuario.email,
+        rol: usuario.rol,
+        tiendaId: usuario.tiendaId ?? undefined,
+        jti,
+      },
       { expiresIn: refreshExpiresIn as any },
     );
     const familyId = opts?.familyId ?? randomUUID();
@@ -426,9 +431,7 @@ export class AuthService {
     });
     if (!usuario || !usuario.activo) {
       // No filtrar existencia. Log interno para detectar abuso.
-      this.logger.warn(
-        `solicitarResetPassword para email no registrado o inactivo: ${dto.email}`,
-      );
+      this.logger.warn(`solicitarResetPassword para email no registrado o inactivo: ${dto.email}`);
       return { message };
     }
 
@@ -436,8 +439,7 @@ export class AuthService {
     // SHA256 — si la BD se filtra, los tokens en claro no están expuestos.
     const tokenRandom = randomBytes(32).toString('hex');
     const tokenHash = createHash('sha256').update(tokenRandom).digest('hex');
-    const expiresMin =
-      this.configService.get<number>('app.mail.passwordResetExpiresMin') ?? 60;
+    const expiresMin = this.configService.get<number>('app.mail.passwordResetExpiresMin') ?? 60;
     const expiresAt = new Date(Date.now() + expiresMin * 60 * 1000);
 
     await this.prisma.passwordResetToken.create({
@@ -450,8 +452,7 @@ export class AuthService {
     });
 
     const logoUrl = await this.configuracion.obtenerLogoUrl();
-    const frontendUrl =
-      this.configService.get<string>('app.mail.frontendUrl') ?? '';
+    const frontendUrl = this.configService.get<string>('app.mail.frontendUrl') ?? '';
     const resetUrl = `${frontendUrl}/reset-password?token=${tokenRandom}`;
 
     const template = mailTemplates.ResetPassword({
@@ -472,9 +473,7 @@ export class AuthService {
           template,
           tipoNotificacion: TipoNotificacion.RESET_PASSWORD,
         })
-        .catch((err) =>
-          this.logger.error(`Falló email RESET_PASSWORD: ${err.message}`),
-        );
+        .catch((err) => this.logger.error(`Falló email RESET_PASSWORD: ${err.message}`));
     });
 
     return { message };
@@ -491,9 +490,7 @@ export class AuthService {
    * enumeración de tokens). El cliente sabrá por la respuesta del frontend
    * (que no redirigirá).
    */
-  async resetearPassword(
-    dto: ResetPasswordDto,
-  ): Promise<{ message: string }> {
+  async resetearPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
     const message =
       'Si el token es válido, tu contraseña ha sido actualizada. Intenta iniciar sesión de nuevo.';
 
@@ -507,15 +504,11 @@ export class AuthService {
       return { message };
     }
     if (registro.usedAt) {
-      this.logger.warn(
-        `resetearPassword: token ya usado (usuario ${registro.usuarioId})`,
-      );
+      this.logger.warn(`resetearPassword: token ya usado (usuario ${registro.usuarioId})`);
       return { message };
     }
     if (registro.expiresAt.getTime() < Date.now()) {
-      this.logger.warn(
-        `resetearPassword: token expirado (usuario ${registro.usuarioId})`,
-      );
+      this.logger.warn(`resetearPassword: token expirado (usuario ${registro.usuarioId})`);
       return { message };
     }
 
@@ -533,9 +526,7 @@ export class AuthService {
       }),
     ]);
 
-    this.logger.log(
-      `Contraseña restablecida para usuario ${registro.usuarioId}`,
-    );
+    this.logger.log(`Contraseña restablecida para usuario ${registro.usuarioId}`);
 
     return { message };
   }
@@ -549,11 +540,16 @@ export class AuthService {
     if (!m) return 3600;
     const n = parseInt(m[1], 10);
     switch (m[2]) {
-      case 's': return n;
-      case 'm': return n * 60;
-      case 'h': return n * 3600;
-      case 'd': return n * 86400;
-      default: return n;
+      case 's':
+        return n;
+      case 'm':
+        return n * 60;
+      case 'h':
+        return n * 3600;
+      case 'd':
+        return n * 86400;
+      default:
+        return n;
     }
   }
 }

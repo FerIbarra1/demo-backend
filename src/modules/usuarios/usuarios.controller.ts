@@ -53,28 +53,19 @@ export class UsuariosController {
 
   @Patch(':id')
   @ApiOperation({ summary: 'Editar un empleado (Admin). No permite cambiar a CLIENTE.' })
-  actualizar(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: ActualizarUsuarioDto,
-  ) {
+  actualizar(@Param('id', ParseIntPipe) id: number, @Body() dto: ActualizarUsuarioDto) {
     return this.usuariosService.actualizar(id, dto);
   }
 
   @Post(':id/password')
   @ApiOperation({ summary: 'Cambiar la contraseña de un empleado (Admin)' })
-  resetPassword(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: AdminResetPasswordDto,
-  ) {
+  resetPassword(@Param('id', ParseIntPipe) id: number, @Body() dto: AdminResetPasswordDto) {
     return this.usuariosService.resetPassword(id, dto);
   }
 
   @Patch(':id/activo')
   @ApiOperation({ summary: 'Desactivar/activar un usuario (empleado o cliente)' })
-  cambiarActivo(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: CambiarActivoDto,
-  ) {
+  cambiarActivo(@Param('id', ParseIntPipe) id: number, @Body() dto: CambiarActivoDto) {
     return this.usuariosService.cambiarActivo(id, dto.activo);
   }
 

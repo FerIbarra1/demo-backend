@@ -50,9 +50,7 @@ export class CajeroController {
   ) {
     const tiendaSolicitada = tiendaId ? parseInt(tiendaId, 10) : undefined;
     const tiendaEfectiva =
-      user.rol === RolUsuario.ADMIN
-        ? tiendaSolicitada ?? user.tiendaId
-        : user.tiendaId;
+      user.rol === RolUsuario.ADMIN ? (tiendaSolicitada ?? user.tiendaId) : user.tiendaId;
     return this.cajeroService.obtenerColaVentanilla(
       tiendaEfectiva,
       pagina ? parseInt(pagina, 10) : 1,
@@ -64,8 +62,7 @@ export class CajeroController {
 
   @Get('mis-pedidos')
   @ApiOperation({
-    summary:
-      'Pedidos del kiosko en PENDING_PAID asignados al cajero autenticado',
+    summary: 'Pedidos del kiosko en PENDING_PAID asignados al cajero autenticado',
   })
   async misPedidos(@CurrentUser() user: any) {
     return this.cajeroService.obtenerMisPedidosCajero(user.userId, user.tiendaId);
@@ -73,17 +70,13 @@ export class CajeroController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Detalle de pedido (sólo validación de tienda)' })
-  async obtenerPedido(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser() user: any,
-  ) {
+  async obtenerPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.pedidoState.obtenerDetalle(id, user);
   }
 
   @Post(':id/tomar')
   @ApiOperation({
-    summary:
-      'Tomar pedido del kiosko → lo asigna a la ventanilla del cajero logueado',
+    summary: 'Tomar pedido del kiosko → lo asigna a la ventanilla del cajero logueado',
   })
   async tomar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.cajeroService.tomarPedidoCajero(id, user);

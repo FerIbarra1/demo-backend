@@ -11,19 +11,10 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { KioskoService } from './kiosko.service';
 import { RealtimeService } from '../realtime/realtime.service';
-import {
-  firmarLlegoQr,
-  verificarLlegoQr,
-  tokenEsDeTienda,
-} from '../pedidos/core/qr-llegada.util';
+import { firmarLlegoQr, verificarLlegoQr, tokenEsDeTienda } from '../pedidos/core/qr-llegada.util';
 import { motivoNoAvisable } from '../pedidos/core/llegada-aviso.util';
 import { estadoPedidoLabel } from '../mail/estado-labels';
-import {
-  CanalLlegada,
-  EstadoPedido,
-  ModoEntrega,
-  Prisma,
-} from '@prisma/client';
+import { CanalLlegada, EstadoPedido, ModoEntrega, Prisma } from '@prisma/client';
 import type { UserContext } from '../../types/pedido.types';
 
 const THROTTLE_WINDOW_MS = 60_000;
@@ -256,10 +247,7 @@ export class KioskoLlegadaService {
    * `pedidos/core/llegada-aviso.util.ts` y las tres superficies (kiosko, app
    * del cliente, mostrador) comparten el mismo texto.
    */
-  private exigirAvisable(pedido: {
-    estado: EstadoPedido;
-    modoEntrega: ModoEntrega;
-  }): void {
+  private exigirAvisable(pedido: { estado: EstadoPedido; modoEntrega: ModoEntrega }): void {
     const motivo = motivoNoAvisable(pedido);
     if (motivo) throw new ConflictException(motivo);
   }
@@ -307,8 +295,7 @@ export class KioskoLlegadaService {
     // inmediato — el descarte lo hizo porque el cliente no estaba, así que
     // hacerlo esperar la ventana lo dejaría sin forma de re-avisar.
     const ultimo = pedido.llegadaUltimoAvisoAt;
-    const isFresh =
-      ultimo !== null && now.getTime() - ultimo.getTime() < THROTTLE_WINDOW_MS;
+    const isFresh = ultimo !== null && now.getTime() - ultimo.getTime() < THROTTLE_WINDOW_MS;
     const descartado = pedido.llegadaDescartadaAt !== null;
     if (pedido.llegadaAnunciadaAt && isFresh && !descartado) {
       return {
@@ -329,10 +316,8 @@ export class KioskoLlegadaService {
     const agotoTope = pedido.llegadaAnunciadaCount >= MAX_AVISOS_POR_PEDIDO;
     const ultimaEmision = pedido.llegadaUltimaEmisionAt;
     const pasoLaVentana =
-      ultimaEmision === null ||
-      now.getTime() - ultimaEmision.getTime() >= REINTENTO_WINDOW_MS;
-    const nuevoCount =
-      agotoTope && pasoLaVentana ? 1 : pedido.llegadaAnunciadaCount + 1;
+      ultimaEmision === null || now.getTime() - ultimaEmision.getTime() >= REINTENTO_WINDOW_MS;
+    const nuevoCount = agotoTope && pasoLaVentana ? 1 : pedido.llegadaAnunciadaCount + 1;
     const debeEmitir = nuevoCount <= MAX_AVISOS_POR_PEDIDO;
 
     const actualizado = await this.prisma.pedido.update({
@@ -354,10 +339,7 @@ export class KioskoLlegadaService {
       },
     });
 
-    const esperandoDesdeMin = this.minutosDesde(
-      actualizado.llegadaAnunciadaAt ?? now,
-      now,
-    );
+    const esperandoDesdeMin = this.minutosDesde(actualizado.llegadaAnunciadaAt ?? now, now);
 
     if (debeEmitir) {
       this.realtime.emitToTienda(pedido.tiendaId, 'pedido.llegada-anunciada', {
@@ -443,11 +425,7 @@ export class KioskoLlegadaService {
    * Valida que el QR/folio resuelve a un pedido. Helper privado.
    * Aplica la lógica de "pertenece a la tienda del kiosko".
    */
-  private async resolverPedido(input: {
-    kioskoTiendaId: number;
-    qr?: string;
-    folio?: string;
-  }) {
+  private async resolverPedido(input: { kioskoTiendaId: number; qr?: string; folio?: string }) {
     if (input.qr) {
       const r = verificarLlegoQr(input.qr, this.getSecret());
       if (!r.valido || !r.pedidoId) {

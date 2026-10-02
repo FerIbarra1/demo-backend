@@ -1,9 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CatalogHandler } from './handlers/catalog.handler';
 import { ClienteHandler } from './handlers/cliente.handler';
@@ -90,11 +85,7 @@ export class SyncAgentService {
       });
 
       // En backoff (ERROR/RETRY con nextAttemptAt futuro): no reprocesar aún.
-      if (
-        existente &&
-        existente.estado !== 'PROCESADO' &&
-        existente.nextAttemptAt > new Date()
-      ) {
+      if (existente && existente.estado !== 'PROCESADO' && existente.nextAttemptAt > new Date()) {
         errores++;
         continue;
       }
@@ -156,11 +147,7 @@ export class SyncAgentService {
       await this.prisma.syncEventInbox.update({
         where: { eventId: evento.eventId },
         data: {
-          estado: resultado.ok
-            ? 'PROCESADO'
-            : puedeReintentar
-              ? 'ERROR'
-              : 'DEAD_LETTER',
+          estado: resultado.ok ? 'PROCESADO' : puedeReintentar ? 'ERROR' : 'DEAD_LETTER',
           intentos: intento,
           nextAttemptAt: puedeReintentar
             ? new Date(Date.now() + Math.min(300_000, 30_000 * 2 ** (intento - 1)))
@@ -232,12 +219,22 @@ export class SyncAgentService {
     return { eventId, estado: 'ERROR' };
   }
 
-  private async dispatch(evento: { tipo: string; entidad: string; operacion: string; localId: number; localTiendaId?: number; datos: Record<string, unknown> }) {
+  private async dispatch(evento: {
+    tipo: string;
+    entidad: string;
+    operacion: string;
+    localId: number;
+    localTiendaId?: number;
+    datos: Record<string, unknown>;
+  }) {
     // MOVPED se ignora: el pedido llega a Firebird con cantidades finales
     // confirmadas por bodega en la web (confirmarSurtido → PENDING_PAID).
     // No hay ajustes VFP→nube que re-sincronizar.
     if (evento.entidad === 'MOVPED') {
-      return { ok: true, mensaje: 'MOVPED ignorado: el pedido llega a Firebird con cantidades finales' };
+      return {
+        ok: true,
+        mensaje: 'MOVPED ignorado: el pedido llega a Firebird con cantidades finales',
+      };
     }
     if (evento.tipo === 'CATALOGO') {
       return this.catalog.procesar(evento as any);
@@ -325,9 +322,7 @@ export class SyncAgentService {
           },
         });
         if (!entrega) {
-          throw new NotFoundException(
-            `Cola de envío del pedido ${ack.pedidoId} no encontrada`,
-          );
+          throw new NotFoundException(`Cola de envío del pedido ${ack.pedidoId} no encontrada`);
         }
 
         if (entrega.estado === 'PROCESADO') {
@@ -343,9 +338,7 @@ export class SyncAgentService {
           entrega.claimedBy !== ack.agentId ||
           entrega.leaseToken !== ack.leaseToken
         ) {
-          throw new BadRequestException(
-            `Lease inválido o expirado para pedido ${ack.pedidoId}`,
-          );
+          throw new BadRequestException(`Lease inválido o expirado para pedido ${ack.pedidoId}`);
         }
 
         if (ack.exito) {
@@ -448,7 +441,9 @@ export class SyncAgentService {
    * IDTIENDA de Firebird). Es la clave natural compartida entre ambos
    * sistemas, así que el agente no necesita mapear IDs de tienda.
    */
-  private async resolverTiendaPorExternalId(externalId: number): Promise<{ id: number; externalId: number }> {
+  private async resolverTiendaPorExternalId(
+    externalId: number,
+  ): Promise<{ id: number; externalId: number }> {
     // C1: defensa contra agentes que mandan tiendaId=0 (que era el valor de
     // GLOBAL_CHECKPOINT_TIENDA en versiones anteriores). Un externalId <= 0
     // no es una tienda válida y debe rechazarse antes de consultar BD.

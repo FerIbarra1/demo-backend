@@ -1,8 +1,5 @@
 import { Prisma } from '@prisma/client';
-import {
-  PIEZAS_MAYOREO,
-  precioConPromoVolumen,
-} from '../../precios/precio-lista.util';
+import { PIEZAS_MAYOREO, precioConPromoVolumen } from '../../precios/precio-lista.util';
 
 /**
  * Promo de volumen (sep 2026): re-evaluación del precio efectivo de un pedido.

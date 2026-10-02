@@ -1,14 +1,5 @@
-import {
-  BadRequestException,
-  NotFoundException,
-} from '@nestjs/common';
-import {
-  EstadoPedido,
-  EstadoSurtido,
-  ModoEntrega,
-  Prisma,
-  RolUsuario,
-} from '@prisma/client';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { EstadoPedido, EstadoSurtido, ModoEntrega, Prisma, RolUsuario } from '@prisma/client';
 import { SurtidoService } from '../bodega/surtido.service';
 import { PropuestaService } from '../propuesta/propuesta.service';
 
@@ -61,9 +52,7 @@ function crearSurtido(items: any[], opts: { propuestaAceptada?: boolean } = {}) 
       })),
     },
     pedidoPropuesta: {
-      findFirst: jest.fn(async () =>
-        opts.propuestaAceptada ? { id: 77 } : null,
-      ),
+      findFirst: jest.fn(async () => (opts.propuestaAceptada ? { id: 77 } : null)),
       update: jest.fn(async () => ({})),
     },
     itemPedido: {
@@ -120,7 +109,12 @@ describe('confirmarSurtido: los items cancelados no son faltantes', () => {
     // El caso exacto del reporte: el asesor reemplazó el item, quedó cancelado
     // con su `estadoSurtido` sucio, y el bodeguero surtió todo lo demás bien.
     const { svc, transiciones } = crearSurtido([
-      item({ id: 1, cancelada: true, estadoSurtido: EstadoSurtido.NO_DISPONIBLE, cantidadSurtida: 0 }),
+      item({
+        id: 1,
+        cancelada: true,
+        estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
+        cantidadSurtida: 0,
+      }),
       item({ id: 2 }), // el producto nuevo que el asesor agregó, surtido completo
     ]);
 
@@ -156,9 +150,7 @@ describe('confirmarSurtido: los items cancelados no son faltantes', () => {
       item({ id: 2 }),
     ]);
 
-    await expect(svc.confirmarSurtido(1, usuario, false)).rejects.toThrow(
-      BadRequestException,
-    );
+    await expect(svc.confirmarSurtido(1, usuario, false)).rejects.toThrow(BadRequestException);
   });
 
   it('un item cancelado COMPLETO no cuenta como producto activo', async () => {
@@ -176,7 +168,13 @@ describe('confirmarSurtido: los items cancelados no son faltantes', () => {
 
   it('un item cancelado COMPLETO con menos piezas no dispara el guard de incoherencia', async () => {
     const { svc } = crearSurtido([
-      item({ id: 1, cancelada: true, estadoSurtido: EstadoSurtido.COMPLETO, cantidad: 5, cantidadSurtida: 2 }),
+      item({
+        id: 1,
+        cancelada: true,
+        estadoSurtido: EstadoSurtido.COMPLETO,
+        cantidad: 5,
+        cantidadSurtida: 2,
+      }),
       item({ id: 2 }),
     ]);
 
@@ -217,7 +215,8 @@ function crearPropuesta(items: any[]) {
       // guard, así que devolvemos el conteo real.
       count: jest.fn(async ({ where }: any) => {
         const cancelada = (where as { cancelada?: boolean })?.cancelada;
-        return items.filter((i) => (cancelada === undefined ? true : i.cancelada === cancelada)).length;
+        return items.filter((i) => (cancelada === undefined ? true : i.cancelada === cancelada))
+          .length;
       }),
     },
     precioCO: {
@@ -449,9 +448,7 @@ describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
             cantidad: 5,
             cantidadSurtida,
             estadoSurtido:
-              cantidadSurtida === 0
-                ? EstadoSurtido.NO_DISPONIBLE
-                : EstadoSurtido.PARCIAL,
+              cantidadSurtida === 0 ? EstadoSurtido.NO_DISPONIBLE : EstadoSurtido.PARCIAL,
           }),
         ]);
 

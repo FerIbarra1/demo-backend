@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query, Headers } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  ParseIntPipe,
+  Query,
+  Headers,
+} from '@nestjs/common';
 import { KioskoTokenInvalidoException } from './exceptions/kiosko-token-invalido.exception';
 import { KioskoInactivoException } from './exceptions/kiosko-inactivo.exception';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';
@@ -23,7 +33,9 @@ export class KioskoController {
    */
   @Public()
   @Get('tienda/:tiendaId/activo')
-  @ApiOperation({ summary: 'Devuelve el kiosko activo de la tienda (público para que la tablet valide)' })
+  @ApiOperation({
+    summary: 'Devuelve el kiosko activo de la tienda (público para que la tablet valide)',
+  })
   obtenerActivoPorTienda(@Param('tiendaId', ParseIntPipe) tiendaId: number) {
     return this.kioskoService.obtenerActivoPorTienda(tiendaId);
   }
@@ -40,7 +52,11 @@ export class KioskoController {
   @Public()
   @Post(':id/heartbeat')
   @ApiOperation({ summary: 'Heartbeat del kiosko (público, requiere X-Kiosko-Token)' })
-  @ApiHeader({ name: 'X-Kiosko-Token', required: true, description: 'Device token del kiosko (devuelto UNA vez al activarlo)' })
+  @ApiHeader({
+    name: 'X-Kiosko-Token',
+    required: true,
+    description: 'Device token del kiosko (devuelto UNA vez al activarlo)',
+  })
   // PR3: 60 req/min/IP. Suficiente para una tablet que late cada 60s +
   // overhead de reintentos al cambiar de red; corta a un atacante que
   // intenta forzar IDs en este endpoint público.
@@ -87,10 +103,7 @@ export class KioskoController {
       'Crea un kiosko en estado INACTIVO. Se activará automáticamente al recibir el primer ' +
       'heartbeat desde la tablet en `/kiosko/welcome?tiendaId=X`.',
   })
-  activar(
-    @Body() dto: ActivarKioskoDto,
-    @CurrentUser('userId') adminUserId: number,
-  ) {
+  activar(@Body() dto: ActivarKioskoDto, @CurrentUser('userId') adminUserId: number) {
     return this.kioskoService.activar(dto, adminUserId);
   }
 
@@ -98,10 +111,7 @@ export class KioskoController {
   @Roles(RolUsuario.ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Desactiva un kiosko (Admin)' })
-  desactivar(
-    @Param('id', ParseIntPipe) id: number,
-    @CurrentUser('userId') adminUserId: number,
-  ) {
+  desactivar(@Param('id', ParseIntPipe) id: number, @CurrentUser('userId') adminUserId: number) {
     return this.kioskoService.desactivar(id, adminUserId);
   }
 

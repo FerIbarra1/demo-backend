@@ -1,17 +1,10 @@
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StorageService } from './storage.service';
 import { ListarProductosQueryDto } from './dto/listar-productos-query.dto';
 import { detectarMimeImagen } from './validar-imagen.util';
-import {
-  LIMITE_IMAGEN_BYTES,
-  MAX_IMAGENES_POR_COLOR,
-} from './imagenes.constants';
+import { LIMITE_IMAGEN_BYTES, MAX_IMAGENES_POR_COLOR } from './imagenes.constants';
 
 @Injectable()
 export class ImagenesService {
@@ -93,11 +86,7 @@ export class ImagenesService {
    * Sube una imagen (multipart) para un producto. `colorId` opcional.
    * Valida el tipo/mime y el tope de 4 imágenes por (producto, color).
    */
-  async subirImagen(
-    productoId: number,
-    colorId: number | undefined,
-    file: Express.Multer.File,
-  ) {
+  async subirImagen(productoId: number, colorId: number | undefined, file: Express.Multer.File) {
     const producto = await this.prisma.producto.findUnique({
       where: { id: productoId },
       select: { id: true, activo: true },
@@ -156,8 +145,7 @@ export class ImagenesService {
             url,
             orden: (ultima?.orden ?? -1) + 1,
             // La primera imagen del producto se marca como principal.
-            esPrincipal:
-              (await tx.productoImagen.count({ where: { productoId } })) === 0,
+            esPrincipal: (await tx.productoImagen.count({ where: { productoId } })) === 0,
           },
         });
       });
@@ -258,9 +246,7 @@ export class ImagenesService {
     // binaria, porque ese valor se usa como ContentType en un bucket público.
     const mimeReal = detectarMimeImagen(file.buffer);
     if (!mimeReal) {
-      throw new BadRequestException(
-        'El archivo no es una imagen válida. Usa JPG, PNG o WEBP.',
-      );
+      throw new BadRequestException('El archivo no es una imagen válida. Usa JPG, PNG o WEBP.');
     }
     // Se normaliza para que el ContentType que se envía a S3 sea el detectado,
     // no el declarado por el cliente.
@@ -269,9 +255,7 @@ export class ImagenesService {
 
   private extensionDe(originalname: string): string {
     const ext = originalname.split('.').pop()?.toLowerCase() || '';
-    return ext && ['.jpg', '.jpeg', '.png', '.webp'].includes(`.${ext}`)
-      ? `.${ext}`
-      : '.jpg';
+    return ext && ['.jpg', '.jpeg', '.png', '.webp'].includes(`.${ext}`) ? `.${ext}` : '.jpg';
   }
 
   /**
@@ -305,9 +289,7 @@ export class ImagenesService {
         .map((pc: any) => pc.color)
         .filter((c: any) => !!c)
         .map((c: any) => ({ id: c.id, nombre: c.nombre, hex: c.hex })),
-      imagenes: producto.imagenesProducto.map((img: any) =>
-        this.formatearImagen(img),
-      ),
+      imagenes: producto.imagenesProducto.map((img: any) => this.formatearImagen(img)),
     };
   }
 

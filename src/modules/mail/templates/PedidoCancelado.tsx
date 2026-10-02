@@ -28,10 +28,7 @@ export const PedidoCancelado = ({
     frontendUrl={frontendUrl}
     bodyExtras={
       <>
-        <Callout
-          variant="danger"
-          label={pedido.motivoCancelacion ? 'Motivo' : 'Aviso'}
-        >
+        <Callout variant="danger" label={pedido.motivoCancelacion ? 'Motivo' : 'Aviso'}>
           {pedido.motivoCancelacion ??
             'Si no solicitaste esta cancelación, responde a este correo o acércate a la tienda para ayudarte a resolverlo.'}
         </Callout>
@@ -45,8 +42,8 @@ export const PedidoCancelado = ({
             lineHeight: '1.6',
           }}
         >
-          Si ya habías pagado, tu asesor de ventas te contactará para coordinar
-          el reembolso o dejarlo como saldo a favor en tu próxima compra.
+          Si ya habías pagado, tu asesor de ventas te contactará para coordinar el reembolso o
+          dejarlo como saldo a favor en tu próxima compra.
         </Text>
       </>
     }

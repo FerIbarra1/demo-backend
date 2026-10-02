@@ -27,9 +27,7 @@ export class ClienteHandler {
     private externalRefs: ExternalRefService,
   ) {}
 
-  async procesar(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  async procesar(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     try {
       switch (evento.entidad) {
         case 'CLIENTES':
@@ -53,9 +51,7 @@ export class ClienteHandler {
 
   // -------------------- CLIENTES / CLIENTESCXC --------------------
 
-  private async procesarCliente(
-    evento: SyncEventoDto,
-  ): Promise<{ ok: boolean; mensaje?: string }> {
+  private async procesarCliente(evento: SyncEventoDto): Promise<{ ok: boolean; mensaje?: string }> {
     const d = evento.datos as {
       NOMBRE?: string;
       EMAIL?: string;
@@ -91,7 +87,7 @@ export class ClienteHandler {
           telefono: telefono ?? existente.telefono,
           listaPrecioCodigo: localTiendaId
             ? undefined
-            : listaPrecioCodigo ?? existente.listaPrecioCodigo,
+            : (listaPrecioCodigo ?? existente.listaPrecioCodigo),
         },
       });
       usuarioId = existente.id;

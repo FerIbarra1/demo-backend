@@ -13,7 +13,9 @@ export class MonitorPedidoDto {
   @ApiProperty() fechaPedido: string;
   @ApiProperty({ nullable: true, type: String })
   fechaAsignacion: string | null;
-  @ApiProperty({ description: 'Minutos desde que se creó el pedido (o se asignó, si está REVIEWING)' })
+  @ApiProperty({
+    description: 'Minutos desde que se creó el pedido (o se asignó, si está REVIEWING)',
+  })
   minutosEnCola: number;
   @ApiProperty({ description: '0=normal, 1=aviso, 2=alerta, 3=crítico' })
   nivelUrgencia: number;
@@ -131,4 +133,3 @@ export class MonitorResponseDto {
   @ApiProperty({ type: [MonitorPedidoDto] })
   pedidosWeb: MonitorPedidoDto[];
 }
-

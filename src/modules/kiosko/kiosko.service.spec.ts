@@ -16,20 +16,25 @@ describe('KioskoService — device token (PR2)', () => {
   const tokenPlano = 'token-de-prueba-1234567890abcdefghij';
   const hashDelToken = createHash('sha256').update(tokenPlano).digest('hex');
 
-  const crearKioskoMock = (kiosko: {
-    id: number;
-    tiendaId: number;
-    estado: EstadoKiosko;
-    deviceTokenHash: string | null;
-    desactivadoAt?: Date | null;
-    primerConexionAt?: Date | null;
-  } | null) => {
+  const crearKioskoMock = (
+    kiosko: {
+      id: number;
+      tiendaId: number;
+      estado: EstadoKiosko;
+      deviceTokenHash: string | null;
+      desactivadoAt?: Date | null;
+      primerConexionAt?: Date | null;
+    } | null,
+  ) => {
     const prisma = {
       kiosko: {
         findUnique: jest.fn(async (args: any) => {
           if (!kiosko) return null;
           // Si piden select deviceTokenHash/estado, devolvemos subset.
-          if (args?.select && Object.keys(args.select).sort().join(',') === 'deviceTokenHash,estado') {
+          if (
+            args?.select &&
+            Object.keys(args.select).sort().join(',') === 'deviceTokenHash,estado'
+          ) {
             return { deviceTokenHash: kiosko.deviceTokenHash, estado: kiosko.estado };
           }
           return kiosko;

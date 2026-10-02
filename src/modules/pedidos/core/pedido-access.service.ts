@@ -1,8 +1,4 @@
-import {
-  Injectable,
-  ForbiddenException,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { RolUsuario, Prisma, EstadoPedido } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 
@@ -107,9 +103,7 @@ export class PedidoAccessService {
     // porque cada cliente tiene un pedido en su tienda.
     if (user.rol === RolUsuario.CLIENTE) {
       if (pedido.usuarioId !== user.userId) {
-        throw new ForbiddenException(
-          'No tienes permiso para acceder a este pedido',
-        );
+        throw new ForbiddenException('No tienes permiso para acceder a este pedido');
       }
       return;
     }
@@ -125,25 +119,16 @@ export class PedidoAccessService {
       );
     }
     if (pedido.tiendaId !== tiendaEfectiva) {
-      throw new ForbiddenException(
-        'Este pedido pertenece a otra tienda',
-      );
+      throw new ForbiddenException('Este pedido pertenece a otra tienda');
     }
 
     // BODEGA: si se requiere asignación, el pedido debe estar asignado a él.
-    if (
-      opciones.requiereAsignacionBodega &&
-      user.rol === RolUsuario.BODEGA
-    ) {
+    if (opciones.requiereAsignacionBodega && user.rol === RolUsuario.BODEGA) {
       if (pedido.asignadoAId === null) {
-        throw new ForbiddenException(
-          'Este pedido no está asignado. Tómalo antes de operarlo.',
-        );
+        throw new ForbiddenException('Este pedido no está asignado. Tómalo antes de operarlo.');
       }
       if (pedido.asignadoAId !== user.userId) {
-        throw new ForbiddenException(
-          'Este pedido está asignado a otro bodeguero',
-        );
+        throw new ForbiddenException('Este pedido está asignado a otro bodeguero');
       }
     }
   }

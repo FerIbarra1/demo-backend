@@ -70,9 +70,7 @@ export class KioskoAlertasWorker implements OnModuleInit, OnModuleDestroy {
       },
     });
 
-    const caidos = kioskos.filter(
-      (k) => calcularSaludKiosko(k, ahora) === 'CAIDA',
-    );
+    const caidos = kioskos.filter((k) => calcularSaludKiosko(k, ahora) === 'CAIDA');
 
     // Los que se recuperaron salen de la lista de avisados, para que una caída
     // futura vuelva a alertar.

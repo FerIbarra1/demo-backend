@@ -1,8 +1,5 @@
 import { Global, Module } from '@nestjs/common';
-import {
-  ConfiguracionController,
-  ConfiguracionPublicController,
-} from './configuracion.controller';
+import { ConfiguracionController, ConfiguracionPublicController } from './configuracion.controller';
 import { ConfiguracionService } from './configuracion.service';
 
 /**

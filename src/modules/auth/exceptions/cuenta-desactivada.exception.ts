@@ -8,9 +8,7 @@ import { UnauthorizedException } from '@nestjs/common';
  */
 export class CuentaDesactivadaException extends UnauthorizedException {
   constructor() {
-    super(
-      'No se pudo iniciar sesión. Si el problema persiste, contacta a soporte.',
-    );
+    super('No se pudo iniciar sesión. Si el problema persiste, contacta a soporte.');
   }
 
   getResponse(): any {

@@ -49,8 +49,7 @@ export const Button: React.FC<ButtonProps> = ({ href, children, variant = 'prima
           display: 'inline-block',
           padding: '14px 32px',
           letterSpacing: '0.01em',
-          fontFamily:
-            '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+          fontFamily: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         }}
       >
         {children}

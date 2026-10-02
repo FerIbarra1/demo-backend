@@ -50,29 +50,21 @@ describe('StorageService — resolución de keys y URLs', () => {
   describe('keyDeUrl', () => {
     it('extrae la key de una URL del bucket', () => {
       expect(
-        crear(CON_S3).keyDeUrl(
-          'https://mi-bucket.s3.us-east-1.amazonaws.com/productos/1/a.webp',
-        ),
+        crear(CON_S3).keyDeUrl('https://mi-bucket.s3.us-east-1.amazonaws.com/productos/1/a.webp'),
       ).toBe('productos/1/a.webp');
     });
 
     it('extrae la key de una URL de CDN', () => {
       const svc = crear({ ...CON_S3, publicUrlBase: 'https://img.ejemplo.com' });
-      expect(svc.keyDeUrl('https://img.ejemplo.com/productos/1/a.webp')).toBe(
-        'productos/1/a.webp',
-      );
+      expect(svc.keyDeUrl('https://img.ejemplo.com/productos/1/a.webp')).toBe('productos/1/a.webp');
     });
 
     it('devuelve la key tal cual si ya es una key', () => {
-      expect(crear(CON_S3).keyDeUrl('productos/1/a.webp')).toBe(
-        'productos/1/a.webp',
-      );
+      expect(crear(CON_S3).keyDeUrl('productos/1/a.webp')).toBe('productos/1/a.webp');
     });
 
     it('extrae la key de una ruta local /files/', () => {
-      expect(crear().keyDeUrl('/files/productos/1/a.webp')).toBe(
-        'productos/1/a.webp',
-      );
+      expect(crear().keyDeUrl('/files/productos/1/a.webp')).toBe('productos/1/a.webp');
     });
 
     it('devuelve vacío para una URL de un dominio ajeno', () => {
@@ -88,9 +80,7 @@ describe('StorageService — resolución de keys y URLs', () => {
     });
 
     it('resuelve una key a /files/ cuando no hay S3 (dev)', () => {
-      expect(crear().resolverImagen('productos/1/a.webp')).toBe(
-        '/files/productos/1/a.webp',
-      );
+      expect(crear().resolverImagen('productos/1/a.webp')).toBe('/files/productos/1/a.webp');
     });
 
     it('deja intacta una ruta legacy del frontend', () => {
@@ -105,9 +95,7 @@ describe('StorageService — resolución de keys y URLs', () => {
     });
 
     it('deja intacta una ruta /files/ ya resuelta', () => {
-      expect(crear().resolverImagen('/files/productos/1/a.webp')).toBe(
-        '/files/productos/1/a.webp',
-      );
+      expect(crear().resolverImagen('/files/productos/1/a.webp')).toBe('/files/productos/1/a.webp');
     });
 
     it('devuelve null para null, undefined y cadena vacía', () => {
@@ -121,18 +109,14 @@ describe('StorageService — resolución de keys y URLs', () => {
     it('NO genera doble slash con una key que empieza con /', () => {
       const url = crear(CON_S3).resolverImagen('/productos/1/a.webp');
       expect(url).not.toContain('//productos');
-      expect(url).toBe(
-        'https://mi-bucket.s3.us-east-1.amazonaws.com/productos/1/a.webp',
-      );
+      expect(url).toBe('https://mi-bucket.s3.us-east-1.amazonaws.com/productos/1/a.webp');
     });
   });
 
   describe('resolverImagenes', () => {
     it('resuelve una lista y descarta los vacíos', () => {
       const svc = crear(CON_S3);
-      expect(
-        svc.resolverImagenes(['productos/1/a.webp', '', null as unknown as string]),
-      ).toEqual([
+      expect(svc.resolverImagenes(['productos/1/a.webp', '', null as unknown as string])).toEqual([
         'https://mi-bucket.s3.us-east-1.amazonaws.com/productos/1/a.webp',
       ]);
     });

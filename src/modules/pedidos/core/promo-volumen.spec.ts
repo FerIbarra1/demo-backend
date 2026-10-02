@@ -40,7 +40,8 @@ function item(
 
 /** `tx` falso que devuelve `items` y registra los updates en `escritos`. */
 function crearTx(items: ItemFalso[]) {
-  const escritos: Array<{ id: number; precioUnitario: Prisma.Decimal; subtotal: Prisma.Decimal }> = [];
+  const escritos: Array<{ id: number; precioUnitario: Prisma.Decimal; subtotal: Prisma.Decimal }> =
+    [];
   const tx = {
     itemPedido: {
       findMany: jest.fn(async () => items),

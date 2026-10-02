@@ -139,12 +139,8 @@ export class PedidoDescargaHandler {
 
     if (pendientes.length === 0) return [];
 
-    const leaseByPedido = new Map(
-      pendientes.map((p) => [p.pedidoId, p.leaseToken]),
-    );
-    const leaseUntilByPedido = new Map(
-      pendientes.map((p) => [p.pedidoId, p.leaseUntil]),
-    );
+    const leaseByPedido = new Map(pendientes.map((p) => [p.pedidoId, p.leaseToken]));
+    const leaseUntilByPedido = new Map(pendientes.map((p) => [p.pedidoId, p.leaseUntil]));
 
     // Necesitamos el externalId de la tienda para resolver PrecioCO local.
     const localTiendaId = tienda.externalId;
@@ -166,7 +162,12 @@ export class PedidoDescargaHandler {
       }
     }
     const [localPrecioCO, localProducto, localCorrida, localColor] = await Promise.all([
-      this.externalRefs.resolveLocalIds('PRECIOCO', 'PRECIOSCO', Array.from(precioCOIds), localTiendaId),
+      this.externalRefs.resolveLocalIds(
+        'PRECIOCO',
+        'PRECIOSCO',
+        Array.from(precioCOIds),
+        localTiendaId,
+      ),
       this.externalRefs.resolveLocalIds('PRODUCTO', 'PRODUCTOS', Array.from(productoIds), null),
       this.externalRefs.resolveLocalIds('CORRIDA', 'CORRIDAS', Array.from(corridaIds), null),
       this.externalRefs.resolveLocalIds('COLOR', 'COLORES', Array.from(colorIds), null),
@@ -181,28 +182,25 @@ export class PedidoDescargaHandler {
           const localCorridaId = pco ? (localCorrida.get(pco.corridaId) ?? null) : null;
           const localColorId = pco ? (localColor.get(pco.colorId) ?? null) : null;
 
-            const skip = [
-              localPrecioCOId,
-              localProductoId,
-              localCorridaId,
-              localColorId,
-            ].some((id) => id == null);
+          const skip = [localPrecioCOId, localProductoId, localCorridaId, localColorId].some(
+            (id) => id == null,
+          );
 
-            return {
-              itemId: it.id,
-              productoCodigo: it.productoCodigo,
-              cantidad: it.cantidad,
-              precioUnitario: Number(it.precioUnitario),
-              subtotal: Number(it.subtotal),
-              talla: it.tallaNombre,
-              corridaNombre: it.corridaNombre,
-              colorNombre: it.colorNombre,
-              localPrecioCOId,
-              localProductoId,
-              localCorridaId,
-              localColorId,
-              skip,
-            };
+          return {
+            itemId: it.id,
+            productoCodigo: it.productoCodigo,
+            cantidad: it.cantidad,
+            precioUnitario: Number(it.precioUnitario),
+            subtotal: Number(it.subtotal),
+            talla: it.tallaNombre,
+            corridaNombre: it.corridaNombre,
+            colorNombre: it.colorNombre,
+            localPrecioCOId,
+            localProductoId,
+            localCorridaId,
+            localColorId,
+            skip,
+          };
         });
 
         // Skip si el pedido fue cancelado entre el claim y el armado del
@@ -248,7 +246,8 @@ export class PedidoDescargaHandler {
                   leaseToken: null,
                   leaseUntil: null,
                   ultimoErrorCode: 'MISSING_EXTERNAL_REFERENCE',
-                  ultimoError: 'Falta referencia local para una variante del pedido (reintentos agotados)',
+                  ultimoError:
+                    'Falta referencia local para una variante del pedido (reintentos agotados)',
                 }
               : {
                   estado: 'RETRY',
