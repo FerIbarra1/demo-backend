@@ -1,6 +1,8 @@
 import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { StorageService } from '../../imagenes/storage.service';
+import { PedidoStateService } from '../core/pedido-state.service';
+import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, Prisma } from '@prisma/client';
 
 /**
@@ -16,8 +18,10 @@ import { EstadoPedido, Prisma } from '@prisma/client';
  *   - El borrador de la contrapropuesta lo arma el frontend y lo envía por
  *     `PropuestaService.enviarPropuesta` (que ya valida el rol VENTAS).
  *
- * Lo que NO hace: no transiciona estados por su cuenta. Las transiciones
- * viven en `PedidoStateService` / `PropuestaService`.
+ * Lo que NO hace: casi ninguna transición por su cuenta. Las transiciones
+ * viven en `PedidoStateService` / `PropuestaService`. La única excepción es
+ * `devolverABodega` (oct 2026), que existe porque el asesor no tenía NINGUNA
+ * salida cuando revisaba el pedido y concluía que no había nada que negociar.
  */
 /**
  * F14 (sep 2026): filtros de la cola de asesoría.
@@ -40,7 +44,7 @@ const RESPONDIO_PROPUESTA_VENTAS: Prisma.PedidoWhereInput = {
 
 /** Predicado de "le mandé una propuesta y espero su respuesta". */
 const ESPERANDO_CLIENTE: Prisma.PedidoWhereInput = {
-  estado: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+  estado: EstadoPedido.ESPERANDO_APROBACION,
   propuestas: { some: { creadaPorRol: 'VENTAS', estado: 'PENDIENTE' } },
 };
 
@@ -51,13 +55,19 @@ export class VentasService {
   constructor(
     private prisma: PrismaService,
     private readonly storage: StorageService,
+    /**
+     * Oct 2026: para `devolverABodega`. Es la única transición que dispara este
+     * service; el resto de la máquina de estados la orquestan `PropuestaService`
+     * y `PedidoStateService`.
+     */
+    private readonly state: PedidoStateService,
   ) {}
 
   /**
    * Cola de pedidos escalados a asesoría en la tienda del vendedor.
    *
    * Incluye tanto EN_ASESORIA (recién escalados, sin propuesta enviada) como
-   * WAITING_CUSTOMER_APPROVAL con propuesta de VENTAS pendiente (el vendedor
+   * ESPERANDO_APROBACION con propuesta de VENTAS pendiente (el vendedor
    * ya propuso y espera al cliente) — así el vendedor ve en una sola lista
    * todo lo que tiene entre manos, con un flag que distingue cada caso.
    */
@@ -92,18 +102,32 @@ export class VentasService {
               creadaPor: { select: { id: true, nombre: true, apellido: true } },
             },
           },
-          // Últimos mensajes para previsualizar la conversación.
-          mensajes: {
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-            select: { id: true, contenido: true, createdAt: true, autorRol: true },
-          },
+          // Oct 2026: aquí se traía `mensajes: { take: 1 }` para previsualizar
+          // la conversación en la tarjeta de la cola. Se eliminó: el frontend
+          // nunca lo pintó (0 referencias a `mensajes` en `ventas/page.tsx`), y
+          // desde que el texto del cliente es el primer mensaje del chat, el
+          // asesor lo lee en el detalle. Era un join por pedido para nada.
         },
-        // En 'esperando' el pedido lleva ahí desde que se envió la
-        // propuesta, no desde que el cliente pidió asesor; ordenar por
-        // asesorSolicitadoAt dejaría arriba los más viejos por la razón
-        // equivocada. El id es un proxy de "propuesta más reciente".
-        orderBy: filtro === 'esperando' ? { id: 'desc' } : { asesorSolicitadoAt: 'asc' },
+        // Oct 2026: los pedidos cuyo cliente YA ESTÁ EN TIENDA van primero.
+        //
+        // El caso: el cliente llega sin ticket y sin folio, el de mostrador
+        // registra su llegada, y su pedido está en la cola de ventas (pidió un
+        // asesor, o hay una propuesta esperando). Sin esta clave el vendedor no
+        // se enteraba de que había alguien esperando de pie — el mismo hueco que
+        // ya se cerró en la cola de bodega.
+        //
+        // `llegadaDescartadaAt` va primero para que un aviso DESMENTIDO (el
+        // operador lo marcó y luego resultó que el cliente no estaba) no siga
+        // colando al pedido al frente: `llegadaAnunciadaAt` no se limpia nunca.
+        orderBy: [
+          { llegadaDescartadaAt: { sort: 'asc', nulls: 'first' } },
+          { llegadaAnunciadaAt: { sort: 'asc', nulls: 'last' } },
+          // En 'esperando' el pedido lleva ahí desde que se envió la
+          // propuesta, no desde que el cliente pidió asesor; ordenar por
+          // asesorSolicitadoAt dejaría arriba los más viejos por la razón
+          // equivocada. El id es un proxy de "propuesta más reciente".
+          filtro === 'esperando' ? { id: 'desc' } : { asesorSolicitadoAt: 'asc' },
+        ],
         skip,
         take: limite,
       }),
@@ -139,7 +163,15 @@ export class VentasService {
           : 0,
         // Distingue "recién escalado, no he propuesto" de "ya propuse, espero
         // respuesta del cliente".
-        esperandoCliente: p.estado === EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+        esperandoCliente: p.estado === EstadoPedido.ESPERANDO_APROBACION,
+        // Oct 2026: minutos desde que el cliente avisó que está en tienda.
+        // `null` si no hay aviso vigente. Es lo que pinta el badge "Llegó a
+        // tienda · N min" — sin este campo el vendedor no distingue al cliente
+        // que está esperando de pie del que sigue en su casa.
+        esperandoDesdeMin:
+          p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
+            ? Math.max(0, Math.floor((ahora.getTime() - p.llegadaAnunciadaAt.getTime()) / 60_000))
+            : null,
       })),
       meta: {
         total,
@@ -209,5 +241,61 @@ export class VentasService {
     }) as any;
 
     return pedido;
+  }
+
+  /**
+   * Oct 2026: el asesor devuelve el pedido a bodega.
+   *
+   * El caso que lo motiva: el cliente pidió un asesor desde una propuesta de
+   * bodega, el asesor lo revisa y concluye que **no había nada que negociar** —
+   * el pedido original estaba bien y el faltante se resuelve surtiendo. Sin esta
+   * acción el pedido se quedaba en `EN_ASESORIA` para siempre: `TRANSICIONES`
+   * ya contemplaba `EN_ASESORIA → EN_REVISION`, pero ningún endpoint la
+   * disparaba (el asesor solo podía mandar una contrapropuesta o nada).
+   *
+   * `asignacion: 'limpiar'` es explícito y obligatorio: el caller es el ASESOR,
+   * no un bodeguero. Con 'caller' el pedido quedaría asignado al vendedor,
+   * invisible en el monitor de bodega y bloqueado para todos los bodegueros.
+   *
+   * `reloj: 'reanudar'` porque la pelota vuelve a bodega: el tiempo de atención
+   * se reanuda acumulando lo previo, igual que cuando el cliente aprueba una
+   * contrapropuesta.
+   */
+  async devolverABodega(pedidoId: number, usuario: UserContext, nota?: string) {
+    const pedido = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      select: { id: true, estado: true, tiendaId: true, numeroPedido: true },
+    });
+    if (!pedido) throw new NotFoundException('Pedido no encontrado');
+    if (usuario.tiendaId && pedido.tiendaId !== usuario.tiendaId) {
+      throw new BadRequestException('El pedido pertenece a otra tienda');
+    }
+    if (pedido.estado !== EstadoPedido.EN_ASESORIA) {
+      throw new BadRequestException(
+        `Solo se puede devolver a bodega un pedido en asesoría (actual: ${pedido.estado})`,
+      );
+    }
+
+    const sufijoNota = nota ? ` — ${nota}` : '';
+
+    await this.state.cambiarEstado(
+      pedidoId,
+      {
+        nuevoEstado: EstadoPedido.EN_REVISION,
+        observacion: `Devuelto a bodega por el asesor ${usuario.nombre}${sufijoNota}`,
+      },
+      usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'reanudar',
+        invalidarMonitor: true,
+      },
+    );
+
+    this.logger.log(
+      `Pedido ${pedidoId} (${pedido.numeroPedido}): devuelto a bodega por el asesor ${usuario.nombre}`,
+    );
+
+    return { ok: true, pedidoId, estado: EstadoPedido.EN_REVISION };
   }
 }

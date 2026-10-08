@@ -56,7 +56,8 @@ export class ImagenesService {
           .map((pc) => pc.color)
           .filter((c) => !!c)
           .map((c) => ({ id: c!.id, nombre: c!.nombre, hex: c!.hex })),
-        // Imágenes agrupadas: general (colorId null) + por color.
+        // Imágenes del producto. Cada una vive en un color (no hay bucket
+        // general); el orden las devuelve por 'orden asc'.
         imagenes: p.imagenesProducto.map((img) => this.formatearImagen(img)),
         totalImagenes: p.imagenesProducto.length,
       })),
@@ -83,10 +84,11 @@ export class ImagenesService {
   }
 
   /**
-   * Sube una imagen (multipart) para un producto. `colorId` opcional.
+   * Sube una imagen (multipart) para un producto. `colorId` es obligatorio: ya
+   * no existe el bucket "general" (colorId NULL). Cada imagen vive en un color.
    * Valida el tipo/mime y el tope de 4 imágenes por (producto, color).
    */
-  async subirImagen(productoId: number, colorId: number | undefined, file: Express.Multer.File) {
+  async subirImagen(productoId: number, colorId: number, file: Express.Multer.File) {
     const producto = await this.prisma.producto.findUnique({
       where: { id: productoId },
       select: { id: true, activo: true },
@@ -100,19 +102,17 @@ export class ImagenesService {
     }
     this.validarArchivo(file);
 
-    if (colorId) {
-      // El color debe existir y pertenecer al producto (vía PrecioCO).
-      const pertenece = await this.prisma.precioCO.findFirst({
-        where: { productoId, colorId },
-        select: { id: true },
-      });
-      if (!pertenece) {
-        throw new BadRequestException('El color no pertenece a este producto');
-      }
+    // El color debe existir y pertenecer al producto (vía PrecioCO).
+    const pertenece = await this.prisma.precioCO.findFirst({
+      where: { productoId, colorId },
+      select: { id: true },
+    });
+    if (!pertenece) {
+      throw new BadRequestException('El color no pertenece a este producto');
     }
 
     const ext = this.extensionDe(file.originalname);
-    const key = `productos/${productoId}/${colorId ? `color-${colorId}` : 'general'}/${randomUUID()}${ext}`;
+    const key = `productos/${productoId}/color-${colorId}/${randomUUID()}${ext}`;
     const url = await this.storage.subirImagen(file, key);
 
     let imagen;
@@ -121,19 +121,18 @@ export class ImagenesService {
       // después permite que dos subidas concurrentes lo rebasen.
       imagen = await this.prisma.$transaction(async (tx) => {
         const existentes = await tx.productoImagen.count({
-          where: { productoId, colorId: colorId ?? null },
+          where: { productoId, colorId },
         });
         if (existentes >= MAX_IMAGENES_POR_COLOR) {
-          const etiqueta = colorId ? `para este color` : 'generales';
           throw new BadRequestException(
-            `Máximo ${MAX_IMAGENES_POR_COLOR} imágenes ${etiqueta} por producto`,
+            `Máximo ${MAX_IMAGENES_POR_COLOR} imágenes para este color por producto`,
           );
         }
 
         // `orden` se calcula sobre el máximo existente, no sobre el conteo:
         // borrar una imagen intermedia deja un hueco y el conteo lo reutiliza.
         const ultima = await tx.productoImagen.findFirst({
-          where: { productoId, colorId: colorId ?? null },
+          where: { productoId, colorId },
           orderBy: { orden: 'desc' },
           select: { orden: true },
         });
@@ -141,7 +140,7 @@ export class ImagenesService {
         return tx.productoImagen.create({
           data: {
             productoId,
-            colorId: colorId ?? null,
+            colorId,
             url,
             orden: (ultima?.orden ?? -1) + 1,
             // La primera imagen del producto se marca como principal.

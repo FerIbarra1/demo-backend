@@ -4,7 +4,7 @@ import { EstadoPedido, RolUsuario, CanalOrigen } from '@prisma/client';
 import { MonitorResponseDto, MonitorPedidoDto, MonitorBodegueroDto } from './dto/monitor.dto';
 import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/pedido-limits';
 import { asignadoANombre } from '../core/pedido-mapper';
-import type { MotivoReingreso } from '../core/motivo-reingreso';
+import { derivarMotivoReingreso } from '../core/motivo-reingreso';
 
 /**
  * Umbrales de antigüedad (en minutos) para asignar nivel de urgencia.
@@ -79,7 +79,7 @@ export class MonitorService {
         activo: true,
         lastLogin: true,
         pedidosAsignados: {
-          // F12: incluir WAITING_CUSTOMER_APPROVAL para que el slot del
+          // F12: incluir ESPERANDO_APROBACION para que el slot del
           // bodeguero muestre "esperando cliente" (el pedido sigue asignado).
           where: { estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } },
           orderBy: { asignadoAt: 'desc' },
@@ -129,25 +129,25 @@ export class MonitorService {
 
     // 2) Pedidos visibles para bodega.
     //
-    // F6 (jul 2026): excluimos REVIEWING con asignado de las columnas KIOSKO/
+    // F6 (jul 2026): excluimos EN_REVISION con asignado de las columnas KIOSKO/
     // WEB, porque ya aparecen en la tarjeta del bodeguero que los tomó.
-    // Pero SÍ incluimos REVIEWING sin asignado (recién liberados) y los
+    // Pero SÍ incluimos EN_REVISION sin asignado (recién liberados) y los
     // marcamos con `esLiberado=true` para que destaquen visualmente.
     //
     // F11 (ago 2026): este monitor es SOLO de bodega. Sólo se listan
-    // pedidos en estados accionables por bodega: PENDING_REVIEW (esperando
-    // tomar) y REVIEWING sin asignar (recién liberado). F12: se quitaron
-    // WAITING_CUSTOMER_APPROVAL (está asignado, no es accionable por otro
+    // pedidos en estados accionables por bodega: SOLICITADO (esperando
+    // tomar) y EN_REVISION sin asignar (recién liberado). F12: se quitaron
+    // ESPERANDO_APROBACION (está asignado, no es accionable por otro
     // bodeguero — vive en el slot del bodeguero).
-    // PENDING_PAID / PAID / SHIPPED / COMPLETED / CANCELLED son
+    // PENDIENTE_PAGO / PAID / SHIPPED / COMPLETED / CANCELLED son
     // responsabilidad del monitor de cajeros o de mostrador — NUNCA del de
     // bodega.
     const pedidosRaw = await this.prisma.pedido.findMany({
       where: {
         tiendaId,
         OR: [
-          { estado: EstadoPedido.PENDING_REVIEW },
-          { estado: EstadoPedido.REVIEWING, asignadoAId: null },
+          { estado: EstadoPedido.SOLICITADO },
+          { estado: EstadoPedido.EN_REVISION, asignadoAId: null },
         ],
       },
       select: {
@@ -182,7 +182,7 @@ export class MonitorService {
 
     const pedidosFormateados: MonitorPedidoDto[] = pedidosRaw.map((p) => {
       // El "tiempo en cola" para el monitor:
-      //   - PENDING_REVIEW  → desde fechaPedido (esperando ser tomado)
+      //   - SOLICITADO  → desde fechaPedido (esperando ser tomado)
       //   - otros           → desde fechaPedido igual (cuenta total desde la creación)
       // El bono de tienda resta 1 minuto al cálculo visual.
       const minutosBase = this.minutosEntre(p.fechaPedido, ahora);
@@ -201,7 +201,7 @@ export class MonitorService {
 
       // F16 (sep 2026): por qué el pedido volvió a la cola de bodega.
       //
-      // Un pedido llega a REVIEWING sin asignar por TRES caminos que antes se
+      // Un pedido llega a EN_REVISION sin asignar por TRES caminos que antes se
       // veían idénticos (todos caían en `esLiberado`), y dos de ellos traen
       // trabajo real que el bodeguero no podía distinguir:
       //
@@ -214,17 +214,14 @@ export class MonitorService {
       // solo lo setean los caminos que AGREGAN productos (ventas y el ajuste de
       // mostrador), y el último `HistorialPedido` dice de dónde vino.
       const itemsNuevos = p.items.filter((i) => !i.original).length;
-      const estadoAnterior = p.historial[0]?.estadoAnterior ?? null;
-      const motivoReingreso: MotivoReingreso | null =
-        p.estado !== EstadoPedido.REVIEWING || p.asignadoAId !== null
-          ? null
-          : itemsNuevos > 0 && estadoAnterior === EstadoPedido.EN_MOSTRADOR
-            ? 'AJUSTE_MOSTRADOR'
-            : itemsNuevos > 0 && estadoAnterior === EstadoPedido.WAITING_CUSTOMER_APPROVAL
-              ? 'PROPUESTA_VENTAS'
-              : estadoAnterior === EstadoPedido.REVIEWING
-                ? 'LIBERADO'
-                : null;
+      // F17: la derivación vive en `core/motivo-reingreso.ts` para que el
+      // monitor y la cola de `/bodega` no puedan divergir.
+      const motivoReingreso = derivarMotivoReingreso({
+        estado: p.estado,
+        asignadoAId: p.asignadoAId,
+        items: p.items,
+        historial: p.historial,
+      });
 
       return {
         id: p.id,
@@ -246,7 +243,7 @@ export class MonitorService {
         sugerido: false,
         scoreSimilitud: 0,
         itemsCompartidos: 0,
-        esLiberado: p.estado === EstadoPedido.REVIEWING && p.asignadoAId === null,
+        esLiberado: p.estado === EstadoPedido.EN_REVISION && p.asignadoAId === null,
         // F16: el badge nuevo. `esLiberado` se conserva durante la transición
         // para no romper el frontend que aún lo lee.
         motivoReingreso,
@@ -257,7 +254,7 @@ export class MonitorService {
     // 2.5) Calcular sugerencias: scores por similitud de items con lo que ya
     //     se está surtiendo en la tienda.
     const soloEnCola = pedidosFormateados
-      .filter((p) => p.estado === EstadoPedido.PENDING_REVIEW)
+      .filter((p) => p.estado === EstadoPedido.SOLICITADO)
       .map((p) => {
         const raw = pedidosRaw.find((r) => r.id === p.id);
         const productoIds = Array.from(
@@ -314,7 +311,7 @@ export class MonitorService {
   }
 
   /**
-   * Calcula scores de similitud entre los pedidos en cola (PENDING_REVIEW)
+   * Calcula scores de similitud entre los pedidos en cola (SOLICITADO)
    * y los items que están siendo atendidos por bodegueros activos de la tienda.
    *
    *   match exacto (mismo precioCOId) ........... peso 10

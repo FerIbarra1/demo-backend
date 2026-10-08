@@ -4,6 +4,7 @@ import { MostradorQueryService } from './mostrador-query.service';
 import { MostradorController } from './mostrador.controller';
 import { MostradorMonitorService } from './mostrador-monitor.service';
 import { MostradorMonitorController } from './mostrador-monitor.controller';
+import { PedidoConsultaController } from '../pedidos/core/pedido-consulta.controller';
 import { PedidosModule } from '../pedidos/pedidos.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { KioskoModule } from '../kiosko/kiosko.module';
@@ -34,10 +35,23 @@ import { KioskoModule } from '../kiosko/kiosko.module';
  * tiene que matchear antes que los `:id` genéricos, o el RolesGuard rechaza al
  * rol de TV con 403. Es el mismo problema que ya documenta `pedidos.module.ts`
  * para bodega y cajero.
+ *
+ * F17 (oct 2026): también registra `PedidoConsultaController` — la consulta de
+ * pedidos compartida por las 5 consolas de empleado. Vive AQUÍ y no en
+ * `PedidosModule` porque depende de `MostradorQueryService`, que es un provider
+ * de este módulo; la flecha de dependencia va `MostradorModule → PedidosModule`
+ * (no al revés), así que ponerlo allá crearía un ciclo de dependencias.
+ *
+ * El controller tiene ruta propia (`pedidos/consulta`) y no comparte prefijo
+ * con los de mostrador, así que el orden de registro no importa aquí.
  */
 @Module({
   imports: [PedidosModule, RealtimeModule, KioskoModule],
-  controllers: [MostradorMonitorController, MostradorController],
+  controllers: [
+    MostradorMonitorController,
+    MostradorController,
+    PedidoConsultaController,
+  ],
   providers: [MostradorService, MostradorQueryService, MostradorMonitorService],
 })
 export class MostradorModule {}

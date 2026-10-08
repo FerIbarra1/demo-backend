@@ -1,4 +1,10 @@
-import { Injectable, Logger, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  BadRequestException,
+  NotFoundException,
+  ConflictException,
+} from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { StorageService } from '../../imagenes/storage.service';
 import { EstadoPedido, EstadoSurtido, EstadoPropuesta, Prisma } from '@prisma/client';
@@ -6,25 +12,30 @@ import { UserContext } from '../../../types/pedido.types';
 import { MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { PedidoStateService } from '../core/pedido-state.service';
-import { destinoTrasSurtido } from '../core/destino-post-surtido.util';
+import {
+  destinoTrasSurtido,
+  destinoTrasSurtidoIncompleto,
+  clientePresenteEnTienda,
+} from '../core/destino-post-surtido.util';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { rankearSimilares } from '../core/similitud.util';
 import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/pedido-limits';
 import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
 import { recalcularTotalesPedido } from '../core/totales.util';
+import { construirPropuestaDeBodega } from '../core/propuesta-bodega.util';
 
 /**
  * Servicio de surtido en bodega.
  *
  * Flujo:
- *   1. El bodeguero toma el pedido (PENDING_REVIEW → REVIEWING) vía /tomar
+ *   1. El bodeguero toma el pedido (SOLICITADO → EN_REVISION) vía /tomar
  *   2. Va a /bodega/surtir/:id y ve los items
  *   3. Marca cada item con cantidadSurtida + estadoSurtido vía
  *      /items/:itemId/surtido (opcionalmente motivo y nuevoPrecioCOId)
  *   4. Cuando todos los items están en estado terminal (COMPLETO, NO_DISPONIBLE
  *      o PARCIAL), confirma el surtido vía /confirmar-surtido
- *   5. Si todo es COMPLETO → el pedido pasa a PENDING_PAID (encola a Firebird).
+ *   5. Si todo es COMPLETO → el pedido pasa a PENDIENTE_PAGO (encola a Firebird).
  *      Si hay faltantes → el bodeguero envía una propuesta (PropuestaService) y
  *      solo cuando el cliente la acepta puede confirmar el surtido.
  */
@@ -47,7 +58,7 @@ export class SurtidoService {
    * Cualquier bodeguero de la tienda puede VERLO (read-only); sólo el asignado
    * (o un admin) puede MODIFICAR items.
    *
-   * Si el pedido está en PENDING_REVIEW o REVIEWING, incluye `pedidosSimilares`:
+   * Si el pedido está en SOLICITADO o EN_REVISION, incluye `pedidosSimilares`:
    * lista de pedidos en cola de la misma tienda con items compartidos, para
    * alimentar el banner "surtir juntos" del frontend.
    */
@@ -137,7 +148,7 @@ export class SurtidoService {
       itemsCompartidos: number;
       minutosEnCola: number;
     }> = [];
-    if (pedido.estado === EstadoPedido.PENDING_REVIEW || pedido.estado === EstadoPedido.REVIEWING) {
+    if (pedido.estado === EstadoPedido.SOLICITADO || pedido.estado === EstadoPedido.EN_REVISION) {
       pedidosSimilares = await this.calcularSimilaresParaPedido(pedido);
     }
 
@@ -172,9 +183,9 @@ export class SurtidoService {
       select: { id: true, estado: true, tiendaId: true },
     });
     if (!pedidoActual) throw new NotFoundException('Pedido no encontrado');
-    if (pedidoActual.estado !== EstadoPedido.REVIEWING) {
+    if (pedidoActual.estado !== EstadoPedido.EN_REVISION) {
       throw new BadRequestException(
-        `Sólo se puede surtir en estado REVIEWING (actual: ${pedidoActual.estado})`,
+        `Sólo se puede surtir en estado EN_REVISION (actual: ${pedidoActual.estado})`,
       );
     }
 
@@ -231,10 +242,10 @@ export class SurtidoService {
 
   /**
    * Confirma el surtido. Aplica transición de estado coherente:
-   *   - Todos los items COMPLETO  → PENDING_PAID (encola a Firebird).
+   *   - Todos los items COMPLETO  → PENDIENTE_PAGO (encola a Firebird).
    *   - Algún item PARCIAL / NO_DISPONIBLE → requiere una propuesta ACEPTADA
    *     por el cliente que NO haya sido consumida; aplica los cambios y pasa
-   *     a PENDING_PAID.
+   *     a PENDIENTE_PAGO.
    *   - Al menos un item aún PENDIENTE  → 400 (debe completar todos los items)
    *
    * F13 (sep 2026): la transición se delega a `PedidoStateService.cambiarEstado`
@@ -251,9 +262,9 @@ export class SurtidoService {
     if (!esAdmin && pedido.asignadoAId !== usuario.userId) {
       throw new BadRequestException('Sólo el bodeguero asignado puede confirmar este surtido');
     }
-    if (pedido.estado !== EstadoPedido.REVIEWING) {
+    if (pedido.estado !== EstadoPedido.EN_REVISION) {
       throw new BadRequestException(
-        `Sólo se puede confirmar surtido en estado REVIEWING (actual: ${pedido.estado})`,
+        `Sólo se puede confirmar surtido en estado EN_REVISION (actual: ${pedido.estado})`,
       );
     }
 
@@ -342,55 +353,64 @@ export class SurtidoService {
       );
     }
 
-    // F13: si hay faltantes, exigir una propuesta ACEPTADA y NO CONSUMIDA.
-    // Sin el filtro de `consumidaAt`, una propuesta aceptada en una ronda
-    // anterior autorizaría faltantes nuevos sin que el cliente los aprobara.
+    // F17 (oct 2026): EL CIERRE ES UN SOLO PASO.
     //
-    // NOTA (sep 2026): hoy esta rama es INALCANZABLE — los dos caminos de
-    // aprobación (`aprobarPropuestaBodega` y `aprobarPropuestaVentas`) escriben
-    // `consumidaAt` en el mismo acto de aprobar, así que nunca existe una
-    // ACEPTADA sin consumir. Se conserva como red de seguridad barata: es la
-    // que atrapa un faltante GENUINO no aprobado (el caso "bodega encontró
-    // menos de lo que el cliente aprobó"), y su mensaje es el correcto ahí.
-    let propuestaAceptada: { id: number } | null = null;
-    if (itemsConFaltante.length > 0) {
-      propuestaAceptada = await this.prisma.pedidoPropuesta.findFirst({
-        where: { pedidoId, estado: EstadoPropuesta.ACEPTADA, consumidaAt: null },
-        orderBy: { respondidaAt: 'desc' },
-        select: { id: true },
-      });
-      if (!propuestaAceptada) {
-        throw new BadRequestException(
-          `Hay ${itemsConFaltante.length} item(s) con faltante. ` +
-            'Envía la propuesta al cliente (botón "Enviar propuesta") y espera a que la acepte antes de confirmar el surtido.',
-        );
-      }
-    }
+    // Antes, si había faltantes, este método lanzaba un 400 pidiendo "envía la
+    // propuesta y espera a que el cliente la acepte". Eso contradecía la
+    // realidad del piso: el bodeguero YA metió la bolsa con el ticket en la
+    // mesa de mostrador. El sistema lo obligaba a dejar el pedido abierto en su
+    // cola mientras la mercancía ya estaba físicamente entregada a mostrador.
+    //
+    // Ahora el bodeguero marca los items y aprieta "Terminar surtido". El
+    // sistema aplica los cambios físicos, crea la propuesta si hace falta, y
+    // manda el pedido a donde corresponda.
+    //
+    // F18 (oct 2026): A DÓNDE VA depende de si el cliente está presente.
+    //
+    //   completo                → REVISADO (área de entrega). Nadie aprueba.
+    //   incompleto + PRESENTE   → REVISADO. Mostrador lo resuelve enfrente.
+    //   incompleto + AUSENTE    → ESPERANDO_APROBACION. El cliente decide.
+    //
+    // El bug que esto arregla: F17 mandaba TODO a REVISADO, incluso el
+    // incompleto de un cliente ausente. Pero `resolverPropuesta` exige
+    // `ESPERANDO_APROBACION`, así que la propuesta nacía **irrespondible** —
+    // ni el cliente, ni el operador, ni el admin podían decidirla, y el cliente
+    // nunca se enteraba de que su pedido estaba incompleto.
+    //
+    // `clientePresenteEnTienda` reusa el gate de llegada que ya usa la cola de
+    // mostrador: KIOSKO siempre, WEB solo con aviso vigente.
+    const hayFaltantes = itemsConFaltante.length > 0;
+    const clientePresente = clientePresenteEnTienda(pedido);
+
+    const destino = hayFaltantes
+      ? destinoTrasSurtidoIncompleto(pedido.modoEntrega, clientePresente)
+      : destinoTrasSurtido(pedido.modoEntrega);
+
+    const vaAMostrador = destino.estado === EstadoPedido.REVISADO;
+    const vaAEsperarAprobacion = destino.estado === EstadoPedido.ESPERANDO_APROBACION;
+    // La propuesta se crea cuando el pedido va a esperar al cliente, o cuando
+    // va al área de entrega con faltantes (para que mostrador tenga el detalle
+    // de qué faltó y el cliente lo vea en su app).
+    const propuestaAutomatica = hayFaltantes && (vaAMostrador || vaAEsperarAprobacion);
 
     // Los cambios se aplican DENTRO de la transacción de la transición (vía
     // `efectos`), así que la descripción se captura desde el callback.
     let cambios: string[] = [];
-
-    // F16 (sep 2026): a dónde va el pedido depende del modo de entrega.
-    //   - DOMICILIO       → PENDING_PAID, encolado inmediato a Firebird.
-    //   - KIOSKO / RECOGER→ EN_MOSTRADOR, SIN encolar (entra al ERP cuando
-    //                       mostrador lo libere, ya con el cliente conforme).
-    // La decisión vive en `destinoTrasSurtido` para que los caminos de
-    // propuesta no puedan divergir (riesgo R12 del plan).
-    const destino = destinoTrasSurtido(pedido.modoEntrega);
-    const vaAMostrador = destino.estado === EstadoPedido.EN_MOSTRADOR;
+    let propuestaId: number | null = null;
 
     const pedidoActualizado = await this.state.cambiarEstado(
       pedidoId,
       {
         nuevoEstado: destino.estado,
-        observacion: vaAMostrador
-          ? propuestaAceptada
-            ? `Surtido confirmado con faltante(s) (propuesta #${propuestaAceptada.id} aceptada) — pasa a mostrador`
-            : 'Surtido confirmado completo — pasa a mostrador'
-          : propuestaAceptada
-            ? `Surtido confirmado con faltante(s) (propuesta #${propuestaAceptada.id} aceptada) — pendiente de pago`
-            : 'Surtido confirmado completo — pendiente de pago',
+        observacion: hayFaltantes
+          ? `Surtido confirmado con faltante(s) — ${
+              vaAEsperarAprobacion
+                ? 'esperando que el cliente apruebe'
+                : vaAMostrador
+                  ? 'el cliente está en tienda, pasa al área de entrega'
+                  : 'pendiente de pago'
+            }`
+          : `Surtido confirmado completo — ${vaAMostrador ? 'pasa al área de entrega' : 'pendiente de pago'}`,
       },
       usuario,
       {
@@ -398,38 +418,106 @@ export class SurtidoService {
         asignacion: 'limpiar',
         // El reloj se detiene: ya no es tarea de bodega.
         reloj: 'detener',
-        // Obligatorio para PENDING_PAID: sin fila de cola el pedido es
-        // invisible al agente. Para EN_MOSTRADOR va en false a propósito —
+        // Obligatorio para PENDIENTE_PAGO: sin fila de cola el pedido es
+        // invisible al agente. Para REVISADO va en false a propósito —
         // el ERP sólo debe ver pedidos que el cliente ya confirmó.
         encolarFirebird: destino.encolarFirebird,
         // Los monitores deben recomputar (slot del bodeguero + cola de
         // cajeros + cola de mostrador).
         invalidarMonitor: true,
-        efectos: propuestaAceptada
-          ? async (tx) => {
-              cambios = await this.aplicarCambiosSurtido(tx, pedido, itemsConFaltante);
-              // Marcar la propuesta como consumida para que no autorice
-              // faltantes de una ronda futura.
-              await tx.pedidoPropuesta.update({
-                where: { id: propuestaAceptada!.id },
-                data: { consumidaAt: new Date() },
+        efectos: async (tx) => {
+          // 1. Liquidar el surtido físico: cancelar los NO_DISPONIBLE y ajustar
+          //    los PARCIAL a lo que realmente hay.
+          if (hayFaltantes) {
+            cambios = await this.aplicarCambiosSurtido(tx, pedido, itemsConFaltante);
+          }
+
+          // 2. Crear la propuesta para el cliente cuando el pedido quedó
+          //    incompleto. Se crea DENTRO de la transición para que no pueda
+          //    existir un pedido incompleto sin propuesta (el cliente no tendría
+          //    cómo decidir y el pedido quedaría atorado).
+          //
+          // Oct 2026: la propuesta YA NO viaja como mensaje de chat con adjunto.
+          // Vive en su propia sección del detalle del pedido, que la lee de
+          // `Pedido.propuestas` (el backend ya la incluía ahí). El mensaje de
+          // sistema que había aquí era un transporte: existía solo porque el
+          // frontend sabía pintar propuestas dentro de una burbuja. Además
+          // hacía aparecer el chat —que ahora es del asesor de ventas— en un
+          // pedido donde todavía no hay nadie del otro lado.
+          if (propuestaAutomatica) {
+            const { items: itemsPropuesta, total } = construirPropuestaDeBodega(
+              pedido.items.map((i) => ({
+                ...i,
+                precioUnitario: i.precioUnitario,
+                subtotal: i.subtotal,
+              })),
+            );
+            // El índice único parcial `pedidos_propuestas_pendiente_unica_idx`
+            // permite UNA sola propuesta PENDIENTE por pedido. Si llega a haber
+            // otra viva (p. ej. el operador ajustó el pedido sin resolverla),
+            // el create revienta con P2002. Se traduce a un 409 con un mensaje
+            // que dice qué hacer, en vez de dejar salir el error crudo de
+            // Prisma — que el bodeguero leería como una falla del sistema.
+            // Mismo patrón que `messages.service.ts` y `cliente.service.ts`:
+            // comprobar `err.code` antes de asumir P2002.
+            let propuesta: { id: number };
+            try {
+              propuesta = await tx.pedidoPropuesta.create({
+                data: {
+                  pedidoId,
+                  estado: EstadoPropuesta.PENDIENTE,
+                  items: itemsPropuesta as unknown as Prisma.InputJsonValue,
+                  total: new Prisma.Decimal(total),
+                  nota: null,
+                  creadaPorId: usuario.userId,
+                  creadaPorRol: usuario.rol,
+                },
+                select: { id: true },
               });
+            } catch (err) {
+              if ((err as { code?: string }).code !== 'P2002') throw err;
+              this.logger.error(
+                `Pedido ${pedidoId}: ya tenía una propuesta PENDIENTE al cerrar el surtido — ` +
+                  `el pedido quedó incompleto sin propuesta nueva`,
+              );
+              throw new ConflictException(
+                'Este pedido ya tiene una propuesta esperando respuesta del cliente. ' +
+                  'Resuélvela (o descártala) antes de cerrar un surtido con faltantes.',
+              );
             }
-          : undefined,
+            propuestaId = propuesta.id;
+          }
+        },
       },
     );
 
+    // El aviso al cliente va DESPUÉS del commit (mismo principio que los
+    // efectos externos de la máquina de estados): emitir dentro de la
+    // transacción anunciaría una propuesta que un rollback podría deshacer.
+    if (propuestaId !== null) {
+      this.realtime.emitToUser(pedido.usuarioId, 'propuesta.enviada', {
+        pedidoId,
+        propuestaId,
+        origen: usuario.rol,
+      });
+    }
+
     this.logger.log(
-      `Pedido ${pedidoId}: surtido confirmado (${cambios.length} cambio(s)) → ${destino.estado}`,
+      `Pedido ${pedidoId}: surtido confirmado (${cambios.length} cambio(s)) → ${destino.estado}` +
+        (propuestaId ? ` · propuesta #${propuestaId} enviada al cliente` : ''),
     );
 
     return {
-      mensaje: propuestaAceptada
-        ? `Surtido confirmado con ${cambios.length} cambio(s) aplicado(s)`
+      mensaje: propuestaId
+        ? `Surtido cerrado con ${cambios.length} ajuste(s). Se envió la propuesta al cliente.`
         : 'Surtido completo confirmado',
       estado: destino.estado,
       pedido: pedidoActualizado,
       cambiosAplicados: cambios.length,
+      // F17: la UI lo usa para decirle al bodeguero que el pedido quedó
+      // incompleto y que el cliente debe decidir.
+      propuestaId,
+      incompleto: hayFaltantes,
     };
   }
 
@@ -504,7 +592,7 @@ export class SurtidoService {
     const candidatos = await this.prisma.pedido.findMany({
       where: {
         tiendaId: pedido.tiendaId,
-        estado: EstadoPedido.PENDING_REVIEW,
+        estado: EstadoPedido.SOLICITADO,
         id: { not: pedido.id },
       },
       select: {

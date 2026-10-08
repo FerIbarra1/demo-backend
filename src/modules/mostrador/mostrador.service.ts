@@ -1,5 +1,5 @@
 import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
-import { Prisma, EstadoPedido, RolUsuario, CanalOrigen } from '@prisma/client';
+import { Prisma, EstadoPedido, EstadoPropuesta, RolUsuario, CanalOrigen } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PedidoStateService } from '../pedidos/core/pedido-state.service';
 import { PedidoAccessService } from '../pedidos/core/pedido-access.service';
@@ -23,18 +23,18 @@ import { UserContext } from '../../types/pedido.types';
  * F16 (sep 2026): el mostrador pasó de ser la ÚLTIMA parada a ser la
  * penúltima. Antes veía pedidos ya pagados y solo entregaba. Ahora:
  *
- *   1. `EN_MOSTRADOR` — el pedido está apartado y el cliente lo revisa en
+ *   1. `REVISADO` — el pedido está apartado y el cliente lo revisa en
  *      tienda. El operador decide:
- *        - `enviarAPagar` → PENDING_PAID (AQUÍ entra al ERP: Firebird solo ve
+ *        - `enviarAPagar` → PENDIENTE_PAGO (AQUÍ entra al ERP: Firebird solo ve
  *                       pedidos que el cliente ya confirmó).
- *        - `ajustar`  → REVIEWING (el cliente pidió cambios; bodega re-surte).
+ *        - `ajustar`  → EN_REVISION (el cliente pidió cambios; bodega re-surte).
  *        - `cancelar` → CANCELLED + lista de reposición (la mercancía vuelve
  *                       al anaquel).
  *   2. `PAID` / `SHIPPED` — el cliente ya pagó; el operador entrega
  *      (`entregar` → COMPLETED). Esto ya existía y no cambió.
  *
  * Estados que el mostrador ve:
- *   - EN_MOSTRADOR — por revisar con el cliente (nuevo en F16).
+ *   - REVISADO — por revisar con el cliente (nuevo en F16).
  *   - PAID         — pagado, listo para entregar (kiosko/web recoger).
  *   - SHIPPED      — ya enviado por paquetería, el cliente recoge en tienda
  *                    (caso poco común pero soportado por la máquina de estados).
@@ -57,11 +57,11 @@ export class MostradorService {
   ) {}
 
   // ==================================================================
-  // F16 (sep 2026): la cola de EN_MOSTRADOR y las tres acciones del operador
+  // F16 (sep 2026): la cola de REVISADO y las tres acciones del operador
   // ==================================================================
 
   /**
-   * `EN_MOSTRADOR → PENDING_PAID`. El cliente revisó su pedido y está de
+   * `REVISADO → PENDIENTE_PAGO`. El cliente revisó su pedido y está de
    * acuerdo: pasa a caja a pagar.
    *
    * **Aquí entra el pedido al ERP.** Es el punto central del cambio de flujo:
@@ -69,7 +69,7 @@ export class MostradorService {
    * ya confirmó, y un ajuste o cancelación en mostrador nunca lo deja
    * desincronizado (el pedido todavía no existe allá).
    *
-   * `encolarFirebird: true` es obligatorio: un PENDING_PAID sin fila en
+   * `encolarFirebird: true` es obligatorio: un PENDIENTE_PAGO sin fila en
    * `PedidoPendienteEnvio` es invisible al agente, nunca recibe folio y se
    * queda atascado para siempre.
    */
@@ -84,6 +84,28 @@ export class MostradorService {
       where: { id: pedidoId },
       select: { llegadaAnunciadaAt: true, llegadaDescartadaAt: true },
     });
+
+    // F18 (oct 2026): GUARD de propuesta pendiente.
+    //
+    // Sin esto el operador podía mandar a pagar un pedido con una propuesta
+    // viva: el pedido entraba a Firebird con las cantidades de bodega y la
+    // propuesta quedaba PENDIENTE para siempre — bloqueando futuras propuestas
+    // por el índice único parcial, y sin que el cliente hubiera decidido nada.
+    //
+    // El caso real: el pedido quedó incompleto y el cliente NO está. El
+    // operador tiene que resolverlo (aceptar lo que hay, ajustar o cancelar)
+    // antes de cobrar.
+    const propuestaPendiente = await this.prisma.pedidoPropuesta.findFirst({
+      where: { pedidoId, estado: EstadoPropuesta.PENDIENTE },
+      select: { id: true },
+    });
+    if (propuestaPendiente) {
+      throw new BadRequestException(
+        'Este pedido tiene faltantes sin resolver. Resuelve la propuesta con el cliente ' +
+          '(aceptar lo que hay, ajustar el pedido o cancelarlo) antes de enviarlo a pagar.',
+      );
+    }
+
     const avisoVigente = Boolean(completo?.llegadaAnunciadaAt && !completo.llegadaDescartadaAt);
     const sufijoAviso = avisoVigente ? '' : ' (sin aviso de llegada del cliente)';
     const sufijoNota = nota ? ` — ${nota}` : '';
@@ -91,7 +113,7 @@ export class MostradorService {
     return this.pedidoState.cambiarEstado(
       pedidoId,
       {
-        nuevoEstado: EstadoPedido.PENDING_PAID,
+        nuevoEstado: EstadoPedido.PENDIENTE_PAGO,
         observacion: `Liberado a pago en mostrador por ${usuario.nombre}${sufijoAviso}${sufijoNota}`,
       },
       usuario,
@@ -105,7 +127,7 @@ export class MostradorService {
   }
 
   /**
-   * `EN_MOSTRADOR → REVIEWING`. El cliente quiere cambios: el pedido vuelve a
+   * `REVISADO → EN_REVISION`. El cliente quiere cambios: el pedido vuelve a
    * la cola de bodega a que se surta lo nuevo.
    *
    * Fase 1 solo registra la intención (la nota). La Fase 4 agrega la edición
@@ -123,7 +145,7 @@ export class MostradorService {
    *
    * Fase 4 (sep 2026): acepta los cambios de items del editor POS. Se aplican
    * DENTRO de la transacción de la transición (`efectos`), así que el pedido no
-   * puede quedar en REVIEWING con los items a medio aplicar — bodega vería un
+   * puede quedar en EN_REVISION con los items a medio aplicar — bodega vería un
    * pedido que no coincide con lo que el cliente pidió.
    *
    * Sin `items`, el comportamiento es el de la Fase 1: solo registra la nota y
@@ -162,7 +184,7 @@ export class MostradorService {
     return this.pedidoState.cambiarEstado(
       pedidoId,
       {
-        nuevoEstado: EstadoPedido.REVIEWING,
+        nuevoEstado: EstadoPedido.EN_REVISION,
         observacion: hayCambios
           ? `Ajuste en mostrador por ${usuario.nombre}: ${nota} (${resumenCambios.length || items!.length} cambio(s))`
           : `Ajuste solicitado en mostrador por ${usuario.nombre}: ${nota}`,
@@ -172,11 +194,58 @@ export class MostradorService {
         asignacion: 'limpiar',
         reloj: 'reanudar',
         invalidarMonitor: true,
-        efectos: hayCambios
-          ? async (tx) => {
-              resumenCambios = await this.aplicarAjuste(tx, pedidoCompleto, items!, columnaLista);
-            }
-          : undefined,
+        // Oct 2026: los efectos corren SIEMPRE, no solo cuando hay cambios de
+        // items.
+        //
+        // El bug que esto arregla: con `efectos: hayCambios ? ... : undefined`,
+        // un ajuste SIN items (el operador solo describe lo que el cliente
+        // quiere, sin tocar el editor) dejaba la propuesta PENDIENTE. El pedido
+        // volvía a bodega con una propuesta viva, y bodega chocaba contra el
+        // índice único parcial al cerrar el surtido de la siguiente ronda.
+        //
+        // El ajuste REEMPLAZA la propuesta en los dos casos: el cliente está
+        // enfrente y ya dijo qué quiere.
+        efectos: async (tx) => {
+          // La propuesta que bodega mandó quedó sin efecto. Si se deja
+          // PENDIENTE, bodega choca contra `pedidos_propuestas_pendiente_unica_idx`
+          // al cerrar el surtido siguiente, y `enviarAPagar` queda bloqueado para
+          // siempre por su guard de propuesta pendiente.
+          await tx.pedidoPropuesta.updateMany({
+            where: { pedidoId, estado: EstadoPropuesta.PENDIENTE },
+            data: {
+              estado: EstadoPropuesta.SUPERADA,
+              respondidaAt: new Date(),
+              notaCliente: nota,
+            },
+          });
+
+          // Sin cambios de items no hay nada más que hacer: el pedido ya
+          // transicionó a EN_REVISION y bodega lo re-surtirá tal cual.
+          if (!hayCambios) return;
+
+          const retirados: Array<{ itemId: number; cantidad: number }> = [];
+          resumenCambios = await this.aplicarAjuste(
+            tx,
+            pedidoCompleto,
+            items!,
+            columnaLista,
+            retirados,
+          );
+          // F17: las prendas que el ajuste quitó están físicamente en la
+          // bolsa de la plancha y tienen que volver al anaquel. Se crea la
+          // lista de reposición en la MISMA transacción: si el ajuste se
+          // aplica pero la lista falla, quedaría mercancía apartada sin
+          // nadie que la devuelva.
+          //
+          // Las cantidades se pasan desde `retirados` porque el ajuste ya
+          // puso `cantidadSurtida: 0` en esos items.
+          await this.reposicion.crearDesdeAjuste(
+            tx,
+            pedidoId,
+            nota,
+            new Map(retirados.map((r) => [r.itemId, r.cantidad])),
+          );
+        },
       },
     );
   }
@@ -202,6 +271,13 @@ export class MostradorService {
     pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
     items: ItemAjusteDto[],
     columnaLista: ColumnaLista,
+    /**
+     * F17: se llena con las piezas que había en la bolsa por cada item
+     * retirado. El caller la pasa a `crearDesdeAjuste` para que la lista de
+     * reposición sepa cuánto devolver al anaquel — el ajuste borra
+     * `cantidadSurtida` al cancelar, así que ese dato hay que capturarlo antes.
+     */
+    retiradosParaReposicion: Array<{ itemId: number; cantidad: number }> = [],
   ): Promise<string[]> {
     const cambios: string[] = [];
     const idsActuales = new Set(
@@ -262,6 +338,21 @@ export class MostradorService {
       }
 
       if (it.tipo === 'no-disponible') {
+        // F17 (oct 2026): ANTES de cancelar hay que capturar cuántas piezas
+        // había en la bolsa. `cantidadSurtida` es lo que bodega apartó
+        // físicamente, y el ajuste está a punto de ponerlo en 0 — sin
+        // capturarlo aquí, `crearDesdeAjuste` no encuentra nada que reponer y
+        // la mercancía retirada se queda sin devolver al anaquel (bug
+        // encontrado en la prueba end-to-end).
+        const previo = await tx.itemPedido.findUnique({
+          where: { id: it.itemId },
+          select: { cantidadSurtida: true, cantidad: true },
+        });
+        const piezasEnBolsa = previo?.cantidadSurtida ?? 0;
+        if (piezasEnBolsa > 0) {
+          retiradosParaReposicion.push({ itemId: it.itemId, cantidad: piezasEnBolsa });
+        }
+
         // F16: limpieza completa del estado de surtido al cancelar. Sin esto
         // el item quedaba con `estadoSurtido` viejo (PARCIAL/NO_DISPONIBLE),
         // que es benigno hoy (todos los guards excluyen cancelados) pero
@@ -381,7 +472,7 @@ export class MostradorService {
   }
 
   /**
-   * `EN_MOSTRADOR → CANCELLED` + lista de reposición.
+   * `REVISADO → CANCELLED` + lista de reposición.
    *
    * La reposición se crea DENTRO de la misma transacción (`efectos`): si la
    * cancelación se aplica pero la lista falla, quedaría mercancía apartada sin
@@ -390,7 +481,7 @@ export class MostradorService {
    *
    * No se encola nada a Firebird: el pedido nunca llegó al ERP (con el flujo
    * nuevo el encolado ocurre al enviar a pagar, no al surtir). Si el pedido ya estaba
-   * en PENDING_PAID, la cancelación la sincroniza el agente por `SWCANCEL`.
+   * en PENDIENTE_PAGO, la cancelación la sincroniza el agente por `SWCANCEL`.
    */
   async cancelar(pedidoId: number, usuario: UserContext, motivo: string) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
@@ -399,7 +490,7 @@ export class MostradorService {
     return this.pedidoState.cambiarEstado(
       pedidoId,
       {
-        nuevoEstado: EstadoPedido.CANCELLED,
+        nuevoEstado: EstadoPedido.CANCELADO,
         observacion: `Cancelado en mostrador por ${usuario.nombre}: ${motivo}`,
       },
       usuario,
@@ -506,54 +597,49 @@ export class MostradorService {
    *
    * En cajero, tomar un pedido se puede deshacer (`liberarPedidoCajero` lo
    * devuelve a la cola). En mostrador no había vuelta atrás: `llamar` movía el
-   * folio al panel "Atendiendo" de la TV y `PedidoStateService` solo limpiaba
-   * `llamadoAt` al SALIR de `EN_MOSTRADOR`. Si el operador se equivocaba de
-   * folio, el cliente equivocado quedaba anunciado en la pantalla y el correcto
-   * ya no estaba en la lista de espera.
+   * folio al panel "Atendiendo" de la TV y el pedido se quedaba ahí. Si el
+   * operador se equivocaba de folio, el cliente equivocado quedaba anunciado en
+   * la pantalla y el correcto ya no estaba en la lista de espera.
+   *
+   * F17 (oct 2026): ahora es una TRANSICIÓN real (`EN_ATENCION → REVISADO`)
+   * en vez de limpiar `llamadoAt` a mano. Antes el estado no cambiaba, así que
+   * "llamado" y "en la plancha" eran indistinguibles y el panel "Atendiendo"
+   * dependía de una columna que cada query tenía que recordar filtrar.
    *
    * NO se llama `liberar` a propósito: en mostrador ese nombre ya significa
-   * `EN_MOSTRADOR → PENDING_PAID` (el pedido entra al ERP). Devolver a la cola
-   * es lo contrario de eso.
+   * `REVISADO → PENDIENTE_PAGO` (el pedido entra al ERP). Devolver a la cola es
+   * lo contrario de eso.
    *
    * Tampoco asigna el pedido a una persona: el mostrador es una cola lineal por
    * decisión D16, no un modelo de ventanillas 1:1 como el cajero.
    */
   async devolverACola(pedidoId: number, usuario: UserContext) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
-    this.exigirEstado(pedido.estado, 'devolver a la cola');
+    // Solo desde EN_ATENCION: un pedido que nunca se llamó ya está en la cola,
+    // así que "devolverlo" no significa nada.
+    this.exigirEstado(pedido.estado, 'devolver a la cola', [EstadoPedido.EN_ATENCION]);
 
     const completo = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      select: { numeroPedido: true, tiendaId: true, llamadoAt: true },
+      select: { numeroPedido: true, tiendaId: true },
     });
     if (!completo) throw new BadRequestException('Pedido no encontrado');
 
-    if (completo.llamadoAt === null) {
-      throw new BadRequestException(
-        'Este pedido no está anunciado en la pantalla, así que no hay nada que regresar a la cola.',
-      );
-    }
+    await this.pedidoState.cambiarEstado(
+      pedidoId,
+      {
+        nuevoEstado: EstadoPedido.REVISADO,
+        observacion: `Devuelto a la cola por ${usuario.nombre}`,
+      },
+      usuario,
+      { invalidarMonitor: true },
+    );
 
+    // `llamadoAt` vuelve a null: es auditoría de la llamada vigente, y ya no
+    // hay ninguna.
     await this.prisma.pedido.update({
       where: { id: pedidoId },
       data: { llamadoAt: null },
-    });
-
-    await this.prisma.historialPedido.create({
-      data: {
-        pedidoId,
-        estadoAnterior: pedido.estado,
-        estadoNuevo: pedido.estado,
-        observacion: `Devuelto a la cola por ${usuario.nombre}`,
-        usuarioId: usuario.userId,
-        usuarioNombre: usuario.nombre,
-      },
-    });
-
-    // La TV tiene que recomputar: el folio sale del panel "Atendiendo" y vuelve
-    // a la lista de espera. Sin esto seguiría anunciado hasta el siguiente poll.
-    this.realtime.emitToTienda(completo.tiendaId, 'monitor.invalidado', {
-      pedidoId,
     });
 
     this.logger.log(
@@ -561,6 +647,64 @@ export class MostradorService {
     );
 
     return { ok: true, pedidoId };
+  }
+
+  /**
+   * Oct 2026: trae al área de entrega un pedido que estaba en asesoría.
+   *
+   * El caso: el cliente pidió un asesor de ventas, el asesor revisó con él y no
+   * había nada que negociar (o el cliente se cansó de esperar y llegó a
+   * tienda). El pedido está en `EN_ASESORIA` y el operador lo tiene enfrente.
+   *
+   * `TRANSICIONES[EN_ASESORIA]` ya incluía `REVISADO`, pero **nadie la
+   * disparaba**: el front solo le ofrecía al operador "avisar llegada", que
+   * registra la presencia pero NO mueve el pedido a la cola (el gate de
+   * visibilidad exige `REVISADO`). Así que el cliente se quedaba de pie
+   * esperando un pedido que nunca aparecía en la pantalla del mostrador.
+   *
+   * `asignacion: 'limpiar'` es explícito y obligatorio: el caller es el
+   * OPERADOR, no un bodeguero. Con 'caller' el pedido quedaría asignado a un
+   * usuario de mostrador, invisible en el monitor de bodega.
+   */
+  async traerAEntrega(pedidoId: number, usuario: UserContext, nota?: string) {
+    const pedido = await this.access.cargarYValidar(pedidoId, usuario);
+    // Solo desde EN_ASESORIA: un pedido que ya está en el área de entrega no
+    // necesita que nadie lo "traiga", y uno en bodega todavía no existe
+    // físicamente para entregarse.
+    this.exigirEstado(pedido.estado, 'traer al área de entrega', [EstadoPedido.EN_ASESORIA]);
+
+    const completo = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      select: { numeroPedido: true, tiendaId: true },
+    });
+    if (!completo) throw new BadRequestException('Pedido no encontrado');
+
+    const sufijoNota = nota ? ` — ${nota}` : '';
+
+    await this.pedidoState.cambiarEstado(
+      pedidoId,
+      {
+        nuevoEstado: EstadoPedido.REVISADO,
+        observacion: `Traído al área de entrega por ${usuario.nombre} (venía de asesoría)${sufijoNota}`,
+      },
+      usuario,
+      {
+        // El caller es el operador, no un bodeguero: el pedido vuelve a la cola
+        // sin asignar. Ver el comentario del método.
+        asignacion: 'limpiar',
+        // Ya no es tarea de bodega (venía de ventas, no de surtido).
+        reloj: 'detener',
+        // La TV de mostrador y la de bodega tienen que recomputar.
+        invalidarMonitor: true,
+      },
+    );
+
+    this.logger.log(
+      `Pedido ${pedidoId} (${completo.numeroPedido}): traído al área de entrega desde asesoría ` +
+        `por ${usuario.nombre}`,
+    );
+
+    return { ok: true, pedidoId, estado: EstadoPedido.REVISADO };
   }
 
   /**
@@ -588,12 +732,34 @@ export class MostradorService {
     const siguiente = await this.prisma.pedido.findFirst({
       where: {
         tiendaId: usuario.tiendaId,
-        estado: EstadoPedido.EN_MOSTRADOR,
-        // Un pedido ya llamado sigue en EN_MOSTRADOR pero ya está anunciado en
-        // la TV: volver a llamarlo lo dejaría pegado en el panel.
-        llamadoAt: null,
+        // F17: solo REVISADO. Un pedido ya llamado está en EN_ATENCION, así que
+        // el estado por sí solo lo excluye — el filtro `llamadoAt: null` que
+        // hacía falta antes ya no es necesario.
+        estado: EstadoPedido.REVISADO,
+        // F18 (oct 2026): el MISMO gate de canal/llegada que `obtenerCola`.
+        //
+        // Sin esto, "Llamar siguiente" podía elegir un pedido WEB **sin aviso
+        // de llegada** — que es invisible en la consola. El operador anunciaba
+        // en la TV el folio de un cliente que no está en la tienda, y el pedido
+        // que sí estaba esperando no se llamaba.
+        OR: [
+          { canalOrigen: CanalOrigen.KIOSKO },
+          {
+            canalOrigen: CanalOrigen.WEB,
+            llegadaAnunciadaAt: { not: null },
+            llegadaDescartadaAt: null,
+          },
+        ],
       },
-      orderBy: { fechaPedido: 'asc' },
+      // F18: el MISMO orden que la cola (`obtenerCola`): los que ya avisaron
+      // llegada primero (FIFO entre ellos), luego el resto por antigüedad.
+      // Antes ordenaba solo por `fechaPedido asc`, así que "el siguiente" no
+      // era la primera fila de la pestaña.
+      orderBy: [
+        { llegadaAnunciadaAt: { sort: 'asc', nulls: 'last' } },
+        { fechaPedido: 'asc' },
+        { id: 'asc' },
+      ],
       select: { id: true },
     });
     if (!siguiente) {
@@ -604,14 +770,26 @@ export class MostradorService {
   }
 
   /**
-   * Guard compartido de las tres acciones: solo se opera un pedido que está
-   * esperando revisión. Si ya fue liberado (PENDING_PAID) o cancelado, la
-   * acción no aplica y el mensaje dice cuál es el estado real.
+   * Guard de las acciones del operador sobre un pedido que ya está en la mesa.
+   *
+   * F17 (oct 2026): acepta una LISTA de estados, no uno solo. Antes todas las
+   * acciones exigían el estado de plancha, pero con `EN_ATENCION` el pedido
+   * puede estar en dos puntos de la misma etapa: en la plancha esperando al
+   * cliente, o ya llamado y siendo atendido. Casi todas las acciones aplican
+   * en los dos; `llamar` es la excepción (solo desde REVISADO — no se llama
+   * dos veces al mismo cliente).
+   *
+   * El mensaje nombra el estado real, para que el operador entienda por qué no
+   * aplica en vez de recibir un 400 seco.
    */
-  private exigirEstado(estadoActual: EstadoPedido, accion: string): void {
-    if (estadoActual !== EstadoPedido.EN_MOSTRADOR) {
+  private exigirEstado(
+    estadoActual: EstadoPedido,
+    accion: string,
+    permitidos: EstadoPedido[] = [EstadoPedido.REVISADO, EstadoPedido.EN_ATENCION],
+  ): void {
+    if (!permitidos.includes(estadoActual)) {
       throw new BadRequestException(
-        `Solo se puede ${accion} un pedido en EN_MOSTRADOR (actual: ${estadoActual})`,
+        `Solo se puede ${accion} un pedido en ${permitidos.join(' o ')} (actual: ${estadoActual})`,
       );
     }
   }
@@ -634,7 +812,10 @@ export class MostradorService {
    */
   async llamar(pedidoId: number, usuario: UserContext) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
-    this.exigirEstado(pedido.estado, 'llamar');
+    // Solo desde REVISADO: un pedido ya llamado (EN_ATENCION) no se vuelve a
+    // llamar — quedaría pegado en el panel "Atendiendo" y sonaría la alerta de
+    // nuevo para un cliente que ya está enfrente.
+    this.exigirEstado(pedido.estado, 'llamar', [EstadoPedido.REVISADO]);
 
     const completo = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
@@ -646,27 +827,37 @@ export class MostradorService {
     // operador es el que ya está disponible.
     const nombreOperador = usuario.nombre;
 
-    // F16: el pedido pasa al panel "Atendiendo" de la TV y se QUEDA ahí hasta
-    // que salga de EN_MOSTRADOR (lo limpia `PedidoStateService.cambiarEstado`).
-    // Antes la única señal era el evento efímero, así que a los 6s el folio
-    // volvía a la cola como si nadie lo hubiera llamado.
+    // F17 (oct 2026): llamar es una TRANSICIÓN DE ESTADO, no una columna.
+    //
+    // Antes esto escribía `llamadoAt` a mano y el panel "Atendiendo" era
+    // `llamadoAt IS NOT NULL`. Ese diseño tenía dos problemas: (a) cada query
+    // de mostrador tenía que acordarse del filtro, y (b) "llamado" y
+    // "atendiendo" eran el mismo dato, así que no se podía distinguir al
+    // cliente que ya está enfrente del que todavía no llega.
+    //
+    // `llamadoAt` se sigue escribiendo, pero ahora es auditoría (cuándo se
+    // llamó), no el discriminador del panel.
+    const actualizado = await this.pedidoState.cambiarEstado(
+      pedidoId,
+      {
+        nuevoEstado: EstadoPedido.EN_ATENCION,
+        observacion: `Llamado a mostrador por ${nombreOperador}`,
+      },
+      usuario,
+      {
+        // El pedido sigue siendo del mostrador: no se toca la asignación (que
+        // ya es null en esta etapa) ni el reloj de bodega (ya está detenido).
+        invalidarMonitor: true,
+      },
+    );
+
     await this.prisma.pedido.update({
       where: { id: pedidoId },
       data: { llamadoAt: new Date() },
     });
 
-    // Historial sin cambio de estado: deja constancia de la llamada.
-    await this.prisma.historialPedido.create({
-      data: {
-        pedidoId,
-        estadoAnterior: pedido.estado,
-        estadoNuevo: pedido.estado,
-        observacion: `Llamado a mostrador por ${nombreOperador}`,
-        usuarioId: usuario.userId,
-        usuarioNombre: usuario.nombre,
-      },
-    });
-
+    // La TV necesita el payload rico (folio + nombre) para la alerta grande;
+    // `pedido.estado` ya se emitió desde la máquina, pero no lleva estos datos.
     this.realtime.emitToTienda(completo.tiendaId, 'pedido.llamado-mostrador', {
       id: pedidoId,
       numeroPedido: completo.numeroPedido,
@@ -675,17 +866,11 @@ export class MostradorService {
       operadorNombre: nombreOperador,
     });
 
-    // El pedido acaba de pasar de la cola al panel "Atendiendo": la TV tiene
-    // que recomputar el snapshot, o el folio seguiría en la lista de espera
-    // hasta el siguiente poll (5s) mientras la alerta ya lo está anunciando.
-    this.realtime.emitToTienda(completo.tiendaId, 'monitor.invalidado', {
-      pedidoId,
-    });
-
     this.logger.log(
       `Pedido ${pedidoId} (${completo.numeroPedido}): llamado a mostrador por ${nombreOperador}`,
     );
 
+    void actualizado;
     return {
       pedidoId,
       numeroPedido: completo.numeroPedido,
@@ -713,7 +898,7 @@ export class MostradorService {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
     // 2. Validar estado.
-    if (pedido.estado !== EstadoPedido.PAID && pedido.estado !== EstadoPedido.SHIPPED) {
+    if (pedido.estado !== EstadoPedido.PAGADO && pedido.estado !== EstadoPedido.ENVIADO) {
       throw new BadRequestException(
         `Sólo se pueden entregar pedidos en PAID o SHIPPED (actual: ${pedido.estado})`,
       );
@@ -726,7 +911,7 @@ export class MostradorService {
     return this.pedidoState.cambiarEstado(
       pedidoId,
       {
-        nuevoEstado: EstadoPedido.COMPLETED,
+        nuevoEstado: EstadoPedido.ENTREGADO,
         observacion: `Entregado en mostrador por ${usuario.nombre}`,
       },
       usuario,

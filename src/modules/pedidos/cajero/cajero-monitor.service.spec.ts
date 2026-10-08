@@ -32,7 +32,7 @@ describe('CajeroMonitorService — sin candado de canal (F16)', () => {
     const where = pedidoFindMany.mock.calls[0][0].where;
     // Antes: `canalOrigen: CanalOrigen.KIOSKO` — escondía los pedidos web.
     expect(where).not.toHaveProperty('canalOrigen');
-    expect(where.estado).toBe(EstadoPedido.PENDING_PAID);
+    expect(where.estado).toBe(EstadoPedido.PENDIENTE_PAGO);
     expect(where.cajeroAsignadoId).toBeNull();
   });
 

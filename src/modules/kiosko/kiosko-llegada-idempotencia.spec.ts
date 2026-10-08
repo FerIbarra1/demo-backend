@@ -54,7 +54,7 @@ const base = {
   tiendaId: 5,
   numeroPedido: 'PD-2026-000123',
   clienteNombre: 'Juan Pérez',
-  estado: EstadoPedido.EN_MOSTRADOR,
+  estado: EstadoPedido.REVISADO,
   modoEntrega: ModoEntrega.RECOGER_TIENDA,
   llegadaAnunciadaAt: null,
   llegadaUltimoAvisoAt: null,
@@ -158,13 +158,43 @@ describe('registrarAviso — el contrato de reanudado', () => {
     );
   });
 
-  it('rechaza un pedido que no está listo para revisarse', async () => {
+  /**
+   * Oct 2026: este test fijaba el comportamiento VIEJO — que el operador no
+   * pudiera marcar la llegada de un pedido que todavía no estaba listo. Ese era
+   * justo el hueco: el cliente llega sin ticket y sin folio, su pedido sigue en
+   * bodega, y el operador recibía un 409 con el cliente enfrente.
+   *
+   * Ahora sí puede, pero el pedido NO entra a la cola del mostrador: la llegada
+   * queda registrada y el gate de visibilidad (estado = REVISADO) sigue
+   * mandando. Cuando bodega termine, el pedido aparece con su badge EN TIENDA y
+   * su `esperandoDesdeMin` contando desde que el cliente llegó de verdad.
+   */
+  it('SÍ acepta marcar la llegada de un pedido que aún está en bodega', async () => {
     const { svc, emitToTienda } = crearServicio({
       ...base,
-      estado: EstadoPedido.REVIEWING,
+      estado: EstadoPedido.EN_REVISION,
     });
 
-    await expect(svc.confirmarDesdeMostrador(1, usuario)).rejects.toThrow(/preparando tu pedido/i);
+    const r = await svc.confirmarDesdeMostrador(1, usuario);
+
+    expect(r.reanudado).toBe(true);
+    expect(r.entraACola).toBe(false);
+    // Sí emite: la consola de bodega tiene que enterarse de que hay un cliente
+    // esperando y priorizar ese pedido.
+    expect(emitToTienda).toHaveBeenCalledWith(
+      5,
+      'pedido.llegada-anunciada',
+      expect.objectContaining({ estado: EstadoPedido.EN_REVISION }),
+    );
+  });
+
+  it('rechaza marcar la llegada de un pedido ya entregado', async () => {
+    const { svc, emitToTienda } = crearServicio({
+      ...base,
+      estado: EstadoPedido.ENTREGADO,
+    });
+
+    await expect(svc.confirmarDesdeMostrador(1, usuario)).rejects.toThrow(/entregado/i);
     expect(emitToTienda).not.toHaveBeenCalled();
   });
 });

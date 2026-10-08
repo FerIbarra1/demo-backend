@@ -28,11 +28,11 @@ function crearServicio() {
 }
 
 describe('MostradorMonitorService — gate de llegada (D5)', () => {
-  it('filtra por EN_MOSTRADOR', async () => {
+  it('filtra por REVISADO', async () => {
     const { svc, findMany } = crearServicio();
     await svc.obtenerMonitor(5);
     const where = findMany.mock.calls[0][0].where;
-    expect(where.estado).toBe(EstadoPedido.EN_MOSTRADOR);
+    expect(where.estado).toBe(EstadoPedido.REVISADO);
     expect(where.tiendaId).toBe(5);
   });
 
@@ -82,30 +82,34 @@ describe('MostradorMonitorService — gate de llegada (D5)', () => {
     const { svc, count } = crearServicio();
     await svc.obtenerMonitor(5);
     const where = count.mock.calls[0][0].where;
-    expect(where.estado.in).toEqual([EstadoPedido.PAID, EstadoPedido.SHIPPED]);
+    expect(where.estado.in).toEqual([EstadoPedido.PAGADO, EstadoPedido.ENVIADO]);
   });
 });
 
 /**
  * F16: panel "Atendiendo". El pedido llamado sale de la cola y entra a este
- * panel, donde se queda hasta que salga de EN_MOSTRADOR. Si la cola no lo
+ * panel, donde se queda hasta que salga de REVISADO. Si la cola no lo
  * excluyera, el cliente ya llamado seguiría viéndose en la lista de espera.
  */
 describe('MostradorMonitorService — panel Atendiendo', () => {
-  it('la cola excluye los pedidos ya llamados', async () => {
+  it('la cola es solo REVISADO (excluye a los ya llamados)', async () => {
+    // F17: el discriminador es el ESTADO, no `llamadoAt`. Un pedido ya llamado
+    // está en EN_ATENCION, así que la cola lo excluye por el propio estado —
+    // ya no hace falta recordar un filtro extra en cada query.
     const { svc, findMany } = crearServicio();
     await svc.obtenerMonitor(5);
     const whereCola = findMany.mock.calls[0][0].where;
-    expect(whereCola.llamadoAt).toBeNull();
+    expect(whereCola.estado).toBe(EstadoPedido.REVISADO);
+    expect(whereCola.llamadoAt).toBeUndefined();
   });
 
-  it('el panel Atendiendo filtra por llamadoAt no nulo', async () => {
+  it('el panel Atendiendo filtra por el estado EN_ATENCION', async () => {
     const { svc, findMany } = crearServicio();
     await svc.obtenerMonitor(5);
     const whereAtendiendo = findMany.mock.calls[1][0].where;
-    expect(whereAtendiendo.llamadoAt).toEqual({ not: null });
+    expect(whereAtendiendo.estado).toBe(EstadoPedido.EN_ATENCION);
+    expect(whereAtendiendo.llamadoAt).toBeUndefined();
     // Conserva el gate de llegada: no se cuela un web que nunca avisó.
-    expect(whereAtendiendo.estado).toBe(EstadoPedido.EN_MOSTRADOR);
     expect(whereAtendiendo.OR).toBeDefined();
   });
 

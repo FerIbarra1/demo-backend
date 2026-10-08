@@ -1,8 +1,7 @@
 import { Controller, Post, Get, Body, Param, ParseIntPipe } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { PropuestaService } from './propuesta.service';
-import { CrearPropuestaDto, ResponderPropuestaDto } from './dto/propuesta.dto';
-import { MessagesService } from '../messages/messages.service';
+import { ResponderPropuestaDto } from './dto/propuesta.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -10,98 +9,35 @@ import { RolUsuario } from '@prisma/client';
 /**
  * F12/F13 (sep 2026): endpoints del flujo de propuesta/contrapropuesta.
  *
- * - Bodega envía propuesta:  `POST /bodega/pedidos/:id/propuesta`
- * - Ventas envía propuesta:  `POST /ventas/pedidos/:id/propuesta`
- * - Cliente responde:        `POST /cliente/pedidos/:id/propuesta/:propuestaId/respuesta`
- * - Admin fuerza:            `POST /admin/pedidos/:id/propuesta/:propuestaId/forzar`
+ * Oct 2026 — solo quedan los endpoints de RESPUESTA. Los de ENVÍO se eliminaron
+ * porque el flujo dejó de pasar por ellos:
+ *
+ * - Cliente responde:  `POST /cliente/pedidos/:id/propuesta/:propuestaId/respuesta`
+ * - Operador responde en nombre del cliente: `POST /mostrador/pedidos/:id/propuesta/:propuestaId/respuesta`
  * - Listar (cualquier rol autorizado): `GET /pedidos/:id/propuestas`
  *
- * El envío de ventas comparte el mismo service que el de bodega: la diferencia
- * (qué estados acepta, si exige asignación) se decide por el ROL del usuario.
- *
- * F14 (sep 2026): el endpoint de BODEGA delega a `MessagesService.crearConAdjunto`
- * para crear la propuesta Y el mensaje de chat con adjunto en la misma
- * transacción. Sin esto, la propuesta se creaba en BD pero el cliente no veía
- * nada en el chat — sólo el badge "Esperando tu aprobación" sin propuesta
- * visible. El flujo de ventas sigue usando `useMensajeConAdjunto` desde el
- * frontend, así que ese endpoint queda como está.
+ * La propuesta de bodega la genera el SERVIDOR al cerrar el surtido
+ * (`SurtidoService.confirmarSurtido`), y la del asesor viaja como adjunto de un
+ * mensaje (`MessagesService.crearConAdjunto`). Ver los comentarios de abajo.
  */
 @ApiTags('Pedidos - Propuestas')
 @ApiBearerAuth()
 @Controller()
 export class PropuestaController {
-  constructor(
-    private readonly propuestaService: PropuestaService,
-    private readonly messagesService: MessagesService,
-  ) {}
+  constructor(private readonly propuestaService: PropuestaService) {}
 
-  @Post('bodega/pedidos/:id/propuesta')
-  @Roles(RolUsuario.BODEGA, RolUsuario.ADMIN)
-  @ApiOperation({
-    summary:
-      'Bodega envía una propuesta (hay faltantes). Crea la PedidoPropuesta Y el ' +
-      'PedidoMensaje con adjunto en la misma transacción. El pedido pasa a ' +
-      'WAITING_CUSTOMER_APPROVAL, libera el slot del bodeguero y detiene el reloj de atención.',
-  })
-  async enviarPropuesta(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: CrearPropuestaDto,
-    @CurrentUser() user: any,
-  ) {
-    // El mensaje-con-adjunto es la fuente de verdad del chat del cliente;
-    // delegamos ahí para que ambos (propuesta + mensaje) queden consistentes.
-    const nota = dto.nota?.trim() || 'Te propongo estos ajustes.';
-    const resultado = await this.messagesService.crearConAdjunto(
-      id,
-      {
-        contenido: nota,
-        propuestaItems: dto.items.map((it) => ({
-          itemId: it.itemId,
-          // El DTO de entrada usa string (ClassValidator); el de adjunto
-          // exige el union literal. Cast explícito: ya validamos arriba.
-          tipo: it.tipo as 'completo' | 'cambio' | 'no-disponible' | 'parcial' | 'agregado',
-          producto: it.producto,
-          variante: it.variante,
-          // Se reenvían tal cual para que el snapshot guarde el item completo
-          // (imagen, productoId y el "antes" de cambio/parcial).
-          productoImagen: it.productoImagen,
-          cantidad: it.cantidad,
-          precioUnitario: it.precioUnitario,
-          subtotal: it.subtotal,
-          productoOriginal: it.productoOriginal,
-          varianteOriginal: it.varianteOriginal,
-          cantidadOriginal: it.cantidadOriginal,
-          productoNuevo: it.productoNuevo,
-          varianteNueva: it.varianteNueva,
-          cantidadNueva: it.cantidadNueva,
-          precioUnitarioNuevo: it.precioUnitarioNuevo,
-          subtotalNuevo: it.subtotalNuevo,
-          tempId: it.tempId,
-          productoId: it.productoId,
-          precioCOId: it.precioCOId,
-        })),
-        total: dto.total ?? 0,
-      },
-      user,
-    );
-    // `resultado` es el mensaje creado (la propuesta viene como adjunto). El
-    // frontend igual consume el adjunto por separado vía `propuesta-adjunto`.
-    return resultado;
-  }
-
-  @Post('ventas/pedidos/:id/propuesta')
-  @Roles(RolUsuario.VENTAS, RolUsuario.ADMIN)
-  @ApiOperation({
-    summary:
-      'El asesor de ventas envía una contrapropuesta al cliente (productos, cantidades o variantes distintas). El pedido debe estar EN_ASESORIA o re-negociando.',
-  })
-  async enviarPropuestaVentas(
-    @Param('id', ParseIntPipe) id: number,
-    @Body() dto: CrearPropuestaDto,
-    @CurrentUser() user: any,
-  ) {
-    return this.propuestaService.enviarPropuesta(id, dto, user);
-  }
+  // Oct 2026: `POST bodega/pedidos/:id/propuesta` se ELIMINÓ.
+  //
+  // Desde F17 el bodeguero ya no "envía" propuestas: marca los items del surtido
+  // y el servidor arma la propuesta solo (`SurtidoService.confirmarSurtido` →
+  // `construirPropuestaDeBodega`). El endpoint no tenía un solo caller en el
+  // frontend, y dejarlo era invitar a que alguien lo usara y creara una propuesta
+  // fuera del flujo — sin los cambios físicos aplicados ni el mensaje que la
+  // acompañaba.
+  //
+  // `POST ventas/pedidos/:id/propuesta` también se eliminó: el asesor manda su
+  // contrapropuesta por `POST pedidos/:id/mensajes/con-adjunto`, que crea el
+  // texto y la propuesta en una sola transacción.
 
   @Post('cliente/pedidos/:id/propuesta/:propuestaId/respuesta')
   @Roles(RolUsuario.CLIENTE, RolUsuario.ADMIN)
@@ -120,22 +56,54 @@ export class PropuestaController {
     return this.propuestaService.responderPropuesta(id, propuestaId, dto, user);
   }
 
-  @Post('admin/pedidos/:id/propuesta/:propuestaId/forzar')
-  @Roles(RolUsuario.ADMIN)
+  /**
+   * Oct 2026: el operador de mostrador responde EN NOMBRE del cliente.
+   *
+   * El caso: el cliente llega a tienda sin ticket y sin folio, y su pedido está
+   * esperando que apruebe una propuesta. Antes se quedaba atorado hasta que el
+   * cliente abriera la app — con el cliente enfrente.
+   *
+   * Reusa `PropuestaService.responderPropuestaDesdeMostrador`, que comparte
+   * toda la validación con el camino del cliente. Lo único que cambia es el
+   * mapa de decisiones legales: `DECISIONES_POR_ORIGEN[MOSTRADOR]` solo permite
+   * APROBAR y RECHAZAR (cancelar tiene su propio flujo con motivo y reposición;
+   * mandar a asesor es trabajo de ventas).
+   */
+  @Post('mostrador/pedidos/:id/propuesta/:propuestaId/respuesta')
+  @Roles(RolUsuario.MOSTRADOR, RolUsuario.ADMIN)
   @ApiOperation({
     summary:
-      'Admin fuerza la aprobación de una propuesta sin respuesta del cliente (caso excepcional). Registra auditoría.',
+      'Oct 2026: el operador de mostrador responde una propuesta en nombre del ' +
+      'cliente que tiene enfrente. Solo APROBAR y RECHAZAR.',
   })
-  async forzarAprobacion(
+  async responderPropuestaDesdeMostrador(
     @Param('id', ParseIntPipe) id: number,
     @Param('propuestaId', ParseIntPipe) propuestaId: number,
+    @Body() dto: ResponderPropuestaDto,
     @CurrentUser() user: any,
   ) {
-    return this.propuestaService.forzarAprobacion(id, propuestaId, user);
+    return this.propuestaService.responderPropuestaDesdeMostrador(id, propuestaId, dto, user);
   }
 
+  // Oct 2026: `POST admin/pedidos/:id/propuesta/:propuestaId/forzar` se eliminó.
+  //
+  // El service (`PropuestaService.forzarAprobacion`) se conserva: es la válvula
+  // de escape para el cliente que nunca responde, y el pedido quedaría atorado
+  // sin ella. Lo que se quitó fue el ENDPOINT, que no tenía UI en ninguna consola
+  // — nadie podía llamarlo. Si vuelve a hacer falta, se reexpone con su pantalla.
+
   @Get('pedidos/:id/propuestas')
-  @Roles(RolUsuario.BODEGA, RolUsuario.VENTAS, RolUsuario.ADMIN, RolUsuario.CLIENTE)
+  // Oct 2026: se agregó MOSTRADOR. El operador necesita VER la propuesta para
+  // poder explicársela al cliente que tiene enfrente y responderla en su
+  // nombre. Sin este rol, el endpoint le devolvía 403 y el botón "Ver la
+  // propuesta" del buscador no llevaba a nada.
+  @Roles(
+    RolUsuario.BODEGA,
+    RolUsuario.VENTAS,
+    RolUsuario.ADMIN,
+    RolUsuario.CLIENTE,
+    RolUsuario.MOSTRADOR,
+  )
   @ApiOperation({ summary: 'Lista las propuestas de un pedido (historial).' })
   async listarPropuestas(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.propuestaService.listarPropuestas(id, user);

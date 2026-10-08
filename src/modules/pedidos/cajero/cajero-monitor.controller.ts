@@ -14,7 +14,7 @@ export class CajeroMonitorController {
 
   /**
    * Snapshot del monitor de ventanillas: cajeros logueados (= ventanillas
-   * activas), los pedidos KIOSKO en PENDING_PAID asignados a cada uno y la
+   * activas), los pedidos KIOSKO en PENDIENTE_PAGO asignados a cada uno y la
    * cola sin asignar. Lo consume el TV cada 5s con polling + realtime.
    */
   @Get()

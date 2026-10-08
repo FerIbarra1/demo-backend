@@ -45,12 +45,18 @@ export class MostradorMonitorService {
 
     const ahora = new Date();
 
-    // Mismo gate que `MostradorService.obtenerCola` — si divergen, la TV y la
-    // consola mostrarían colas distintas y el operador llamaría a alguien que
-    // no está en la pantalla.
+    // Mismo gate de CANAL/LLEGADA que `MostradorQueryService.obtenerCola`: si
+    // divergieran, la TV y la consola mostrarían colas distintas y el operador
+    // llamaría a alguien que no está en la pantalla.
+    //
+    // F18: el ESTADO sí diverge a propósito. La TV separa la cola de espera
+    // (REVISADO) del panel "Atendiendo" (EN_ATENCION) — son dos paneles
+    // distintos y el cliente necesita ver esa diferencia. La consola del
+    // operador, en cambio, los muestra juntos: para él son la misma lista de
+    // trabajo (un pedido que ya está atendiendo sigue siendo suyo).
     const whereCola: Prisma.PedidoWhereInput = {
       tiendaId,
-      estado: EstadoPedido.EN_MOSTRADOR,
+      estado: EstadoPedido.REVISADO,
       OR: [
         { canalOrigen: CanalOrigen.KIOSKO },
         {
@@ -61,19 +67,34 @@ export class MostradorMonitorService {
       ],
     };
 
-    // F16: el panel "Atendiendo" son los pedidos que el operador ya mandó a
+    // F16/F17: el panel "Atendiendo" son los pedidos que el operador ya mandó a
     // llamar. Se consultan aparte de la cola (y no con un filtro en memoria)
     // porque la cola está paginada por el orden de llamada: si se colaran ahí,
     // el cliente ya llamado seguiría viéndose en la lista de espera.
+    //
+    // F17: el discriminador es el ESTADO (`EN_ATENCION`), no `llamadoAt`. Antes
+    // el panel era `llamadoAt IS NOT NULL` sobre REVISADO, lo que obligaba a
+    // recordar el filtro en cada query y hacía indistinguibles "llamado" y "en
+    // la plancha". El gate de llegada (kiosko siempre / web con aviso) se
+    // conserva: un pedido web sin aviso no debe aparecer ni en "Atendiendo".
     const whereAtendiendo: Prisma.PedidoWhereInput = {
-      ...whereCola,
-      llamadoAt: { not: null },
+      tiendaId,
+      estado: EstadoPedido.EN_ATENCION,
+      OR: [
+        { canalOrigen: CanalOrigen.KIOSKO },
+        {
+          canalOrigen: CanalOrigen.WEB,
+          llegadaAnunciadaAt: { not: null },
+          llegadaDescartadaAt: null,
+        },
+      ],
     };
 
     const [colaRaw, atendiendoRaw, listosParaEntregar, sinClienteRaw] = await Promise.all([
       this.prisma.pedido.findMany({
-        // La cola excluye a los ya llamados: están en el panel "Atendiendo".
-        where: { ...whereCola, llamadoAt: null },
+        // La cola es solo REVISADO: un pedido ya llamado está en EN_ATENCION,
+        // así que el estado por sí solo lo excluye.
+        where: whereCola,
         select: {
           id: true,
           numeroPedido: true,
@@ -114,13 +135,13 @@ export class MostradorMonitorService {
       this.prisma.pedido.count({
         where: {
           tiendaId,
-          estado: { in: [EstadoPedido.PAID, EstadoPedido.SHIPPED] },
+          estado: { in: [EstadoPedido.PAGADO, EstadoPedido.ENVIADO] },
         },
       }),
       // F16 (§5.4 del plan): pedidos listos que NADIE va a recoger.
       //
       // El gate de D5 esconde los pedidos web hasta que el cliente avisa
-      // llegada, así que un pedido web en EN_MOSTRADOR sin aviso es invisible
+      // llegada, así que un pedido web en REVISADO sin aviso es invisible
       // en la cola — y si el cliente nunca llega, se queda ahí para siempre sin
       // que nadie lo note. Este contador es la señal para que el operador (o el
       // admin) los persiga.
@@ -129,7 +150,7 @@ export class MostradorMonitorService {
       this.prisma.pedido.findMany({
         where: {
           tiendaId,
-          estado: EstadoPedido.EN_MOSTRADOR,
+          estado: EstadoPedido.REVISADO,
           canalOrigen: CanalOrigen.WEB,
           OR: [{ llegadaAnunciadaAt: null }, { llegadaDescartadaAt: { not: null } }],
         },

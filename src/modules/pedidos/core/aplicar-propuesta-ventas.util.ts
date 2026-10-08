@@ -243,7 +243,7 @@ export async function aplicarPropuestaDeVentas(
   // (un asesor que solo editó otros items), el pedido NO puede avanzar
   // — el guard de `confirmarSurtido` nunca se ejecuta en este camino y el
   // invariante "lo que se cobra es lo que se surtió" se rompería. El
-  // pedido vuelve a REVIEWING para que bodega lo cierre.
+  // pedido vuelve a EN_REVISION para que bodega lo cierre.
   const pendientesRestantes = await tx.itemPedido.count({
     where: {
       pedidoId: pedido.id,

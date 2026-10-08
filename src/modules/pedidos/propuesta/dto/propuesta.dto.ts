@@ -3,10 +3,13 @@ import {
   IsArray,
   IsIn,
   IsInt,
+  IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
+  MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
@@ -148,11 +151,31 @@ export class ResponderPropuestaDto {
   @IsIn(['APROBAR', 'RECHAZAR', 'CONTACTAR_ASESOR', 'CANCELAR_PEDIDO'])
   decision: DecisionPropuesta;
 
+  /**
+   * Oct 2026: el texto del cliente.
+   *
+   * OBLIGATORIO cuando pide ajustes (`CONTACTAR_ASESOR`). No es una nota
+   * interna: es el PRIMER mensaje del chat con el asesor y el único contexto
+   * que él recibe para saber qué ajustar. Sin él, el asesor abre la
+   * conversación con un "quiero ajustes" y nada más, y tiene que preguntar
+   * todo por chat — que es justo lo que este cambio evita.
+   *
+   * Opcional en el resto de las decisiones, donde sigue siendo el motivo libre
+   * que alimenta `PedidoPropuesta.notaCliente` (el motivo del rechazo, la
+   * cancelación con su lista de reposición).
+   */
   @ApiPropertyOptional({
-    description: 'Nota libre del cliente (motivo del rechazo, qué quiere negociar con el asesor).',
+    description:
+      'Texto del cliente. Obligatorio al pedir ajustes (CONTACTAR_ASESOR): ' +
+      'es el primer mensaje del chat con el asesor.',
   })
   @IsOptional()
   @IsString()
+  @MaxLength(4000)
+  @ValidateIf((o) => o.decision === 'CONTACTAR_ASESOR')
+  @IsNotEmpty({
+    message: 'Cuéntanos qué cambios quieres en tu pedido para que el asesor pueda hacer el ajuste.',
+  })
   nota?: string;
 }
 
@@ -171,6 +194,19 @@ export interface ItemPropuestaJson {
   itemId: number;
   tipo: 'completo' | 'cambio' | 'no-disponible' | 'parcial' | 'agregado';
   producto: string;
+  /**
+   * Oct 2026: el código del producto (ej. "C0200").
+   *
+   * Faltaba, y es el dato que el personal usa para identificar la prenda: en
+   * tienda la etiqueta física trae el código y el cliente compara contra lo que
+   * ve en pantalla. Sin él la tarjeta de la propuesta mostraba nombre, talla y
+   * color — todo lo que NO está impreso en la prenda.
+   *
+   * Se guarda en el snapshot (y no se resuelve en el frontend) para que cubra
+   * también los productos que el asesor AGREGA, que no existen en
+   * `pedido.items` y por tanto no tendrían de dónde sacarlo.
+   */
+  productoCodigo?: string | null;
   variante: string;
   productoImagen?: string | null;
   cantidad: number;

@@ -210,7 +210,7 @@ export class ClienteService {
       const numeroPedido = await this.state.generarNumeroPedido();
       try {
         // El pedido vive SOLO en la nube hasta que bodega confirma el surtido
-        // (confirmarSurtido → PENDING_PAID crea la entrada en pedidos_pendientes_envio).
+        // (confirmarSurtido → PENDIENTE_PAGO crea la entrada en pedidos_pendientes_envio).
         // Así Firebird sólo recibe pedidos con cantidades finales y no hace falta
         // re-sincronizar ajustes (trigger MOVPED eliminado).
         pedido = await this.prisma.pedido.create({
@@ -218,7 +218,7 @@ export class ClienteService {
             numeroPedido,
             usuarioId: usuario.userId,
             tiendaId,
-            estado: EstadoPedido.PENDING_REVIEW,
+            estado: EstadoPedido.SOLICITADO,
             canalOrigen: canalOrigenFinal,
             kioskoId: kioskoIdFinal,
             modoEntrega: modoEntregaFinal,
@@ -233,7 +233,7 @@ export class ClienteService {
             items: { create: itemsData },
             historial: {
               create: {
-                estadoNuevo: EstadoPedido.PENDING_REVIEW,
+                estadoNuevo: EstadoPedido.SOLICITADO,
                 observacion: kioskoIdFinal
                   ? `Pedido creado desde kiosko ${kioskoIdFinal}`
                   : 'Pedido creado por cliente',
@@ -271,7 +271,7 @@ export class ClienteService {
     }
 
     this.logger.log(
-      `Pedido ${pedido.numeroPedido} creado (PENDING_REVIEW, canal=${pedido.canalOrigen}, kioskoId=${pedido.kioskoId ?? '-'})`,
+      `Pedido ${pedido.numeroPedido} creado (SOLICITADO, canal=${pedido.canalOrigen}, kioskoId=${pedido.kioskoId ?? '-'})`,
     );
 
     // Realtime: notificar a la tienda (monitor + tablets de bodega).
@@ -313,6 +313,17 @@ export class ClienteService {
           },
           tienda: { select: { id: true, nombre: true } },
           kiosko: { select: { id: true, nombre: true } },
+          // F18 (oct 2026): las propuestas PENDIENTES, para que el badge de
+          // "Pendiente de aprobación" se derive del BACKEND.
+          //
+          // Antes no se incluían, así que el badge dependía de un evento
+          // realtime guardado en localStorage: si el cliente no tenía la app
+          // abierta cuando bodega cerró el surtido incompleto, NUNCA veía el
+          // badge — y al abrir el pedido no había nada que responder.
+          propuestas: {
+            where: { estado: 'PENDIENTE' },
+            select: { id: true, estado: true, creadaPorRol: true },
+          },
         },
         orderBy: { fechaPedido: 'desc' },
         skip,
@@ -379,7 +390,7 @@ export class ClienteService {
   async cancelarPedido(pedidoId: number, usuarioId: number, usuario: UserContext) {
     return this.state.cambiarEstado(
       pedidoId,
-      { nuevoEstado: EstadoPedido.CANCELLED, observacion: 'Cancelado por el cliente' },
+      { nuevoEstado: EstadoPedido.CANCELADO, observacion: 'Cancelado por el cliente' },
       usuario,
     );
   }
@@ -404,7 +415,7 @@ export class ClienteService {
       throw new NotFoundException('Pedido no encontrado');
     }
     // F16 (sep 2026): solo se puede avisar llegada cuando el pedido YA ESTÁ
-    // LISTO para revisarse en tienda (`EN_MOSTRADOR`), y solo si se recoge en
+    // LISTO para revisarse en tienda (`REVISADO`), y solo si se recoge en
     // tienda. Antes de eso el pedido no está apartado, así que avisar no
     // tendría sentido: el mostrador no tiene nada que mostrarle.
     //

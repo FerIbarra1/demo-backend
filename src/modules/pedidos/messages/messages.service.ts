@@ -6,6 +6,7 @@ import { UserContext } from '../../../types/pedido.types';
 import { CrearMensajeDto, CrearMensajeConAdjuntoDto, MarcarLeidoDto } from './dto/mensaje.dto';
 import { PropuestaService } from '../propuesta/propuesta.service';
 import { PedidoAccessService } from '../core/pedido-access.service';
+import { PedidoStateService } from '../core/pedido-state.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { MailService } from '../../mail/mail.service';
 import { ConfiguracionService } from '../../configuracion/configuracion.service';
@@ -30,6 +31,12 @@ export class MessagesService {
     private config: ConfigService,
     private propuesta: PropuestaService,
     private readonly configuracion: ConfiguracionService,
+    /**
+     * Oct 2026: para disparar los efectos de la transición que `enviarPropuesta`
+     * deja pendientes cuando corre dentro de nuestra transacción. Ver el
+     * comentario de `dispararEfectosDeTransicion`.
+     */
+    private state: PedidoStateService,
   ) {}
 
   /**
@@ -273,26 +280,35 @@ export class MessagesService {
     // decisiones legales tiene el cliente).
     //
     // Todo lo que sigue corre dentro de UNA transacción: la propuesta, la
-    // transición a WAITING_CUSTOMER_APPROVAL y el mensaje de chat que la
+    // transición a ESPERANDO_APROBACION y el mensaje de chat que la
     // muestra. El comentario de este método prometía esa atomicidad desde
     // F13, pero no la había: `enviarPropuesta` confirmaba su propia
     // transacción y el mensaje se creaba después, fuera de cualquiera. Si el
     // segundo create fallaba, el cliente quedaba con una propuesta pendiente
     // que no podía ver ni responder — justo el bug que se decía haber
     // arreglado.
-    const { mensaje, adjunto } = await this.prisma.$transaction(async (tx) => {
+    const { mensaje, adjunto, efectosTransicion } = await this.prisma.$transaction(async (tx) => {
       let adjunto: { tipo: 'propuesta'; propuestaId: number } | null = null;
+      // Efectos de la transición a ESPERANDO_APROBACION (realtime + correo).
+      // `enviarPropuesta` no puede dispararlos cuando corre dentro de esta tx:
+      // todavía no confirmó. Los emitimos nosotros después del commit.
+      let efectosTransicion:
+        | Parameters<PedidoStateService['dispararEfectosDeTransicion']>[1]
+        | null = null;
 
       if (dto.propuestaItems && dto.propuestaItems.length > 0) {
         // El service de propuestas hace todas las validaciones; nosotros sólo
         // creamos el `PedidoMensaje` con el id resultante en la misma tx.
-        const propuesta = await this.propuesta.enviarPropuesta(
+        const { propuesta, efectos } = await this.propuesta.enviarPropuesta(
           pedidoId,
           {
             items: dto.propuestaItems.map((it) => ({
               itemId: it.itemId,
               tipo: it.tipo,
               producto: it.producto,
+              // Oct 2026: el código viaja al snapshot. Es el dato con el que el
+              // personal identifica la prenda contra su etiqueta física.
+              productoCodigo: it.productoCodigo ?? null,
               variante: it.variante,
               // El snapshot es la fuente de verdad de lo que el cliente ve en
               // la tarjeta del chat, así que se guarda el item COMPLETO: la
@@ -324,7 +340,17 @@ export class MessagesService {
           tx,
         );
         adjunto = { tipo: 'propuesta', propuestaId: propuesta.id };
+        efectosTransicion = efectos;
       }
+
+      // Oct 2026: si trae propuesta pero el texto viene vacío, usar uno por
+      // defecto. Sin esto el chat muestra una burbuja vacía que parece un error.
+      const contenidoFinal =
+        dto.contenido && dto.contenido.trim()
+          ? dto.contenido
+          : adjunto
+            ? 'Te envío una nueva propuesta'
+            : dto.contenido;
 
       // 3. Crear el mensaje con el adjunto, en la misma transacción.
       const mensaje = await tx.pedidoMensaje.create({
@@ -333,15 +359,26 @@ export class MessagesService {
           itemId: null,
           autorId: usuario.userId,
           autorRol: usuario.rol,
-          contenido: dto.contenido,
+          contenido: contenidoFinal,
           visibleParaCliente: true, // el nuevo endpoint siempre es visible al cliente
           adjunto: adjunto ?? undefined,
         },
         include: { autor: { select: { id: true, nombre: true, rol: true } } },
       });
 
-      return { mensaje, adjunto };
+      return { mensaje, adjunto, efectosTransicion };
     });
+
+    // Oct 2026: disparar los efectos de la transición, AHORA que la transacción
+    // confirmó. Es el contrato que `cambiarEstado` documenta para los callers
+    // que pasan `opts.tx`, y que este método no cumplía: la contrapropuesta del
+    // asesor movía el pedido a ESPERANDO_APROBACION y el cliente NUNCA recibía
+    // el correo `REVISION_PROPUESTA`, porque el efecto se quedaba en el objeto
+    // de retorno. El realtime sí llegaba (lo emite este método más abajo), así
+    // que el bug era invisible desde la app.
+    if (efectosTransicion) {
+      this.state.dispararEfectosDeTransicion(pedidoId, efectosTransicion);
+    }
 
     // 4. Realtime: el cliente y el room del pedido reciben el mensaje con su
     // `adjunto` para que el chat sepa qué renderizar.

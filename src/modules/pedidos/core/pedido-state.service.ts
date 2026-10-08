@@ -25,128 +25,161 @@ import { EstadoPedido, TipoNotificacion, Prisma, RolUsuario } from '@prisma/clie
  * (`POST /admin/pedidos/:id/marcar-pagado`).
  *
  * ─────────────────────────────────────────────────────────────────────────
- * FLUJO COMPLETO (F16, sep 2026): el pedido pasa por MOSTRADOR antes de pagar
- * ─────────────────────────────────────────────────────────────────────────
+ * FLUJO COMPLETO (F16 sep 2026 · F17 oct 2026)
+ * ─────────────────────��───────────────────────────────────────────────────
  *
- *   PENDING_REVIEW → REVIEWING → EN_MOSTRADOR → PENDING_PAID → PAID → COMPLETED
- *                        │            │
- *                        │            ├─→ REVIEWING   (el cliente pidió cambios)
- *                        │            └─→ CANCELLED   (+ lista de reposición)
- *                        │
- *                        └─→ PENDING_PAID  (solo DOMICILIO: salta mostrador)
+ * F17: los estados se llaman como los llama el NEGOCIO. Antes el enum decía
+ * PENDING_REVIEW / EN_MOSTRADOR y el piso decía "solicitado" y "la plancha";
+ * cuando código y pantalla dicen distinto, cada conversación necesita una
+ * traducción mental y los bugs se esconden ahí.
+ *
+ *   1 SOLICITADO            el cliente lo creó. En cola de bodega.
+ *   2 EN_REVISION           un bodeguero lo tomó y lo está surtiendo.
+ *   3 REVISADO              LA PLANCHA. La bolsa con el ticket está en la mesa
+ *                           de mostrador. Un pedido INCOMPLETO también llega
+ *                           aquí: el sistema ya creó la propuesta.
+ *   4 EN_ATENCION           el operador llamó al cliente y lo está atendiendo.
+ *   5 PENDIENTE_PAGO        se envió a pagar. AQUÍ entra al ERP.
+ *   6 PAGADO                cobrado en VFP.
+ *   7 (listo para entregar) PAGADO sin domicilio.
+ *   8 ENTREGADO             cerrado.
+ *
+ *   SOLICITADO → EN_REVISION → REVISADO → EN_ATENCION → PENDIENTE_PAGO → PAGADO → ENTREGADO
+ *                    │            │            │
+ *                    │            │            └─�� REVISADO   (deshacer la llamada)
+ *                    │            ├─→ EN_REVISION   (el cliente pidió cambios)
+ *                    │            └─→ CANCELADO     (+ lista de reposición)
+ *                    └─→ PENDIENTE_PAGO  (solo DOMICILIO: salta mostrador)
  *
  * El negocio necesitaba que el cliente viera y aprobara los productos en tienda
  * antes de pagar, porque muchos piden más cosas o cambian algo al verlos.
  *
- * DOS INVARIANTES que sostienen el diseño:
+ * TRES INVARIANTES que sostienen el diseño:
  *
  *   1. **El ERP solo ve pedidos liberados por mostrador.** El encolado a
- *      Firebird (`encolarFirebird: true`) ocurre al pasar a PENDING_PAID, y a
- *      ese estado solo se llega liberando desde EN_MOSTRADOR (o por el camino
- *      de domicilio). Así un ajuste o cancelación en mostrador nunca deja al
- *      ERP desincronizado: el pedido todavía no existe allá.
+ *      Firebird (`encolarFirebird: true`) ocurre al pasar a PENDIENTE_PAGO, y a
+ *      ese estado solo se llega liberando desde REVISADO/EN_ATENCION (o por el
+ *      camino de domicilio). Así un ajuste o cancelación en mostrador nunca
+ *      deja al ERP desincronizado: el pedido todavía no existe allá.
  *
- *   2. **PENDING_PAID ⟺ fila en `PedidoPendienteEnvio`.** Un pedido en ese
+ *   2. **PENDIENTE_PAGO ⟺ fila en `PedidoPendienteEnvio`.** Un pedido en ese
  *      estado sin fila es invisible al agente, nunca recibe folio y se queda
  *      atascado para siempre. Por eso `encolarFirebird` es obligatorio ahí.
  *      La decisión vive en `destinoTrasSurtido` (core/destino-post-surtido.util)
  *      para que los tres caminos que cierran la verificación no puedan divergir.
  *
+ *   3. **El cierre de surtido es UN SOLO PASO (F17).** El bodeguero marca los
+ *      items y aprieta "Terminar surtido"; el sistema decide. Un pedido
+ *      incompleto TAMBIÉN va a REVISADO —la bolsa ya está en la mesa— y la
+ *      propuesta se crea automáticamente (`core/propuesta-bodega.util.ts`).
+ *      Antes esto lanzaba un 400 pidiendo "envía la propuesta y espera", que
+ *      contradecía el piso: el bodeguero quedaba con un pedido abierto que
+ *      físicamente ya había entregado a mostrador.
+ *
  * Los pedidos a DOMICILIO saltan mostrador: no tiene sentido mostrarle el
- * pedido a un cliente que no está en la tienda. Van REVIEWING → PENDING_PAID
- * directo, con el encolado inmediato.
+ * pedido a un cliente que no está en la tienda. Van EN_REVISION →
+ * PENDIENTE_PAGO directo, con el encolado inmediato.
  *
  * ─────────────────────────────────────────────────────────────────────────
  *
- * F13 (sep 2026): los arcos que salen de WAITING_CUSTOMER_APPROVAL se
+ * F13 (sep 2026): los arcos que salen de ESPERANDO_APROBACION se
  * distinguen por DESTINO, no por valores nuevos de enum:
  *
- *   → EN_MOSTRADOR   cliente APROBÓ una propuesta de BODEGA (o de VENTAS que
+ *   → REVISADO       cliente APROBÓ una propuesta de BODEGA (o de VENTAS que
  *                    no dejó items pendientes). Bodega ya verificó físicamente
  *                    lo que propuso; el cliente lo revisa antes de pagar.
- *   → PENDING_PAID   el camino de DOMICILIO (no pasa por mostrador).
- *   → REVIEWING      cliente APROBÓ una propuesta de VENTAS y quedaron items
+ *   → PENDIENTE_PAGO el camino de DOMICILIO (no pasa por mostrador).
+ *   → EN_REVISION    cliente APROBÓ una propuesta de VENTAS y quedaron items
  *                    nuevos por surtir. Vuelve a bodega SIN ASIGNAR.
  *   → EN_ASESORIA    cliente pidió asesor (propuesta de bodega), o rechazó una
  *                    propuesta de VENTAS y quiere re-negociar.
- *   → CANCELLED      cliente rechazó una propuesta de BODEGA, o canceló
+ *   → CANCELADO      cliente rechazó una propuesta de BODEGA, o canceló
  *                    explícitamente.
  *
- * F16 (sep 2026): el pedido pasa por MOSTRADOR antes de pagar. El negocio
- * necesitaba que el cliente viera y aprobara los productos en tienda antes de
- * pagar, porque muchos piden más cosas o cambian algo al verlos.
- *
- *   → EN_MOSTRADOR   bodega (o ventas) terminó de verificar. El pedido está
- *                    apartado esperando que el cliente lo revise. NO está
- *                    encolado a Firebird todavía.
- *   EN_MOSTRADOR →   PENDING_PAID (liberar: AQUÍ entra al ERP),
- *                    REVIEWING (ajustar: el cliente cambió algo),
- *                    CANCELLED (cancelar + reposición).
- *
  * Los pedidos a DOMICILIO saltan mostrador: no tiene sentido mostrarle el
- * pedido a un cliente que no está en la tienda. Van REVIEWING → PENDING_PAID
- * directo, como antes.
+ * pedido a un cliente que no está en la tienda. Van EN_REVISION →
+ * PENDIENTE_PAGO directo, como antes.
  */
 const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
-  [EstadoPedido.PENDING_REVIEW]: [EstadoPedido.REVIEWING, EstadoPedido.CANCELLED],
-  [EstadoPedido.REVIEWING]: [
-    // REVIEWING → WAITING_CUSTOMER_APPROVAL: lo dispara PropuestaService
+  [EstadoPedido.SOLICITADO]: [EstadoPedido.EN_REVISION, EstadoPedido.CANCELADO],
+  [EstadoPedido.EN_REVISION]: [
+    // EN_REVISION → ESPERANDO_APROBACION: lo dispara PropuestaService
     // cuando bodega envía una propuesta (hay faltantes).
-    EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-    // F16: REVIEWING → EN_MOSTRADOR es la transición normal de bodega para
+    EstadoPedido.ESPERANDO_APROBACION,
+    // F16: EN_REVISION → REVISADO es la transición normal de bodega para
     // pedidos que se recogen en tienda (KIOSKO / RECOGER_TIENDA).
-    EstadoPedido.EN_MOSTRADOR,
-    // REVIEWING → PENDING_PAID: se CONSERVA, pero sólo para DOMICILIO. Un
+    EstadoPedido.REVISADO,
+    // EN_REVISION → PENDIENTE_PAGO: se CONSERVA, pero sólo para DOMICILIO. Un
     // pedido a domicilio no pasa por mostrador (el cliente no está en tienda).
     // También lo dispara SurtidoService.confirmarSurtido cuando la bodega
     // cierra el surtido SIN faltantes.
-    EstadoPedido.PENDING_PAID,
-    EstadoPedido.CANCELLED,
+    EstadoPedido.PENDIENTE_PAGO,
+    EstadoPedido.CANCELADO,
   ],
   // F13: el cliente decide sobre una propuesta. El destino depende del origen
   // de la propuesta y de la decisión — ver el comentario de arriba.
   // F16: el destino de "aprobó y no queda nada por surtir" pasó de
-  // PENDING_PAID a EN_MOSTRADOR para pedidos de tienda.
-  [EstadoPedido.WAITING_CUSTOMER_APPROVAL]: [
-    EstadoPedido.EN_MOSTRADOR,
-    EstadoPedido.PENDING_PAID,
-    EstadoPedido.REVIEWING,
+  // PENDIENTE_PAGO a REVISADO para pedidos de tienda.
+  [EstadoPedido.ESPERANDO_APROBACION]: [
+    EstadoPedido.REVISADO,
+    EstadoPedido.PENDIENTE_PAGO,
+    EstadoPedido.EN_REVISION,
     EstadoPedido.EN_ASESORIA,
-    EstadoPedido.CANCELLED,
+    EstadoPedido.CANCELADO,
   ],
   // F13: el pedido está en manos del asesor de ventas de la tienda. Sale de
   // aquí cuando el vendedor manda una contrapropuesta (→ WAITING_CUSTOMER_
   // APPROVAL), cuando determina que el pedido original estaba bien y lo
-  // devuelve a bodega (→ REVIEWING), o cuando se cancela.
-  // F16: también puede ir a EN_MOSTRADOR si la contrapropuesta no dejó items
+  // devuelve a bodega (→ EN_REVISION), o cuando se cancela.
+  // F16: también puede ir a REVISADO si la contrapropuesta no dejó items
   // pendientes y el pedido se recoge en tienda.
   [EstadoPedido.EN_ASESORIA]: [
-    EstadoPedido.WAITING_CUSTOMER_APPROVAL,
-    EstadoPedido.REVIEWING,
-    EstadoPedido.EN_MOSTRADOR,
-    EstadoPedido.CANCELLED,
+    EstadoPedido.ESPERANDO_APROBACION,
+    EstadoPedido.EN_REVISION,
+    EstadoPedido.REVISADO,
+    EstadoPedido.CANCELADO,
   ],
-  // F16: el pedido está apartado en mostrador esperando que el cliente lo
-  // revise. Las tres salidas son las acciones del operador:
-  //   → PENDING_PAID  liberar (AQUÍ se encola a Firebird: el ERP sólo ve
-  //                   pedidos que el cliente ya confirmó).
-  //   → REVIEWING     ajustar (el cliente pidió cambios; bodega re-surte).
+  // F16/F17: EL ÁREA DE ENTREGA. El pedido está apartado en la mesa esperando
+  // al cliente. Las cinco salidas son:
+  //   → EN_ATENCION   llamar (el operador lo manda a llamar por la TV).
+  //   → PENDIENTE_PAGO enviar a pagar (AQUÍ se encola a Firebird: el ERP sólo
+  //                   ve pedidos que el cliente ya confirmó).
+  //   → EN_REVISION   ajustar (el cliente pidió cambios; bodega re-surte).
   //                   Requiere opts.asignacion explícito por el guard de
   //                   `cambiarEstado` — el caller NO es un bodeguero.
-  //   → CANCELLED     cancelar (crea la lista de reposición en la misma tx).
-  [EstadoPedido.EN_MOSTRADOR]: [
-    EstadoPedido.PENDING_PAID,
-    EstadoPedido.REVIEWING,
-    EstadoPedido.CANCELLED,
+  //   → ESPERANDO_APROBACION  F18: el cliente NO está y el pedido quedó
+  //                   incompleto, así que tiene que decidir en su app.
+  //                   También es el destino cuando el operador devuelve un
+  //                   pedido al área de entrega sin resolver el faltante.
+  //   → CANCELADO     cancelar (crea la lista de reposición en la misma tx).
+  [EstadoPedido.REVISADO]: [
+    EstadoPedido.EN_ATENCION,
+    EstadoPedido.PENDIENTE_PAGO,
+    EstadoPedido.EN_REVISION,
+    EstadoPedido.ESPERANDO_APROBACION,
+    EstadoPedido.CANCELADO,
   ],
-  [EstadoPedido.PENDING_PAID]: [EstadoPedido.PAID, EstadoPedido.CANCELLED],
+  // F17: el operador llamó al cliente y lo está atendiendo (el recuento con
+  // ��l enfrente). Salidas:
+  //   → REVISADO      deshacer la llamada (el cliente no llegó o se equivocó
+  //                   el folio). Antes esto sólo limpiaba `llamadoAt`.
+  //   → EN_REVISION   ajustar durante el recuento.
+  //   → PENDIENTE_PAGO enviar a pagar (el camino feliz).
+  //   → CANCELADO.
+  [EstadoPedido.EN_ATENCION]: [
+    EstadoPedido.REVISADO,
+    EstadoPedido.EN_REVISION,
+    EstadoPedido.PENDIENTE_PAGO,
+    EstadoPedido.CANCELADO,
+  ],
+  [EstadoPedido.PENDIENTE_PAGO]: [EstadoPedido.PAGADO, EstadoPedido.CANCELADO],
   // PAID → SHIPPED sólo aplica a pedidos a domicilio (con shippingDireccion).
   // Kiosko y web recoger en tienda saltan directo a COMPLETED vía el módulo
   // Mostrador. La validación de shippingDireccion ocurre en `marcarEnviado`.
-  [EstadoPedido.PAID]: [EstadoPedido.SHIPPED, EstadoPedido.COMPLETED, EstadoPedido.CANCELLED],
-  [EstadoPedido.SHIPPED]: [EstadoPedido.COMPLETED, EstadoPedido.CANCELLED],
-  [EstadoPedido.COMPLETED]: [],
-  [EstadoPedido.CANCELLED]: [],
+  [EstadoPedido.PAGADO]: [EstadoPedido.ENVIADO, EstadoPedido.ENTREGADO, EstadoPedido.CANCELADO],
+  [EstadoPedido.ENVIADO]: [EstadoPedido.ENTREGADO, EstadoPedido.CANCELADO],
+  [EstadoPedido.ENTREGADO]: [],
+  [EstadoPedido.CANCELADO]: [],
 };
 
 /**
@@ -156,7 +189,7 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
  * original. El caso crítico es `asignacion`: el default histórico asignaba el
  * pedido a quien transicionaba, lo cual es correcto cuando un bodeguero toma
  * un pedido pero es un landmine cuando el CLIENTE aprueba una propuesta y el
- * pedido vuelve a REVIEWING — quedaría asignado a un cliente, invisible en el
+ * pedido vuelve a EN_REVISION — quedaría asignado a un cliente, invisible en el
  * monitor de bodega y bloqueado para todos los bodegueros.
  */
 export interface CambiarEstadoOpts {
@@ -167,7 +200,7 @@ export interface CambiarEstadoOpts {
    *   - 'limpiar'  → dejar sin asignar (el pedido vuelve a la cola).
    *   - 'mantener' → no tocar la asignación actual.
    *
-   * REQUERIDO cuando el destino es REVIEWING: no hay default seguro, porque
+   * REQUERIDO cuando el destino es EN_REVISION: no hay default seguro, porque
    * 'caller' con un caller que no es bodeguero corrompe la asignación.
    */
   asignacion?: 'caller' | 'limpiar' | 'mantener';
@@ -181,7 +214,7 @@ export interface CambiarEstadoOpts {
   reloj?: 'pausar' | 'reanudar' | 'detener' | 'mantener';
   /**
    * Si true, encola el pedido a Firebird DENTRO de la misma transacción.
-   * Obligatorio para toda transición a PENDING_PAID: un pedido en ese estado
+   * Obligatorio para toda transición a PENDIENTE_PAGO: un pedido en ese estado
    * sin fila en `PedidoPendienteEnvio` es invisible para el agente, nunca
    * recibe folio y se queda atascado para siempre.
    */
@@ -201,6 +234,25 @@ export interface CambiarEstadoOpts {
    * la propuesta, transicionar y crear el mensaje como una sola unidad.
    */
   tx?: Prisma.TransactionClient;
+  /**
+   * Oct 2026: permite llamar a `cambiarEstado` con el estado que el pedido YA
+   * tiene, ejecutando los `efectos` sin escribir estado ni historial.
+   *
+   * El caso que lo motivó: el operador de mostrador resuelve la propuesta de un
+   * pedido que ya está en `REVISADO` (el cliente está enfrente y bodega reportó
+   * faltantes). `aprobarPropuestaBodega` calcula su destino con
+   * `destinoTrasSurtido`, que para pedidos de tienda devuelve `REVISADO` — el
+   * mismo estado. Sin esta opción, `cambiarEstado` lanzaba
+   * "Transición no permitida: REVISADO → REVISADO" y el operador se quedaba sin
+   * salida: la propuesta seguía viva y `enviarAPagar` bloqueado.
+   *
+   * NO se agregó `REVISADO` a `TRANSICIONES[REVISADO]` a propósito: eso dejaría
+   * que cualquier caller "transicione" al mismo estado y ensucie el historial
+   * con filas que no describen ningún cambio. Aquí la intención es explícita y
+   * el caller se compromete a escribir su propia fila de historial si quiere
+   * dejar rastro.
+   */
+  permitirMismoEstado?: boolean;
 }
 
 /**
@@ -242,7 +294,7 @@ export class PedidoStateService {
    *
    * F13: las `opts` existen porque el flujo nuevo tiene arcos que no se
    * comportan como el original (ver `CambiarEstadoOpts`). Antes de F13 este
-   * método SIEMPRE asignaba el pedido al caller al ir a REVIEWING, lo cual es
+   * método SIEMPRE asignaba el pedido al caller al ir a EN_REVISION, lo cual es
    * correcto para un bodeguero que toma un pedido pero corrompe la asignación
    * cuando el caller es el cliente aprobando una propuesta.
    */
@@ -263,6 +315,9 @@ export class PedidoStateService {
     // aquí: los dispara el caller dueño de la transacción, después de
     // confirmarla. Si los emitiéramos ahora, saldrían antes del commit.
     if (opts.tx) {
+      // Con tx del caller se devuelve TAMBIÉN los efectos: la transacción aún no
+      // confirmó, así que no se pueden disparar aquí. El caller está obligado a
+      // llamar a `dispararEfectosDeTransicion` después de su commit.
       return this.ejecutarCambio(opts.tx, pedidoId, dto, usuario, opts);
     }
 
@@ -274,12 +329,38 @@ export class PedidoStateService {
   }
 
   /**
-   * Emite el realtime y la notificación de una transición ya confirmada.
+   * Emite el realtime y la notificación de una transacción ya confirmada.
    *
    * Vive fuera de `ejecutarCambio` a propósito: emitir dentro del callback de
    * `$transaction` es emitir antes del commit, así que un rollback posterior
    * dejaba a los clientes con un evento de un cambio que nunca ocurrió.
+   *
+   * Oct 2026 — PÚBLICO, y no es un detalle de estilo: cuando el caller pasa
+   * `opts.tx`, `cambiarEstado` NO puede disparar los efectos (la transacción
+   * todavía no confirmó), así que se los devuelve para que los dispare él. Ese
+   * contrato vivía solo en un comentario, y `MessagesService.crearConAdjunto`
+   * —el único caller que usa `tx`— nunca lo cumplió: la contrapropuesta del
+   * asesor transicionaba el pedido a ESPERANDO_APROBACION y **el cliente jamás
+   * recibía el correo**, porque el `REVISION_PROPUESTA` que la máquina de
+   * estados habría disparado se quedaba en el objeto de retorno.
+   *
+   * Un caller que use `opts.tx` está obligado a llamar a esto después de su
+   * commit. El parámetro es lo que devuelve `cambiarEstado` en esa rama.
    */
+  dispararEfectosDeTransicion(
+    pedidoId: number,
+    efectos: {
+      tiendaId: number;
+      estadoAnterior: EstadoPedido;
+      estadoNuevo: EstadoPedido;
+      invalidarMonitor: boolean;
+      notifTipo: TipoNotificacion | null;
+      sinCambioDeEstado?: boolean;
+    },
+  ): void {
+    this.dispararEfectos(pedidoId, efectos);
+  }
+
   private dispararEfectos(
     pedidoId: number,
     e: {
@@ -288,18 +369,29 @@ export class PedidoStateService {
       estadoNuevo: EstadoPedido;
       invalidarMonitor: boolean;
       notifTipo: TipoNotificacion | null;
+      /**
+       * Oct 2026: true cuando el pedido YA estaba en `estadoNuevo` y solo se
+       * aplicaron los `efectos` (`opts.permitirMismoEstado`). El emisor lo usa
+       * para NO anunciar un cambio de estado que no ocurrió.
+       */
+      sinCambioDeEstado?: boolean;
     },
   ): void {
-    this.realtime.emitToTienda(e.tiendaId, 'pedido.estado', {
-      id: pedidoId,
-      estadoAnterior: e.estadoAnterior,
-      estadoNuevo: e.estadoNuevo,
-    });
-    this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
-      id: pedidoId,
-      estadoAnterior: e.estadoAnterior,
-      estadoNuevo: e.estadoNuevo,
-    });
+    // Sin cambio real de estado no se emite `pedido.estado`: los clientes
+    // recargarían y verían el mismo estado, y peor, un cliente que escucha ese
+    // evento para avanzar su UI creería que hubo un avance.
+    if (!e.sinCambioDeEstado) {
+      this.realtime.emitToTienda(e.tiendaId, 'pedido.estado', {
+        id: pedidoId,
+        estadoAnterior: e.estadoAnterior,
+        estadoNuevo: e.estadoNuevo,
+      });
+      this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
+        id: pedidoId,
+        estadoAnterior: e.estadoAnterior,
+        estadoNuevo: e.estadoNuevo,
+      });
+    }
     // F13: los monitores (bodega/cajeros) no reaccionan a `pedido.estado`;
     // necesitan este evento para recomputar slots y colas.
     if (e.invalidarMonitor) {
@@ -337,27 +429,37 @@ export class PedidoStateService {
       const estadoAnterior = pedido.estado;
       const estadoNuevo = dto.nuevoEstado;
 
-      const permitidas = TRANSICIONES[estadoAnterior];
-      if (!permitidas.includes(estadoNuevo)) {
-        throw new BadRequestException(
-          `Transición no permitida: ${estadoAnterior} → ${estadoNuevo}`,
-        );
+      // Oct 2026: `permitirMismoEstado` deja pasar el caso "el destino es el
+      // estado que el pedido ya tiene". No es una transición: no se escribe
+      // estado, no se escribe historial de transición y no se notifica al
+      // cliente. Solo corren los `efectos` (aplicar los items de la propuesta
+      // que el operador acaba de resolver). Ver `CambiarEstadoOpts`.
+      const esMismoEstado = estadoAnterior === estadoNuevo;
+      const saltarTransicion = esMismoEstado && opts.permitirMismoEstado === true;
+
+      if (!saltarTransicion) {
+        const permitidas = TRANSICIONES[estadoAnterior];
+        if (!permitidas.includes(estadoNuevo)) {
+          throw new BadRequestException(
+            `Transición no permitida: ${estadoAnterior} → ${estadoNuevo}`,
+          );
+        }
       }
 
-      // F13: ir a REVIEWING sin decir qué hacer con la asignación es un bug
+      // F13: ir a EN_REVISION sin decir qué hacer con la asignación es un bug
       // latente (el pedido podría quedar asignado a un cliente). Exigimos
       // que el caller sea explícito.
-      if (estadoNuevo === EstadoPedido.REVIEWING && !opts.asignacion) {
+      if (estadoNuevo === EstadoPedido.EN_REVISION && !opts.asignacion) {
         throw new BadRequestException(
-          'Transición a REVIEWING requiere opts.asignacion explícito ' +
+          'Transición a EN_REVISION requiere opts.asignacion explícito ' +
             "('caller' si un bodeguero lo toma, 'limpiar' si vuelve a la cola, " +
             "'mantener' si se conserva la asignación actual).",
         );
       }
 
-      // INVARIANTE: `PENDING_PAID ⟺ fila en PedidoPendienteEnvio`.
+      // INVARIANTE: `PENDIENTE_PAGO ⟺ fila en PedidoPendienteEnvio`.
       //
-      // Un pedido en PENDING_PAID sin fila en la cola del ERP es invisible al
+      // Un pedido en PENDIENTE_PAGO sin fila en la cola del ERP es invisible al
       // agente, nunca recibe folio y se queda atascado para siempre. El
       // comentario de `encolarFirebird` ya lo declaraba obligatorio, pero nada
       // lo verificaba: un caller futuro que lo omitiera producía exactamente
@@ -366,14 +468,14 @@ export class PedidoStateService {
       // Se comprueba aquí y no en cada caller para que ninguna transición
       // nueva pueda olvidarlo. Si el pedido YA tiene fila (p. ej. la creó una
       // transición anterior) no hace falta volver a encolar.
-      if (estadoNuevo === EstadoPedido.PENDING_PAID && !opts.encolarFirebird) {
+      if (estadoNuevo === EstadoPedido.PENDIENTE_PAGO && !opts.encolarFirebird) {
         const yaEncolado = await tx.pedidoPendienteEnvio.findFirst({
           where: { pedidoId },
           select: { id: true },
         });
         if (!yaEncolado) {
           throw new BadRequestException(
-            'Transición a PENDING_PAID requiere opts.encolarFirebird: un pedido ' +
+            'Transición a PENDIENTE_PAGO requiere opts.encolarFirebird: un pedido ' +
               'en ese estado sin fila en la cola del ERP es invisible al agente ' +
               'y se queda atascado para siempre.',
           );
@@ -382,17 +484,35 @@ export class PedidoStateService {
 
       const ahora = new Date();
       const result = await tx.pedido.updateMany({
+        // El guard de estado se conserva incluso en el camino de "mismo
+        // estado": si el pedido cambió mientras se procesaba, hay que abortar
+        // igual (TOCTOU). Lo que se omite en ese camino es ESCRIBIR el estado,
+        // no la comprobación.
         where: { id: pedidoId, estado: estadoAnterior },
         data: {
-          estado: estadoNuevo,
+          // En el camino de "mismo estado" no se reescribe `estado`: sería un
+          // no-op que ensucia el `updatedAt` y hace creer que hubo un cambio.
+          ...(saltarTransicion ? {} : { estado: estadoNuevo }),
           ...this.cambiosDeAsignacion(opts.asignacion, usuario, ahora),
           ...this.cambiosDeReloj(opts.reloj, pedido, ahora),
-          // F16: "Atendiendo" solo tiene sentido dentro de EN_MOSTRADOR. Al
-          // salir (a pago, a bodega o a cancelado) el panel de la TV debe
-          // vaciarse solo — si no, un folio ya cobrado seguiría anunciado como
-          // "te toca". Se limpia aquí y no en cada caller para que ninguna
-          // transición futura pueda olvidarlo.
-          ...(estadoNuevo !== EstadoPedido.EN_MOSTRADOR ? { llamadoAt: null } : {}),
+          // F17: `llamadoAt` (auditoría de la llamada) solo tiene sentido
+          // mientras el folio está anunciado en la TV, es decir en
+          // REVISADO/EN_ATENCION. Al salir (a pago, a bodega o a cancelado) el
+          // panel "Atendiendo" debe vaciarse solo — si no, un folio ya cobrado
+          // seguiría anunciado como "te toca". Se limpia aquí y no en cada
+          // caller para que ninguna transición futura pueda olvidarlo.
+          //
+          // Oct 2026 — el caso `EN_ATENCION → REVISADO`: el operador resuelve la
+          // propuesta del cliente que tiene enfrente y el pedido vuelve a la
+          // cola. El destino SÍ es REVISADO, así que la regla de arriba no
+          // aplicaba y el `llamadoAt` sobrevivía: el pedido volvía a la lista de
+          // espera pero la TV lo seguía mostrando como "atendido". Salir de
+          // EN_ATENCION significa que la llamada terminó, sin importar a dónde
+          // se vaya.
+          ...(estadoNuevo !== EstadoPedido.REVISADO ||
+          estadoAnterior === EstadoPedido.EN_ATENCION
+            ? { llamadoAt: null }
+            : {}),
         },
       });
       if (result.count !== 1) {
@@ -403,12 +523,12 @@ export class PedidoStateService {
 
       // Efectos de dominio (ej. aplicar los items de una propuesta aceptada)
       // en la MISMA transacción que la transición: si fallan, no queda un
-      // pedido en PENDING_PAID con items a medio aplicar.
+      // pedido en PENDIENTE_PAGO con items a medio aplicar.
       if (opts.efectos) {
         await opts.efectos(tx);
       }
 
-      // F13: un pedido en PENDING_PAID sin fila en la cola de Firebird es
+      // F13: un pedido en PENDIENTE_PAGO sin fila en la cola de Firebird es
       // invisible para el agente y se queda atascado para siempre. Se encola
       // aquí, dentro de la tx, para que estado y cola sean atómicos.
       if (opts.encolarFirebird) {
@@ -422,20 +542,31 @@ export class PedidoStateService {
         throw new NotFoundException('Pedido no encontrado');
       }
 
-      await tx.historialPedido.create({
-        data: {
-          pedidoId,
-          estadoAnterior,
-          estadoNuevo,
-          observacion: dto.observacion || `Cambio de estado por ${usuario.nombre}`,
-          usuarioId: usuario.userId,
-          usuarioNombre: usuario.nombre,
-        },
-      });
+      // En el camino de "mismo estado" NO se escribe historial de transición:
+      // no hubo transición. El caller que lo necesite (para dejar constancia de
+      // que el operador resolvió el faltante) escribe su propia fila — así el
+      // texto puede decir QUÉ pasó y no un genérico "X → X".
+      if (!saltarTransicion) {
+        await tx.historialPedido.create({
+          data: {
+            pedidoId,
+            estadoAnterior,
+            estadoNuevo,
+            observacion: dto.observacion || `Cambio de estado por ${usuario.nombre}`,
+            usuarioId: usuario.userId,
+            usuarioNombre: usuario.nombre,
+          },
+        });
 
-      this.logger.log(
-        `Pedido ${pedidoId}: ${estadoAnterior} → ${estadoNuevo} (por ${usuario.nombre})`,
-      );
+        this.logger.log(
+          `Pedido ${pedidoId}: ${estadoAnterior} → ${estadoNuevo} (por ${usuario.nombre})`,
+        );
+      } else {
+        this.logger.log(
+          `Pedido ${pedidoId}: efectos aplicados sin cambio de estado ` +
+            `(sigue en ${estadoNuevo}, por ${usuario.nombre})`,
+        );
+      }
 
       // Los efectos externos (realtime y notificación) se DEVUELVEN en vez de
       // emitirse aquí. Emitir dentro del callback de `$transaction` significa
@@ -444,7 +575,12 @@ export class PedidoStateService {
       // clientes ya recibieron un evento de un cambio que nunca ocurrió.
       //
       // El caller los dispara cuando la transacción ya confirmó.
-      const notifTipo = this.notifTipoParaEstado(estadoNuevo);
+      //
+      // En el camino de "mismo estado" la notificación va en null a propósito:
+      // el pedido ya estaba en ese estado, así que su correo ya se mandó en su
+      // momento. Reenviarlo sería un duplicado (p. ej. un segundo "ya está listo
+      // en tienda" cada vez que el operador resuelve un faltante).
+      const notifTipo = saltarTransicion ? null : this.notifTipoParaEstado(estadoNuevo);
 
       return {
         pedido: pedidoActualizado,
@@ -454,6 +590,9 @@ export class PedidoStateService {
           estadoNuevo,
           invalidarMonitor: opts.invalidarMonitor ?? false,
           notifTipo,
+          // El caller lo usa para no emitir `pedido.estado` cuando no hubo
+          // cambio: los clientes verían un evento que no describe nada.
+          sinCambioDeEstado: saltarTransicion,
         },
       };
     }
@@ -517,10 +656,10 @@ export class PedidoStateService {
   /**
    * F13: encola el pedido para descarga a Firebird.
    *
-   * Se llama DENTRO de la transacción que pone el pedido en PENDING_PAID, para
+   * Se llama DENTRO de la transacción que pone el pedido en PENDIENTE_PAGO, para
    * que estado y cola sean atómicos. `pedidoId` es @unique en
    * `PedidoPendienteEnvio`, así que un encolado duplicado falla con P2002 —
-   * eso es intencional: significa que hay un camino que llega a PENDING_PAID
+   * eso es intencional: significa que hay un camino que llega a PENDIENTE_PAGO
    * dos veces, y queremos enterarnos en vez de duplicar el pedido en el ERP.
    *
    * El agente lo baja vía poll-pedidos y GRABAR_PEDIDOS genera el folio local
@@ -550,7 +689,7 @@ export class PedidoStateService {
    * Delega en `cambiarEstado` con un usuario SISTEMA en vez de reimplementar
    * la transición. Antes era una segunda implementación de ~70 líneas que ya
    * había divergido: no soportaba `invalidarMonitor`, no limpiaba `llamadoAt`
-   * al salir de EN_MOSTRADOR, y no aplicaba `reloj` ni `asignacion`. Con una
+   * al salir de REVISADO, y no aplicaba `reloj` ni `asignacion`. Con una
    * sola implementación, cualquier arreglo futuro a la máquina (como el guard
    * de `encolarFirebird`) vale también para el camino del agente.
    *
@@ -644,7 +783,7 @@ export class PedidoStateService {
         // F4 (jul 2026): incluimos el bodeguero asignado para que la UI pueda
         // mostrar "asignado a {nombre}" en badges y deshabilitar CTAs cuando
         // el pedido está siendo surtido por otro bodeguero. Permitido en
-        // REVIEWING sin asignar (devuelve null).
+        // EN_REVISION sin asignar (devuelve null).
         asignadoA: { select: { id: true, nombre: true, apellido: true } },
         historial: { orderBy: { createdAt: 'asc' } },
         // F14: incluir el autor para poder aplanar `autorNombre` (el admin
@@ -690,7 +829,7 @@ export class PedidoStateService {
 
   private notifTipoParaEstado(estado: EstadoPedido): TipoNotificacion | null {
     switch (estado) {
-      case EstadoPedido.WAITING_CUSTOMER_APPROVAL:
+      case EstadoPedido.ESPERANDO_APROBACION:
         return TipoNotificacion.REVISION_PROPUESTA;
       // F13: EN_ASESORIA no notifica aquí: el email ASESOR_SOLICITADO lo
       // dispara PropuestaService (que conoce la nota del cliente y el origen
@@ -699,17 +838,17 @@ export class PedidoStateService {
         return null;
       // F16: el pedido quedó apartado en tienda esperando que el cliente lo
       // revise. Exige que se presente físicamente, así que sí se notifica.
-      case EstadoPedido.EN_MOSTRADOR:
+      case EstadoPedido.REVISADO:
         return TipoNotificacion.LISTO_EN_TIENDA;
-      // PENDING_PAID no notifica al cliente: el cambio lo ve por realtime/refresh
+      // PENDIENTE_PAGO no notifica al cliente: el cambio lo ve por realtime/refresh
       // cuando bodega confirma el surtido o el cliente acepta la propuesta.
-      case EstadoPedido.PAID:
+      case EstadoPedido.PAGADO:
         return TipoNotificacion.PAGO_CONFIRMADO;
-      case EstadoPedido.SHIPPED:
+      case EstadoPedido.ENVIADO:
         return TipoNotificacion.ENVIADO;
-      case EstadoPedido.COMPLETED:
+      case EstadoPedido.ENTREGADO:
         return TipoNotificacion.ENTREGADO;
-      case EstadoPedido.CANCELLED:
+      case EstadoPedido.CANCELADO:
         return TipoNotificacion.CANCELADO;
       default:
         return null;

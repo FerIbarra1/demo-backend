@@ -21,6 +21,7 @@ import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/p
 import { zonaKey } from '../core/zona.util';
 import { asignadoANombre } from '../core/pedido-mapper';
 import { tiempoAtencionEn, pausarReloj } from '../core/atencion.util';
+import { derivarMotivoReingreso } from '../core/motivo-reingreso';
 import type {
   SurtirJuntosPedidoDto,
   LoteSurtirJuntosDto,
@@ -63,7 +64,7 @@ export class BodegaService {
       where.estado = estado;
     } else {
       where.estado = {
-        in: [EstadoPedido.PENDING_REVIEW, EstadoPedido.REVIEWING],
+        in: [EstadoPedido.SOLICITADO, EstadoPedido.EN_REVISION],
       };
     }
     if (soloLibres) {
@@ -78,8 +79,38 @@ export class BodegaService {
           tienda: true,
           usuario: { select: { nombre: true, telefono: true, email: true } },
           asignadoA: { select: { id: true, nombre: true, apellido: true } },
+          // F17: el último cambio de estado para saber POR QUÉ el pedido está
+          // en la cola (¿es nuevo, o lo soltó otro bodeguero?). Mismo criterio
+          // que el monitor de bodega.
+          historial: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { estadoAnterior: true, usuarioNombre: true },
+          },
         },
-        orderBy: { fechaPedido: 'asc' },
+        // Oct 2026: los pedidos cuyo cliente YA ESTÁ EN TIENDA van primero.
+        //
+        // El caso: el cliente llega sin ticket y sin folio, el de mostrador
+        // registra su llegada, y su pedido todavía está en bodega. Sin este
+        // orden el aviso quedaba de adorno — el bodeguero seguía surtiendo por
+        // FIFO y el cliente esperaba de pie sin que nadie supiera por qué.
+        //
+        // Tres claves, en este orden:
+        //   1. `llegadaDescartadaAt` nulls first — un aviso DESCARTADO (el
+        //      operador lo marcó y luego resultó que el cliente no estaba) no
+        //      debe seguir colando al pedido al frente. Sin esta clave,
+        //      `llegadaAnunciadaAt` queda seteado para siempre y el pedido
+        //      viajaría prioritario por un aviso que ya se desmintió.
+        //   2. `llegadaAnunciadaAt` nulls last — los que tienen cliente presente
+        //      antes que los que no. Dentro de cada grupo...
+        //   3. `fechaPedido` asc — ...se conserva el FIFO de siempre.
+        //
+        // Es el mismo criterio que ya usa `MostradorQueryService.obtenerPedidosListos`.
+        orderBy: [
+          { llegadaDescartadaAt: { sort: 'asc', nulls: 'first' } },
+          { llegadaAnunciadaAt: { sort: 'asc', nulls: 'last' } },
+          { fechaPedido: 'asc' },
+        ],
         skip,
         take: limite,
       }),
@@ -90,7 +121,7 @@ export class BodegaService {
       ...p,
       asignadoANombre: asignadoANombre(p.asignadoA),
       // F12: minutos en manos del bodeguero (reloj de atención). Se pausa en
-      // WAITING_CUSTOMER_APPROVAL. Para pedidos en cola (PENDING_REVIEW) el
+      // ESPERANDO_APROBACION. Para pedidos en cola (SOLICITADO) el
       // reloj corre desde que se creó.
       minutosAtencionBodega: Math.floor(
         tiempoAtencionEn(
@@ -101,6 +132,37 @@ export class BodegaService {
           ahora,
         ) / 60000,
       ),
+
+      // F17: por qué el pedido está en la cola. `LIBERADO` significa que otro
+      // bodeguero lo soltó (nada nuevo que surtir); los otros dos traen trabajo
+      // real. La derivación vive en `core/motivo-reingreso.ts`.
+      motivoReingreso: derivarMotivoReingreso({
+        estado: p.estado,
+        asignadoAId: p.asignadoAId,
+        items: p.items,
+        historial: p.historial,
+      }),
+      // Quién lo soltó. Solo tiene sentido con `motivoReingreso === 'LIBERADO'`,
+      // pero se manda siempre que haya historial: el frontend decide si lo pinta.
+      liberadoPorNombre:
+        p.historial?.[0]?.estadoAnterior === EstadoPedido.EN_REVISION
+          ? (p.historial[0].usuarioNombre ?? null)
+          : null,
+
+      // F17: minutos que lleva el cliente esperando DE PIE.
+      //
+      // Este campo faltaba en la cola de bodega aunque `PedidoCard` ya lo
+      // declaraba y lo pasaba a `ClienteEnTiendaBadge`: llegaba `undefined`, así
+      // que el badge "Llegó a tienda" se pintaba SIN los minutos — justo el dato
+      // que dice cuánto lleva esperando. El cálculo ya existía en ventas y en el
+      // monitor de mostrador; aquí se replica.
+      esperandoDesdeMin:
+        p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
+          ? Math.max(
+              0,
+              Math.floor((ahora.getTime() - p.llegadaAnunciadaAt.getTime()) / 60_000),
+            )
+          : null,
     }));
     return {
       data,
@@ -148,7 +210,7 @@ export class BodegaService {
         ...p,
         total: Number(p.total),
         // F12: minutos en manos del bodeguero usando el reloj de atención.
-        // Se PAUSA en WAITING_CUSTOMER_APPROVAL (esperando al cliente).
+        // Se PAUSA en ESPERANDO_APROBACION (esperando al cliente).
         minutosEnProceso: Math.floor(
           tiempoAtencionEn(
             {
@@ -172,15 +234,15 @@ export class BodegaService {
 
     // F16 (sep 2026): solo se toman pedidos que están en la cola de bodega.
     //
-    // Sin este guard, un bodeguero podía "tomar" un pedido en EN_MOSTRADOR: la
-    // transición EN_MOSTRADOR → REVIEWING existe en TRANSICIONES (es el arco de
+    // Sin este guard, un bodeguero podía "tomar" un pedido en REVISADO: la
+    // transición REVISADO → EN_REVISION existe en TRANSICIONES (es el arco de
     // "ajustar" que usa mostrador), así que `cambiarEstado` la aceptaba. El
     // efecto era sacar el pedido de la cola de mostrador sin que el cliente lo
     // hubiera visto, y asignárselo a un bodeguero como si fuera trabajo nuevo.
     //
     // El arco de "ajustar" es EXCLUSIVO de mostrador: lo dispara el operador con
     // el cliente presente. Un bodeguero nunca debe iniciarlo.
-    if (pedido.estado !== EstadoPedido.PENDING_REVIEW && pedido.estado !== EstadoPedido.REVIEWING) {
+    if (pedido.estado !== EstadoPedido.SOLICITADO && pedido.estado !== EstadoPedido.EN_REVISION) {
       throw new BadRequestException(
         `Solo se pueden tomar pedidos en la cola de bodega (actual: ${pedido.estado}).`,
       );
@@ -198,7 +260,7 @@ export class BodegaService {
       );
     }
 
-    if (pedido.estado === EstadoPedido.REVIEWING) {
+    if (pedido.estado === EstadoPedido.EN_REVISION) {
       // F12: atomicidad contra la carrera TOCTOU — dos bodegueros no pueden
       // tomar el mismo pedido liberado. updateMany con condición asignadoAId=null
       // garantiza que solo uno gana (count===1). Al retomar, el reloj de
@@ -220,8 +282,8 @@ export class BodegaService {
         await tx.historialPedido.create({
           data: {
             pedidoId,
-            estadoAnterior: EstadoPedido.REVIEWING,
-            estadoNuevo: EstadoPedido.REVIEWING,
+            estadoAnterior: EstadoPedido.EN_REVISION,
+            estadoNuevo: EstadoPedido.EN_REVISION,
             observacion: `Pedido retomado por ${usuario.nombre} (liberado previamente)`,
             usuarioId: usuario.userId,
             usuarioNombre: usuario.nombre,
@@ -239,7 +301,7 @@ export class BodegaService {
 
     const result = await this.state.cambiarEstado(
       pedidoId,
-      { nuevoEstado: EstadoPedido.REVIEWING, observacion: 'Pedido tomado por bodega' },
+      { nuevoEstado: EstadoPedido.EN_REVISION, observacion: 'Pedido tomado por bodega' },
       usuario,
       {
         // F13: el bodeguero que toma el pedido queda asignado y su reloj de
@@ -271,13 +333,13 @@ export class BodegaService {
       );
     }
 
-    // F13: solo se puede liberar desde REVIEWING. El branch de
-    // WAITING_CUSTOMER_APPROVAL se eliminó porque en el flujo nuevo el pedido
+    // F13: solo se puede liberar desde EN_REVISION. El branch de
+    // ESPERANDO_APROBACION se eliminó porque en el flujo nuevo el pedido
     // se desasigna al enviar la propuesta, así que nadie puede ser "el
     // bodeguero asignado" de un pedido en ese estado — era código inalcanzable.
-    if (pedido.estado !== EstadoPedido.REVIEWING) {
+    if (pedido.estado !== EstadoPedido.EN_REVISION) {
       throw new BadRequestException(
-        `Sólo se puede liberar un pedido en REVIEWING (actual: ${pedido.estado})`,
+        `Sólo se puede liberar un pedido en EN_REVISION (actual: ${pedido.estado})`,
       );
     }
 
@@ -292,7 +354,7 @@ export class BodegaService {
         select: { tiempoAtencionBodegaMs: true, bodegaTurnoDesdeAt: true },
       });
       // NO escribe `estado`: liberar un pedido de bodega es desasignarlo, no
-      // moverlo. El pedido ya está en REVIEWING (el guard de arriba lo exige)
+      // moverlo. El pedido ya está en EN_REVISION (el guard de arriba lo exige)
       // y sigue ahí — lo que cambia es que vuelve a estar disponible para que
       // otro bodeguero lo tome. Escribir el mismo estado que ya tenía hacía
       // parecer una transición lo que es una desasignación, y era una de las
@@ -315,7 +377,7 @@ export class BodegaService {
         data: {
           pedidoId,
           estadoAnterior: pedido.estado,
-          estadoNuevo: EstadoPedido.REVIEWING,
+          estadoNuevo: EstadoPedido.EN_REVISION,
           observacion: `Pedido liberado por ${usuario.nombre}`,
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
@@ -359,7 +421,7 @@ export class BodegaService {
     }
     return this.state.cambiarEstado(
       pedidoId,
-      { nuevoEstado: EstadoPedido.SHIPPED, observacion: 'Pedido enviado al cliente' },
+      { nuevoEstado: EstadoPedido.ENVIADO, observacion: 'Pedido enviado al cliente' },
       usuario,
     );
   }
@@ -373,7 +435,7 @@ export class BodegaService {
    * del surtido.service.ts, centralizados en `core/similitud.util.ts`):
    *
    *   1. Tomar los items NO cancelados de los pedidos del bodeguero.
-   *   2. Buscar pedidos en PENDING_REVIEW o REVIEWING-sin-asignar de la
+   *   2. Buscar pedidos en SOLICITADO o EN_REVISION-sin-asignar de la
    *      misma tienda, distintos a los del bodeguero.
    *   3. Rankearlos con `rankearSimilares` (10/precioCO + 4/producto +
    *      1/minuto antigüedad, umbral 4, top 10).
@@ -396,7 +458,7 @@ export class BodegaService {
       where: {
         asignadoAId: usuarioId,
         estado: {
-          in: [EstadoPedido.REVIEWING, EstadoPedido.WAITING_CUSTOMER_APPROVAL],
+          in: [EstadoPedido.EN_REVISION, EstadoPedido.ESPERANDO_APROBACION],
         },
         tiendaId,
       },
@@ -421,7 +483,7 @@ export class BodegaService {
       where: {
         tiendaId,
         estado: {
-          in: [EstadoPedido.PENDING_REVIEW, EstadoPedido.REVIEWING],
+          in: [EstadoPedido.SOLICITADO, EstadoPedido.EN_REVISION],
         },
         asignadoAId: null,
         id: { notIn: Array.from(idsDelBodeguero) },
@@ -542,7 +604,7 @@ export class BodegaService {
   }
 
   /**
-   * F12 (sep 2026): agrupa la COLA de bodega (PENDING_REVIEW + REVIEWING sin
+   * F12 (sep 2026): agrupa la COLA de bodega (SOLICITADO + EN_REVISION sin
    * asignar) en clusters de pedidos que comparten zona (producto+color).
    *
    * A diferencia de `obtenerSurtirJuntos` (que parte de los pedidos del
@@ -552,6 +614,120 @@ export class BodegaService {
    * Devuelve clusters con >= 2 pedidos. Cada cluster trae `grupoId` (estable)
    * para que el frontend marque los pedidos que se surten juntos.
    */
+  /**
+   * F17 (oct 2026): pedidos que volvieron de la PLANCHA y necesitan ajuste.
+   *
+   * El caso: el bodeguero cerró un surtido, la bolsa quedó en la mesa de
+   * mostrador, y el cliente pidió cambios. El pedido vuelve a `EN_REVISION`
+   * sin asignar — pero en la tablet de surtido aparecía como una tarjeta más
+   * en la cola, indistinguible de un pedido nuevo. El bodeguero no sabía que
+   * ese pedido YA está físicamente en la plancha, ni qué prendas tiene que
+   * sacar de la bolsa y cuáles traer del anaquel.
+   *
+   * Este endpoint alimenta la tarjeta de aviso de `/bodega` y le da al
+   * bodeguero exactamente eso: por pedido, la lista de lo que se QUITA de la
+   * bolsa y la de lo que se AGREGA.
+   *
+   * Solo devuelve pedidos que necesitan ajuste (decisión del usuario: no
+   * ruido). Un pedido que volvió porque otro bodeguero lo liberó
+   * (`motivoReingreso: 'LIBERADO'`) NO aparece: no hay nada nuevo que surtir.
+   */
+  async obtenerAjustesPlancha(tiendaId?: number) {
+    if (!tiendaId) return [];
+
+    const pedidos = await this.prisma.pedido.findMany({
+      where: {
+        tiendaId,
+        estado: EstadoPedido.EN_REVISION,
+        asignadoAId: null,
+        // Solo los que traen items nuevos o retirados. `original: false` es la
+        // señal que ya usa el monitor de bodega (ver `motivo-reingreso.ts`).
+        items: { some: { OR: [{ original: false }, { cancelada: true }] } },
+      },
+      select: {
+        id: true,
+        numeroPedido: true,
+        clienteNombre: true,
+        canalOrigen: true,
+        fechaPedido: true,
+        items: {
+          select: {
+            id: true,
+            productoCodigo: true,
+            productoNombre: true,
+            corridaNombre: true,
+            tallaNombre: true,
+            colorNombre: true,
+            cantidad: true,
+            cantidadSurtida: true,
+            original: true,
+            cancelada: true,
+          },
+        },
+        // El último cambio de estado dice de dónde vino (mismo criterio que
+        // `monitor.service.ts`).
+        historial: {
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          select: { estadoAnterior: true },
+        },
+      },
+      orderBy: { fechaPedido: 'asc' },
+    });
+
+    return pedidos.map((p) => {
+      // Lo que hay que SACAR de la bolsa: los items que el ajuste canceló.
+      // `cantidad` es la pedida; si bodega había surtido menos, la que de
+      // verdad está en la bolsa es `cantidadSurtida`.
+      const porQuitar = p.items
+        .filter((i) => i.cancelada)
+        .map((i) => ({
+          itemId: i.id,
+          productoCodigo: i.productoCodigo,
+          productoNombre: i.productoNombre,
+          corridaNombre: i.corridaNombre,
+          tallaNombre: i.tallaNombre,
+          colorNombre: i.colorNombre,
+          cantidad: i.cantidadSurtida > 0 ? i.cantidadSurtida : i.cantidad,
+        }));
+
+      // Lo que hay que TRAER del anaquel: los items que el ajuste agregó
+      // (`original: false`) y que nadie ha verificado todavía.
+      const porAgregar = p.items
+        .filter((i) => !i.cancelada && !i.original)
+        .map((i) => ({
+          itemId: i.id,
+          productoCodigo: i.productoCodigo,
+          productoNombre: i.productoNombre,
+          corridaNombre: i.corridaNombre,
+          tallaNombre: i.tallaNombre,
+          colorNombre: i.colorNombre,
+          cantidad: i.cantidad,
+        }));
+
+      const estadoAnterior = p.historial[0]?.estadoAnterior ?? null;
+
+      return {
+        id: p.id,
+        numeroPedido: p.numeroPedido,
+        clienteNombre: p.clienteNombre,
+        canalOrigen: p.canalOrigen,
+        fechaPedido: p.fechaPedido.toISOString(),
+        motivoReingreso:
+          estadoAnterior === EstadoPedido.REVISADO
+            ? ('AJUSTE_MOSTRADOR' as const)
+            : estadoAnterior === EstadoPedido.ESPERANDO_APROBACION
+              ? ('PROPUESTA_VENTAS' as const)
+              : null,
+        porQuitar,
+        porAgregar,
+        // Cuántas piezas hay que mover en total, para el resumen de la tarjeta.
+        piezasPorQuitar: porQuitar.reduce((a, i) => a + i.cantidad, 0),
+        piezasPorAgregar: porAgregar.reduce((a, i) => a + i.cantidad, 0),
+      };
+    });
+  }
+
   async obtenerSurtirJuntosCola(tiendaId?: number) {
     if (!tiendaId) return [];
 
@@ -559,8 +735,8 @@ export class BodegaService {
       where: {
         tiendaId,
         OR: [
-          { estado: EstadoPedido.PENDING_REVIEW },
-          { estado: EstadoPedido.REVIEWING, asignadoAId: null },
+          { estado: EstadoPedido.SOLICITADO },
+          { estado: EstadoPedido.EN_REVISION, asignadoAId: null },
         ],
       },
       select: {
@@ -660,8 +836,8 @@ export class BodegaService {
     tiendaId?: number,
   ): Promise<LoteSurtirJuntosDto> {
     const estadosEnLote: EstadoPedido[] = [
-      EstadoPedido.REVIEWING,
-      EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+      EstadoPedido.EN_REVISION,
+      EstadoPedido.ESPERANDO_APROBACION,
     ];
 
     const pedidos = await this.prisma.pedido.findMany({
@@ -669,6 +845,21 @@ export class BodegaService {
         asignadoAId: usuarioId,
         estado: { in: estadosEnLote },
         ...(tiendaId ? { tiendaId } : {}),
+        // F17 (oct 2026): los pedidos que volvieron de la PLANCHA se EXCLUYEN
+        // del lote a propósito.
+        //
+        // El lote es picking por zona: el bodeguero va una vez a cada anaquel y
+        // agarra tallas de varios pedidos. Un pedido ajustado necesita lo
+        // contrario — ir a la MESA de la plancha, abrir la bolsa y SACAR
+        // prendas, con un checklist obligatorio. Meterlo aquí lo dejaría sin
+        // ese checklist (el lote solo marca "hay todo / no hay") y el pedido
+        // avanzaría con prendas de más en la bolsa.
+        //
+        // Esos pedidos se atienden desde la tarjeta de aviso de `/bodega`, que
+        // abre el sheet individual con el checklist de retiro.
+        NOT: {
+          items: { some: { OR: [{ original: false }, { cancelada: true }] } },
+        },
       },
       select: {
         id: true,
@@ -764,7 +955,7 @@ export class BodegaService {
    * F11 (ago 2026): toma un grupo de pedidos similares ("surtir juntos") de
    * una sola vez. Valida el límite de pedidos simultáneos y que ninguno esté
    * asignado a otro bodeguero. Cada pedido sigue el mismo patrón que
-   * `tomarPedido`: PENDING_REVIEW → REVIEWING + asignación, o REVIEWING
+   * `tomarPedido`: SOLICITADO → EN_REVISION + asignación, o EN_REVISION
    * libre → asignación.
    */
   async tomarGrupo(ids: number[], usuario: UserContext) {
@@ -781,12 +972,12 @@ export class BodegaService {
         // F16 (sep 2026): solo se toman pedidos que están EN la cola de bodega.
         //
         // Antes esta query no filtraba por estado y el `updateMany` de abajo
-        // forzaba `REVIEWING` sin pasar por `PedidoStateService.cambiarEstado`
+        // forzaba `EN_REVISION` sin pasar por `PedidoStateService.cambiarEstado`
         // (y por tanto sin validar TRANSICIONES). Eso permitía ARRANCAR un
-        // pedido de `EN_MOSTRADOR` — desaparecía de la cola de mostrador y el
-        // cliente se quedaba sin ver su pedido — o uno de `PENDING_PAID`, que
+        // pedido de `REVISADO` — desaparecía de la cola de mostrador y el
+        // cliente se quedaba sin ver su pedido — o uno de `PENDIENTE_PAGO`, que
         // ya está encolado a Firebird, desincronizando el ERP.
-        estado: { in: [EstadoPedido.PENDING_REVIEW, EstadoPedido.REVIEWING] },
+        estado: { in: [EstadoPedido.SOLICITADO, EstadoPedido.EN_REVISION] },
       },
       select: { id: true, tiendaId: true, estado: true, asignadoAId: true },
     });
@@ -854,7 +1045,7 @@ export class BodegaService {
         // F16 (sep 2026): además se exige que el pedido siga en un estado de
         // cola de bodega. El `where` del updateMany es la última línea de
         // defensa: si entre la carga y la escritura el pedido pasó a
-        // EN_MOSTRADOR (bodega lo surtió) o a PENDING_PAID (mostrador lo
+        // REVISADO (bodega lo surtió) o a PENDIENTE_PAGO (mostrador lo
         // liberó), `count` será 0 y no se lo arranca de esa cola.
         //
         // EXCEPCIÓN DELIBERADA a la máquina de estados: esta escritura NO pasa
@@ -865,17 +1056,17 @@ export class BodegaService {
         // validaría después de leer, que es justo la ventana que este `where`
         // cierra.
         //
-        // La transición (`PENDING_REVIEW`/`REVIEWING` → `REVIEWING`) está
+        // La transición (`SOLICITADO`/`EN_REVISION` → `EN_REVISION`) está
         // cubierta por `TRANSICIONES`, y `pedido-state.service.spec.ts` la
         // verifica: si alguien la quitara de la máquina, el test falla.
         const res = await tx.pedido.updateMany({
           where: {
             id: pedido.id,
             asignadoAId: null,
-            estado: { in: [EstadoPedido.PENDING_REVIEW, EstadoPedido.REVIEWING] },
+            estado: { in: [EstadoPedido.SOLICITADO, EstadoPedido.EN_REVISION] },
           },
           data: {
-            estado: EstadoPedido.REVIEWING,
+            estado: EstadoPedido.EN_REVISION,
             asignadoAId: usuario.userId,
             asignadoAt: new Date(),
             bodegaTurnoDesdeAt: new Date(),
@@ -890,7 +1081,7 @@ export class BodegaService {
           data: {
             pedidoId: pedido.id,
             estadoAnterior: pedido.estado,
-            estadoNuevo: EstadoPedido.REVIEWING,
+            estadoNuevo: EstadoPedido.EN_REVISION,
             observacion: `Pedido tomado en grupo por ${usuario.nombre}`,
             usuarioId: usuario.userId,
             usuarioNombre: usuario.nombre,

@@ -26,7 +26,7 @@ export class ClienteController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Crear un nuevo pedido (estado inicial: PENDING_REVIEW)' })
+  @ApiOperation({ summary: 'Crear un nuevo pedido (estado inicial: SOLICITADO)' })
   @ApiHeader({
     name: 'Idempotency-Key',
     required: false,

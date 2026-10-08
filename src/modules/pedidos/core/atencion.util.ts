@@ -3,7 +3,7 @@
  *
  * La urgencia de un pedido mide cuánto tiempo lleva en MANOS del bodeguero,
  * no el tiempo total desde que se creó. El reloj se PAUSA mientras la pelota
- * está del lado del cliente (WAITING_CUSTOMER_APPROVAL) y se REANUDA cuando
+ * está del lado del cliente (ESPERANDO_APROBACION) y se REANUDA cuando
  * el cliente responde y vuelve a ser tarea del bodeguero.
  *
  * Persistencia en Pedido:
@@ -34,7 +34,7 @@ export function tiempoAtencionEn(reloj: RelojAtencion, ahora: Date): number {
 
 /**
  * Pausa el reloj: congela el acumulado y limpia bodegaTurnoDesdeAt.
- * Se llama al pasar a WAITING_CUSTOMER_APPROVAL (la pelota es del cliente).
+ * Se llama al pasar a ESPERANDO_APROBACION (la pelota es del cliente).
  */
 export function pausarReloj(reloj: RelojAtencion, ahora: Date): RelojAtencion {
   return {
@@ -45,7 +45,7 @@ export function pausarReloj(reloj: RelojAtencion, ahora: Date): RelojAtencion {
 
 /**
  * Reanuda el reloj: mantiene el acumulado y marca el inicio del nuevo turno.
- * Se llama cuando el cliente responde y el pedido vuelve a REVIEWING.
+ * Se llama cuando el cliente responde y el pedido vuelve a EN_REVISION.
  */
 export function reanudarReloj(reloj: RelojAtencion, ahora: Date): RelojAtencion {
   return {

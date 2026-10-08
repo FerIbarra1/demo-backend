@@ -73,7 +73,7 @@ export class AdminController {
   @UseGuards(ApiKeyGuard)
   @ApiKeyAuth()
   @ApiOperation({
-    summary: 'Webhook del sistema externo (Firebird): PENDING_PAID → PAID. Auth X-Agent-Key.',
+    summary: 'Webhook del sistema externo (Firebird): PENDIENTE_PAGO → PAID. Auth X-Agent-Key.',
   })
   async marcarPagado(
     @Param('id', ParseIntPipe) id: number,

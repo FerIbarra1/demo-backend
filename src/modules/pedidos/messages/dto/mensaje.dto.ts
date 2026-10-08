@@ -10,6 +10,8 @@ import {
   ArrayMinSize,
   IsIn,
   Min,
+  IsNotEmpty,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -85,6 +87,15 @@ export class PropuestaAdjuntaItemDto {
   @ApiProperty()
   @IsString()
   producto: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Oct 2026: código del producto (ej. "C0200"). Va en el snapshot porque es ' +
+      'lo que el personal compara contra la etiqueta física de la prenda.',
+  })
+  @IsOptional()
+  @IsString()
+  productoCodigo?: string | null;
 
   @ApiProperty()
   @IsString()
@@ -173,9 +184,17 @@ export class PropuestaAdjuntaItemDto {
  * misma transacción y el mensaje lleva su id en `adjunto`.
  */
 export class CrearMensajeConAdjuntoDto {
+  // Oct 2026: el texto es OBLIGATORIO cuando NO se adjunta propuesta, pero
+  // OPCIONAL cuando sí — el asesor puede mandar la propuesta sola con un texto
+  // por defecto en backend. Esto evita que el chat muestre una burbuja vacía
+  // cuando el operador presiona "Enviar" sin escribir nada.
   @ApiProperty()
   @IsString()
   @MaxLength(4000)
+  @ValidateIf((o) => !o.propuestaItems || o.propuestaItems.length === 0)
+  @IsNotEmpty({
+    message: 'El texto del mensaje es obligatorio cuando no se adjunta una propuesta.',
+  })
   contenido: string;
 
   @ApiPropertyOptional({ type: [PropuestaAdjuntaItemDto] })

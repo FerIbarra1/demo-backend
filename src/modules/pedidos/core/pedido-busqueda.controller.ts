@@ -18,7 +18,17 @@ import { estadoPedidoLabel } from '../../mail/estado-labels';
  */
 @ApiTags('Pedidos - Búsqueda por folio')
 @Controller('pedidos/buscar-por-folio')
-@Roles(RolUsuario.BODEGA, RolUsuario.CAJERO, RolUsuario.MOSTRADOR, RolUsuario.ADMIN)
+// F17 (oct 2026): VENTAS se agregó. Faltaba, y el escáner de `/ventas` monta
+// `SearchInputWithScanner` → `QrScannerButton` → este endpoint, así que el
+// asesor recibía un 403 silencioso (solo un toast) cada vez que escaneaba.
+// El mapa de rutas por rol ya contemplaba VENTAS: la inconsistencia estaba solo aquí.
+@Roles(
+  RolUsuario.BODEGA,
+  RolUsuario.CAJERO,
+  RolUsuario.MOSTRADOR,
+  RolUsuario.VENTAS,
+  RolUsuario.ADMIN,
+)
 @ApiBearerAuth()
 export class PedidoBusquedaController {
   constructor(
@@ -45,8 +55,13 @@ export class PedidoBusquedaController {
    * en qué etapa está el pedido, quién lo tiene, y si a este usuario le toca
    * operarlo.
    *
-   * El frontend ya no decide la ruta por rol: recibe `puedeOperar` y
-   * `rutaAccion`, y el panel muestra la acción primaria o el modo solo lectura.
+   * El frontend no decide la ruta por rol: recibe `puedeOperar` y muestra la
+   * acción primaria o el modo solo lectura.
+   *
+   * F17 (oct 2026): este endpoint **ya no devuelve `rutaAccion`**. El panel del
+   * escáner dejó de navegar — abre el `DetallePedidoModal` con el `pedidoId`.
+   * Devolver una ruta que nadie usa es una invitación a que alguien la use y
+   * aterrice en un 404 (la ruta de bodega se eliminó).
    *
    * Sigue validando tienda: un empleado no puede escanear el pedido de otra
    * tienda (403 de `buscarPorFolio`).
@@ -107,36 +122,6 @@ export class PedidoBusquedaController {
       puedeOperar: puedeOperarAqui,
       /** Explicación para el operador cuando NO es suyo. Nunca un 403 seco. */
       mensaje: puedeOperarAqui ? null : mensajeNoEsTuyo(pedido.estado),
-      /**
-       * Ruta del detalle según el rol del usuario. `null` si su rol no tiene
-       * página de detalle (cajero) — el panel entonces no ofrece "Ir al pedido".
-       */
-      rutaAccion: rutaDetallePara(user.rol, pedido.id),
     };
-  }
-}
-
-/**
- * Ruta de detalle de pedido por rol. Espejo de las rutas del App Router del
- * frontend (`(warehouse)/bodega/pedidos/[id]`, `(counter)/mostrador/[id]`, …).
- *
- * El cajero devuelve `null` a propósito: no tiene página de detalle, su trabajo
- * se hace entero en la consola de ventanillas. Ofrecerle un botón que lleva a
- * un 404 sería peor que no ofrecerlo.
- */
-function rutaDetallePara(rol: RolUsuario, pedidoId: number): string | null {
-  switch (rol) {
-    case RolUsuario.BODEGA:
-    case RolUsuario.BODEGA_MONITOR:
-      return `/bodega/pedidos/${pedidoId}`;
-    case RolUsuario.MOSTRADOR:
-    case RolUsuario.MOSTRADOR_MONITOR:
-      return `/mostrador/${pedidoId}`;
-    case RolUsuario.VENTAS:
-      return `/ventas/pedidos/${pedidoId}`;
-    case RolUsuario.ADMIN:
-      return `/admin/pedidos/${pedidoId}`;
-    default:
-      return null;
   }
 }

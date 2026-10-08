@@ -68,7 +68,7 @@ export class NotificationsService {
       case TipoNotificacion.REVISION_PROPUESTA: {
         // La propuesta puede venir de bodega (faltantes) o del asesor de
         // ventas (contrapropuesta negociada). El estado es el mismo
-        // (WAITING_CUSTOMER_APPROVAL), así que el origen se deduce de quién
+        // (ESPERANDO_APROBACION), así que el origen se deduce de quién
         // la creó — si no, el cliente leía "el bodeguero" en una propuesta
         // de su asesor de ventas.
         const propuesta = await this.prisma.pedidoPropuesta.findFirst({

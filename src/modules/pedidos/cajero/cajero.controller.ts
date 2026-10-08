@@ -8,7 +8,7 @@ import { RolUsuario } from '@prisma/client';
 
 /**
  * Consola del Cajero (jun 2026):
- * - Cola de pedidos KIOSKO en PENDING_PAID sin asignar a ninguna ventanilla.
+ * - Cola de pedidos KIOSKO en PENDIENTE_PAGO sin asignar a ninguna ventanilla.
  * - Tomar pedido → asigna `cajeroAsignadoId` (1:1 con el usuario Cajero logueado).
  * - Liberar pedido → devuelve el pedido a la cola.
  *
@@ -28,7 +28,7 @@ export class CajeroController {
   @Get('cola-ventanilla')
   @ApiOperation({
     summary:
-      'Cola de pedidos en PENDING_PAID sin asignar (monitor de ventanillas). ' +
+      'Cola de pedidos en PENDIENTE_PAGO sin asignar (monitor de ventanillas). ' +
       'F16: incluye KIOSKO y WEB por defecto — los pedidos web también se ' +
       'cobran aquí. Pasar canal=KIOSKO para ver solo los de la tienda.',
   })
@@ -62,7 +62,7 @@ export class CajeroController {
 
   @Get('mis-pedidos')
   @ApiOperation({
-    summary: 'Pedidos del kiosko en PENDING_PAID asignados al cajero autenticado',
+    summary: 'Pedidos del kiosko en PENDIENTE_PAGO asignados al cajero autenticado',
   })
   async misPedidos(@CurrentUser() user: any) {
     return this.cajeroService.obtenerMisPedidosCajero(user.userId, user.tiendaId);

@@ -228,7 +228,7 @@ export class SyncAgentService {
     datos: Record<string, unknown>;
   }) {
     // MOVPED se ignora: el pedido llega a Firebird con cantidades finales
-    // confirmadas por bodega en la web (confirmarSurtido → PENDING_PAID).
+    // confirmadas por bodega en la web (confirmarSurtido → PENDIENTE_PAGO).
     // No hay ajustes VFP→nube que re-sincronizar.
     if (evento.entidad === 'MOVPED') {
       return {
@@ -293,7 +293,7 @@ export class SyncAgentService {
         // Si el pedido se canceló mientras el agente lo subía, el folio ya
         // existe en Firebird pero el pedido está muerto en la nube: no
         // disparamos "listo para pagar" ni marcamos la entrega como exitosa.
-        if (pedido.estado === EstadoPedido.CANCELLED) {
+        if (pedido.estado === EstadoPedido.CANCELADO) {
           await this.prisma.pedidoPendienteEnvio.updateMany({
             where: { pedidoId: ack.pedidoId, estado: { not: 'PROCESADO' } },
             data: {

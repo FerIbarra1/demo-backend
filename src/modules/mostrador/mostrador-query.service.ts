@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ForbiddenException } from '@nestjs/common';
 import { Prisma, EstadoPedido, CanalOrigen, RolUsuario } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PedidoStateService } from '../pedidos/core/pedido-state.service';
@@ -43,7 +43,7 @@ export class MostradorQueryService {
     const skip = (pagina - 1) * limite;
     const where: Prisma.PedidoWhereInput = {
       tiendaId,
-      estado: { in: [EstadoPedido.PAID, EstadoPedido.SHIPPED] },
+      estado: { in: [EstadoPedido.PAGADO, EstadoPedido.ENVIADO] },
     };
     const orderBy: Prisma.PedidoOrderByWithRelationInput[] =
       orden === 'esperando'
@@ -62,6 +62,10 @@ export class MostradorQueryService {
           items: true,
           tienda: true,
           usuario: { select: { nombre: true, telefono: true, email: true } },
+          // Oct 2026: sin `pendienteEnvio` el folio visible del frontend cae a
+          // "Pedido #id" (`lib/utils/folio.ts`) y la lista muestra un número
+          // que el cliente no reconoce. Es el folio de VFP, el del ticket.
+          pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
         },
         orderBy,
         skip,
@@ -93,38 +97,112 @@ export class MostradorQueryService {
   }
 
   /**
-   * Búsqueda rápida por número exacto o fragmento del nombre del cliente.
-   * Restringe a la tienda del usuario (salvo ADMIN).
+   * Búsqueda del operador de mostrador. Es el caso de uso central de la
+   * consola: un cliente llega a tienda SIN el ticket y SIN el número de
+   * pedido, dice su nombre, y el operador tiene que encontrarlo.
    *
-   * Oct 2026: incluye `EN_MOSTRADOR`. Antes solo buscaba en PAID/SHIPPED, así
-   * que el buscador del mostrador era CIEGO a los pedidos que están esperando
-   * revisión — justo los que el operador necesita encontrar cuando el cliente
-   * llega sin folio. El caso de uso que lo motiva: el cliente llega a tienda,
-   * dice su nombre, y el operador no podía encontrarlo.
+   * Oct 2026 — tres arreglos que la hacían inservible justo en ese escenario:
+   *
+   * 1. **Cubría 3 de los 10 estados.** Filtraba `REVISADO | PAID |
+   *    SHIPPED`, así que un pedido que todavía está en bodega, esperando que
+   *    el cliente apruebe una propuesta, en asesoría o ya en caja NO SE
+   *    ENCONTRABA — y el operador se quedaba sin salida con el cliente
+   *    enfrente. Ahora busca en todos los estados, incluidos los terminales:
+   *    poder decir "ese pedido ya se lo entregamos" es parte del trabajo.
+   *
+   * 2. **No buscaba el folio que el cliente conoce.** El cliente trae el folio
+   *    de VFP (`externalFolio`); el buscador solo miraba `numeroPedido`, que es
+   *    interno e invisible para él (ver `lib/utils/folio.ts` en el frontend).
+   *    También se agregó el correo, que es lo que el cliente dicta cuando no
+   *    recuerda su teléfono.
+   *
+   * 3. **El orden enterraba los pedidos accionables.** Ordenaba por
+   *    `fechaPago asc`, y los pedidos en `REVISADO` tienen `fechaPago`
+   *    NULL — Postgres los manda al final. Con el `take: 20` fijo, el pedido
+   *    que el operador necesitaba podía quedar cortado. Ahora ordena por el
+   *    enum de estado, que está declarado en orden de ciclo de vida: los
+   *    activos primero, los terminales al final. Dentro de cada estado, el más
+   *    reciente primero (el cliente que acaba de llegar).
+   *
+   * El `include` de `pendienteEnvio` no es cosmético: sin él, `folioVisible()`
+   * del frontend cae a `"Pedido #id"` y el operador lee un número que el
+   * cliente no reconoce.
    */
-  async buscarPedidos(q: string, usuario: UserContext, tiendaId?: number) {
-    const where: Prisma.PedidoWhereInput = {
-      estado: {
-        in: [EstadoPedido.EN_MOSTRADOR, EstadoPedido.PAID, EstadoPedido.SHIPPED],
-      },
-      OR: [
-        { numeroPedido: { contains: q, mode: 'insensitive' } },
-        { clienteNombre: { contains: q, mode: 'insensitive' } },
-      ],
-    };
-    if (usuario.rol !== RolUsuario.ADMIN && tiendaId) {
+  async buscarPedidos(
+    q: string,
+    usuario: UserContext,
+    tiendaId?: number,
+    pagina = 1,
+    limite = 20,
+  ) {
+    // La tienda sale SOLO del JWT (`user.tiendaId`), nunca de un header. Antes
+    // el filtro era `if (rol !== ADMIN && tiendaId)`: un usuario sin tienda
+    // quedaba SIN filtro y veía pedidos de todas las tiendas. Falla cerrado,
+    // igual que `PedidoAccessService.validar`.
+    const where: Prisma.PedidoWhereInput = {};
+    if (usuario.rol !== RolUsuario.ADMIN) {
+      if (!tiendaId) {
+        throw new ForbiddenException(
+          'Tu usuario no tiene tienda asignada. Contacta al administrador.',
+        );
+      }
       where.tiendaId = tiendaId;
     }
-    return this.prisma.pedido.findMany({
-      where,
-      include: {
-        items: true,
-        tienda: true,
-        usuario: { select: { nombre: true, telefono: true, email: true } },
+
+    where.OR = [
+      { numeroPedido: { contains: q, mode: 'insensitive' } },
+      { clienteNombre: { contains: q, mode: 'insensitive' } },
+      { clienteEmail: { contains: q, mode: 'insensitive' } },
+      // El folio de VFP vive en la tabla de encolado, no en `pedidos`. Solo
+      // existe para pedidos ya liberados (los que entraron al ERP).
+      { pendienteEnvio: { externalFolio: { contains: q, mode: 'insensitive' } } },
+    ];
+
+    const skip = (pagina - 1) * limite;
+    const [pedidos, total] = await Promise.all([
+      this.prisma.pedido.findMany({
+        where,
+        include: {
+          items: true,
+          tienda: true,
+          usuario: { select: { nombre: true, telefono: true, email: true } },
+          // El folio que el cliente trae en el ticket. Sin esto la UI muestra
+          // "Pedido #id" y el operador no puede confirmar con el cliente.
+          pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
+        },
+        // El enum está declarado en orden de ciclo de vida (activos primero,
+        // terminales al final), así que ordenar por él pone arriba lo que el
+        // operador puede resolver ahora. Dentro de cada estado, el más reciente.
+        orderBy: [{ estado: 'asc' }, { fechaPedido: 'desc' }, { id: 'desc' }],
+        skip,
+        take: limite,
+      }),
+      this.prisma.pedido.count({ where }),
+    ]);
+
+    // Oct 2026: anotar `esperandoDesdeMin` igual que `obtenerPedidosListos` y
+    // `obtenerCola`. Sin esto, el badge "EN TIENDA · N min" del buscador nunca
+    // se pintaba: `BadgeEnTienda` devuelve `null` cuando el campo es
+    // `undefined`, así que un pedido con aviso vigente se veía igual que uno
+    // sin aviso — justo la distinción que el operador necesita.
+    const ahora = Date.now();
+    const data = pedidos.map((p) => ({
+      ...p,
+      esperandoDesdeMin:
+        p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
+          ? Math.max(0, Math.floor((ahora - p.llegadaAnunciadaAt.getTime()) / 60_000))
+          : null,
+    }));
+
+    return {
+      data,
+      meta: {
+        total,
+        pagina,
+        limite,
+        totalPaginas: Math.ceil(total / limite),
       },
-      orderBy: { fechaPago: 'asc' },
-      take: 20,
-    });
+    };
   }
 
   /**
@@ -155,7 +233,19 @@ export class MostradorQueryService {
     const skip = (pagina - 1) * limite;
     const where: Prisma.PedidoWhereInput = {
       tiendaId,
-      estado: EstadoPedido.EN_MOSTRADOR,
+      // F18 (oct 2026): la cola incluye REVISADO **y EN_ATENCION**.
+      //
+      // Bug que arregla: `llamar` mueve el pedido a EN_ATENCION, pero NINGUNA
+      // pestaña de la consola lo mostraba (esta filtraba REVISADO,
+      // `obtenerSinAviso` filtraba REVISADO, `obtenerPedidosListos` filtraba
+      // PAGADO|ENVIADO). El operador llamaba a un cliente y el pedido
+      // DESAPARECÍA de la consola: no podía hacer el recuento, ni enviarlo a
+      // pagar, ni resolver una propuesta. Solo le quedaba "Volver a la lista".
+      //
+      // Incluirlo aquí es correcto además por semántica: "Por revisar" es la
+      // cola de trabajo del operador, y un pedido que ya está atendiendo sigue
+      // siendo su trabajo.
+      estado: { in: [EstadoPedido.REVISADO, EstadoPedido.EN_ATENCION] },
       OR: [
         { canalOrigen: CanalOrigen.KIOSKO },
         {
@@ -173,6 +263,8 @@ export class MostradorQueryService {
           items: true,
           tienda: true,
           usuario: { select: { nombre: true, telefono: true, email: true } },
+          // Oct 2026: el folio de VFP, el que el cliente trae en el ticket.
+          pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
         },
         orderBy: [
           // nullsLast simula "avisados primero, resto después".
@@ -217,7 +309,7 @@ export class MostradorQueryService {
    *
    * Es la cara visible del contador `sinCliente` del monitor
    * (`mostrador-monitor.service.ts`). Existe porque el gate de D5 esconde
-   * estos pedidos de la cola: un cliente web en `EN_MOSTRADOR` sin aviso es
+   * estos pedidos de la cola: un cliente web en `REVISADO` sin aviso es
    * invisible, y si llega a tienda sin teléfono o sin el folio, el operador no
    * tenía forma de encontrarlo ni de hacerlo aparecer.
    *
@@ -232,7 +324,7 @@ export class MostradorQueryService {
     const skip = (pagina - 1) * limite;
     const where: Prisma.PedidoWhereInput = {
       tiendaId,
-      estado: EstadoPedido.EN_MOSTRADOR,
+      estado: EstadoPedido.REVISADO,
       canalOrigen: CanalOrigen.WEB,
       // Mismo predicado que el contador `sinCliente` del monitor: sin aviso, o
       // con el aviso descartado por el operador (el cliente no estaba).
@@ -246,6 +338,8 @@ export class MostradorQueryService {
           items: true,
           tienda: true,
           usuario: { select: { nombre: true, telefono: true, email: true } },
+          // Oct 2026: el folio de VFP, el que el cliente trae en el ticket.
+          pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
         },
         orderBy: [{ fechaPedido: 'asc' }, { id: 'asc' }],
         skip,

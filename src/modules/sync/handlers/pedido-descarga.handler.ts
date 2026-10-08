@@ -45,7 +45,7 @@ export class PedidoDescargaHandler {
     const pendientes = await this.prisma.$transaction(async (tx) => {
       const candidatos = await tx.pedidoPendienteEnvio.findMany({
         where: {
-          pedido: { tiendaId: tiendaIdNube, estado: { not: 'CANCELLED' } },
+          pedido: { tiendaId: tiendaIdNube, estado: { not: 'CANCELADO' } },
           nextAttemptAt: { lte: now },
           OR: [
             { estado: 'PENDIENTE' },
@@ -206,7 +206,7 @@ export class PedidoDescargaHandler {
         // Skip si el pedido fue cancelado entre el claim y el armado del
         // payload (ventana pequeña pero posible). La entrada de cola queda
         // en estado terminal CANCELADO — el poll no la vuelve a elegir.
-        if (p.pedido.estado === 'CANCELLED') {
+        if (p.pedido.estado === 'CANCELADO') {
           await this.prisma.pedidoPendienteEnvio.updateMany({
             where: {
               id: p.id,

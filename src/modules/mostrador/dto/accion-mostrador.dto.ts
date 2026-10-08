@@ -14,7 +14,7 @@ import { Type } from 'class-transformer';
 
 /**
  * F16 (sep 2026): acciones del operador de mostrador sobre un pedido en
- * `EN_MOSTRADOR`.
+ * `REVISADO`.
  *
  * El motivo/nota se guardan en `HistorialPedido.observacion`, así que tienen un
  * tope de longitud: son para que quede constancia de POR QUÉ se canceló o

@@ -1,7 +1,17 @@
-import { Controller, Get, Param, Query, ParseIntPipe, BadRequestException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  ParseIntPipe,
+  BadRequestException,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { VentasService, FILTROS_COLA, FiltroCola } from './ventas.service';
 import { PedidoStateService } from '../core/pedido-state.service';
+import { DevolverABodegaDto } from './dto/devolver-a-bodega.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -73,5 +83,19 @@ export class VentasController {
     // Valida acceso (tienda) reutilizando el access service compartido.
     await this.pedidoState.obtenerDetalle(id, user);
     return this.ventasService.obtenerDetalle(id, user.tiendaId);
+  }
+
+  @Post(':id/devolver-a-bodega')
+  @ApiOperation({
+    summary:
+      'Oct 2026: EN_ASESORIA → EN_REVISION. El asesor revisó el pedido y no hay ' +
+      'nada que negociar: vuelve a bodega a surtirse tal cual.',
+  })
+  async devolverABodega(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: DevolverABodegaDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.ventasService.devolverABodega(id, user, dto.nota);
   }
 }

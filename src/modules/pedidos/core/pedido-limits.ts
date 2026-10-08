@@ -22,4 +22,4 @@ export const MAX_PEDIDOS_POR_BODEGUERO = 4;
  * Centralizado aquí para que todos los callers (obtenerMisPedidosBodeguero,
  * tomarGrupo, puedeTomarOtro, monitor) cuenten lo mismo.
  */
-export const ESTADOS_OCUPAN_SLOT_BODEGA: EstadoPedido[] = [EstadoPedido.REVIEWING];
+export const ESTADOS_OCUPAN_SLOT_BODEGA: EstadoPedido[] = [EstadoPedido.EN_REVISION];

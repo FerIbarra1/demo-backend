@@ -43,7 +43,7 @@ describe('B2 — el anti-spam de llegada es un límite de tasa, no un tope de po
     numeroPedido: 'PD-2026-000001',
     tiendaId: 5,
     usuarioId: 7,
-    estado: 'EN_MOSTRADOR',
+    estado: 'REVISADO',
     modoEntrega: 'RECOGER_TIENDA',
     clienteNombre: 'Cliente Test',
     llegadaAnunciadaAt: new Date(Date.now() - 60 * 60_000),

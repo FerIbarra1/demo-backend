@@ -18,12 +18,12 @@ import type { UserContext } from '../../../types/pedido.types';
  *     transiciona el pedido a CANCELLED con historial.
  *   - Si el evento indica pago (FINALIZADA=TRUE) → delega a
  *     AdminService.marcarComoPagado (que ya hace la transición
- *     PENDING_PAID→PAID, historial, realtime y email PAGO_CONFIRMADO
+ *     PENDIENTE_PAGO→PAID, historial, realtime y email PAGO_CONFIRMADO
  *     vía NotificationsService).
  *
  * Depende del trigger TRG_PEDIDOS_SYNC en Firebird. Los ajustes de items
  * (MOVPED) ya NO se sincronizan: el pedido llega a Firebird con cantidades
- * finales confirmadas por bodega en la web (confirmarSurtido → PENDING_PAID).
+ * finales confirmadas por bodega en la web (confirmarSurtido → PENDIENTE_PAGO).
  */
 @Injectable()
 export class PedidoPagoHandler {
@@ -77,7 +77,7 @@ export class PedidoPagoHandler {
           where: { id: pedidoIdNube },
           select: { estado: true, fechaPago: true },
         });
-        if (pedidoActual?.estado === EstadoPedido.PAID) {
+        if (pedidoActual?.estado === EstadoPedido.PAGADO) {
           this.logger.log(`Pedido ${pedidoIdNube} ya estaba PAID (sync idempotente), omitido`);
           return { ok: true, mensaje: 'PEDIDO ya estaba PAID — omitido (idempotente)' };
         }
@@ -104,14 +104,14 @@ export class PedidoPagoHandler {
   private async cancelarPedido(pedidoIdNube: number): Promise<void> {
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoIdNube } });
     if (!pedido) return;
-    if (pedido.estado === EstadoPedido.CANCELLED) return;
+    if (pedido.estado === EstadoPedido.CANCELADO) return;
 
     // Delega en la máquina de estados (PedidoStateService) para que la
     // transición valide TRANSICIONES y ejecute historial + realtime +
     // notificación. Si Firebird intenta cancelar un pedido en un estado
     // terminal (p.ej. COMPLETED), la máquina lo rechaza con 400 en vez de
     // permitir una transición inválida.
-    await this.pedidoState.cambiarEstadoPorSistema(pedidoIdNube, EstadoPedido.CANCELLED, {
+    await this.pedidoState.cambiarEstadoPorSistema(pedidoIdNube, EstadoPedido.CANCELADO, {
       observacion: 'Cancelado en Firebird (sincronizado por agente)',
       usuarioNombre: 'AGENT_EXTERNAL',
     });

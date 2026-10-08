@@ -38,14 +38,14 @@ export class BodegaController {
     required: false,
     type: String,
     description:
-      'CSV de estados. F7: el filtro "Pendientes y liberados" manda "PENDING_REVIEW,REVIEWING" + soloLibres=true',
+      'CSV de estados. F7: el filtro "Pendientes y liberados" manda "SOLICITADO,EN_REVISION" + soloLibres=true',
   })
   @ApiQuery({
     name: 'soloLibres',
     required: false,
     type: Boolean,
     description:
-      'F7: si true, filtra a pedidos sin asignar (asignadoAId=null). Se usa con estados=REVIEWING para "liberados".',
+      'F7: si true, filtra a pedidos sin asignar (asignadoAId=null). Se usa con estados=EN_REVISION para "liberados".',
   })
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
@@ -128,10 +128,25 @@ export class BodegaController {
     return this.bodegaService.tomarGrupo(dto.ids, user);
   }
 
+  @Get('ajustes-plancha')
+  @ApiOperation({
+    summary:
+      'F17: pedidos que volvieron de la plancha y necesitan ajuste. Cada uno trae ' +
+      'qué quitar de la bolsa y qué traer del anaquel.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Array (puede ser vacío). Solo los que necesitan ajuste — un pedido liberado no aparece.',
+  })
+  async ajustesPlancha(@CurrentUser() user: any) {
+    return this.bodegaService.obtenerAjustesPlancha(user.tiendaId);
+  }
+
   @Get('surtir-juntos/cola')
   @ApiOperation({
     summary:
-      'F12: agrupa la cola de bodega (PENDING_REVIEW + REVIEWING sin asignar) en clusters de pedidos que comparten zona (producto+color). Sugiere qué pedidos tomar juntos desde la cola, sin requerir selección previa.',
+      'F12: agrupa la cola de bodega (SOLICITADO + EN_REVISION sin asignar) en clusters de pedidos que comparten zona (producto+color). Sugiere qué pedidos tomar juntos desde la cola, sin requerir selección previa.',
   })
   @ApiResponse({
     status: 200,
@@ -151,7 +166,7 @@ export class BodegaController {
   @Post(':id/tomar')
   @ApiOperation({
     summary:
-      'PENDING_REVIEW → REVIEWING, o REVIEWING libre → REVIEWING asignado (caso liberado). En ambos casos asigna el pedido al bodeguero autenticado.',
+      'SOLICITADO → EN_REVISION, o EN_REVISION libre → EN_REVISION asignado (caso liberado). En ambos casos asigna el pedido al bodeguero autenticado.',
   })
   async tomar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     if (user.rol === RolUsuario.BODEGA_MONITOR) {
@@ -173,7 +188,7 @@ export class BodegaController {
   @Post(':id/liberar')
   @ApiOperation({
     summary:
-      'Liberar pedido tomado (asignadoAId=null, estado sigue REVIEWING). Otro bodeguero puede retomarlo desde /bodega.',
+      'Liberar pedido tomado (asignadoAId=null, estado sigue EN_REVISION). Otro bodeguero puede retomarlo desde /bodega.',
   })
   async liberar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.bodegaService.liberarPedido(id, user);
@@ -209,7 +224,7 @@ export class BodegaController {
   @Post(':id/confirmar-surtido')
   @ApiOperation({
     summary:
-      'Cerrar surtido. Si hay faltantes, requiere una propuesta aceptada por el cliente. Aplica los cambios y pasa el pedido a PENDING_PAID.',
+      'Cerrar surtido. Si hay faltantes, requiere una propuesta aceptada por el cliente. Aplica los cambios y pasa el pedido a PENDIENTE_PAGO.',
   })
   async confirmarSurtido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     const esAdmin = user.rol === RolUsuario.ADMIN;

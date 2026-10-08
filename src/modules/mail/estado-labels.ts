@@ -6,18 +6,21 @@ import { EstadoPedido } from '@prisma/client';
  * tiene sentido para una persona que está del lado del cliente.
  */
 export const ESTADO_PEDIDO_LABELS: Record<EstadoPedido, string> = {
-  PENDING_REVIEW: 'Recibido · en cola de revisión',
-  REVIEWING: 'En revisión por bodega',
-  WAITING_CUSTOMER_APPROVAL: 'Propuesta pendiente de tu aprobación',
+  SOLICITADO: 'Recibido · en cola de revisión',
+  EN_REVISION: 'En revisión por bodega',
+  ESPERANDO_APROBACION: 'Propuesta pendiente de tu aprobación',
   EN_ASESORIA: 'Con un asesor de ventas',
   // F16 (sep 2026): el pedido está apartado en tienda esperando que el cliente
   // lo revise antes de pagar.
-  EN_MOSTRADOR: 'Listo en tienda · revísalo',
-  PENDING_PAID: 'Pendiente de pago',
-  PAID: 'Pago confirmado',
-  SHIPPED: 'Enviado · en camino',
-  COMPLETED: 'Entregado',
-  CANCELLED: 'Cancelado',
+  REVISADO: 'Listo en tienda · revísalo',
+  // F17: el operador ya lo está atendiendo. El cliente no recibe email de este
+  // paso (está enfrente), pero el mapa es exhaustivo y el valor hace falta.
+  EN_ATENCION: 'Te estamos atendiendo en mostrador',
+  PENDIENTE_PAGO: 'Pendiente de pago',
+  PAGADO: 'Pago confirmado',
+  ENVIADO: 'Enviado · en camino',
+  ENTREGADO: 'Entregado',
+  CANCELADO: 'Cancelado',
 };
 
 /**

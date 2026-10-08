@@ -51,12 +51,17 @@ function crearServicio(opts: {
   const access = {
     cargarYValidar: jest
       .fn()
-      .mockResolvedValue(opts.pedido ?? { id: 1, estado: EstadoPedido.EN_MOSTRADOR }),
+      .mockResolvedValue(opts.pedido ?? { id: 1, estado: EstadoPedido.EN_ATENCION }),
   };
+
+  // F17: `devolverACola` pasó de limpiar `llamadoAt` a mano a una transición
+  // real (`EN_ATENCION → REVISADO`), así que ahora delega en la máquina de
+  // estados. El mock captura la transición para poder aseverarla.
+  const cambiarEstado = jest.fn().mockResolvedValue({ id: 1, estado: EstadoPedido.REVISADO });
 
   const svc = new MostradorService(
     prisma as never,
-    {} as never, // pedidoState
+    { cambiarEstado } as never, // pedidoState
     access as never,
     {} as never, // reposicion
     { emitToTienda } as never,
@@ -64,65 +69,170 @@ function crearServicio(opts: {
     { confirmarDesdeMostrador } as never, // llegada
   );
 
-  return { svc, update, historialCreate, emitToTienda, confirmarDesdeMostrador, access };
+  return {
+    svc,
+    update,
+    historialCreate,
+    emitToTienda,
+    confirmarDesdeMostrador,
+    access,
+    cambiarEstado,
+  };
 }
 
 describe('MostradorService.devolverACola', () => {
-  it('saca el folio del panel Atendiendo y avisa a la TV', async () => {
-    const { svc, update, historialCreate, emitToTienda } = crearServicio({
-      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5, llamadoAt: new Date() },
+  it('devuelve el pedido a la plancha y avisa a la TV', async () => {
+    const { svc, update, cambiarEstado, emitToTienda } = crearServicio({
+      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5 },
     });
 
     const r = await svc.devolverACola(1, usuario);
 
+    // F17: el deshacer es una transición real, no un update de `llamadoAt`.
+    expect(cambiarEstado).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ nuevoEstado: EstadoPedido.REVISADO }),
+      usuario,
+      expect.objectContaining({ invalidarMonitor: true }),
+    );
+    // `llamadoAt` se limpia aparte: es auditoría de la llamada vigente.
     expect(update).toHaveBeenCalledWith({
       where: { id: 1 },
       data: { llamadoAt: null },
     });
-    // El historial deja constancia sin cambiar de estado.
-    expect(historialCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        pedidoId: 1,
-        estadoAnterior: EstadoPedido.EN_MOSTRADOR,
-        estadoNuevo: EstadoPedido.EN_MOSTRADOR,
-        observacion: expect.stringContaining('Devuelto a la cola por Ana Mostrador'),
-      }),
-    });
-    // Sin esto el folio seguiría anunciado en la TV hasta el siguiente poll.
-    expect(emitToTienda).toHaveBeenCalledWith(5, 'monitor.invalidado', { pedidoId: 1 });
     expect(r).toEqual({ ok: true, pedidoId: 1 });
   });
 
-  it('rechaza un pedido que no está en el panel Atendiendo', async () => {
+  it('rechaza un pedido que nunca se llamó (sigue en la plancha)', async () => {
     // Sin esta guarda, "devolver a la cola" sería un no-op silencioso: el
     // operador creería que deshizo algo que nunca pasó.
-    const { svc, update } = crearServicio({
-      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5, llamadoAt: null },
+    const { svc, cambiarEstado } = crearServicio({
+      pedido: { id: 1, estado: EstadoPedido.REVISADO },
+      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5 },
     });
 
     await expect(svc.devolverACola(1, usuario)).rejects.toThrow(BadRequestException);
-    expect(update).not.toHaveBeenCalled();
+    expect(cambiarEstado).not.toHaveBeenCalled();
   });
 
-  it('rechaza un pedido que ya salió de EN_MOSTRADOR', async () => {
-    const { svc, update } = crearServicio({
-      pedido: { id: 1, estado: EstadoPedido.PENDING_PAID },
-      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5, llamadoAt: new Date() },
+  it('rechaza un pedido que ya salió de mostrador', async () => {
+    const { svc, cambiarEstado } = crearServicio({
+      pedido: { id: 1, estado: EstadoPedido.PENDIENTE_PAGO },
+      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5 },
     });
 
-    await expect(svc.devolverACola(1, usuario)).rejects.toThrow(/EN_MOSTRADOR/);
-    expect(update).not.toHaveBeenCalled();
+    await expect(svc.devolverACola(1, usuario)).rejects.toThrow(/PENDIENTE_PAGO/);
+    expect(cambiarEstado).not.toHaveBeenCalled();
   });
 
   it('valida el acceso antes de tocar nada', async () => {
-    const { svc, access, update } = crearServicio({
-      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5, llamadoAt: new Date() },
+    const { svc, access, cambiarEstado } = crearServicio({
+      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5 },
     });
 
     await svc.devolverACola(1, usuario);
 
     expect(access.cargarYValidar).toHaveBeenCalledWith(1, usuario);
-    expect(update).toHaveBeenCalled();
+    expect(cambiarEstado).toHaveBeenCalled();
+  });
+});
+
+/**
+ * Oct 2026 — B4: el ajuste de mostrador REEMPLAZA la propuesta viva.
+ *
+ * El escenario: el pedido quedó incompleto con una propuesta PENDIENTE (bodega
+ * reportó faltantes) y el operador ajusta el pedido enfrente. Si la propuesta se
+ * queda PENDIENTE, bodega choca contra el índice único parcial
+ * (`pedidos_propuestas_pendiente_unica_idx`) al cerrar el surtido de la
+ * siguiente ronda, y `enviarAPagar` queda bloqueado para siempre por su guard
+ * de propuesta pendiente.
+ */
+describe('MostradorService.ajustar — la propuesta huérfana', () => {
+  function crearConAjuste() {
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+
+    const prisma: Record<string, any> = {
+      pedido: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 1,
+          estado: EstadoPedido.REVISADO,
+          tiendaId: 5,
+          descuento: 0,
+          impuestos: 0,
+          // El item que el ajuste va a tocar: `validarAjuste` exige que
+          // pertenezca al pedido.
+          items: [
+            { id: 10, cantidad: 5, cantidadSurtida: 5, estadoSurtido: 'COMPLETO', cancelada: false },
+          ],
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      historialPedido: { create: jest.fn() },
+      pedidoPropuesta: { updateMany },
+      itemPedido: {
+        findUnique: jest.fn().mockResolvedValue({ id: 10, precioUnitario: 100 }),
+        update: jest.fn().mockResolvedValue({}),
+        // `recalcularTotalesPedido` (que corre al final del ajuste) suma los
+        // subtotales de los items activos, y `aplicarAjuste` pide los ids
+        // actuales. Un item con `subtotal` es lo mínimo para que el recálculo
+        // no reviente con un Decimal inválido.
+        findMany: jest.fn().mockResolvedValue([{ id: 10, subtotal: 500 }]),
+        count: jest.fn().mockResolvedValue(1),
+      },
+    };
+
+    const cambiarEstado = jest.fn(async (_id: number, _dto: any, _u: any, opts: any) => {
+      // Los efectos corren dentro de la transacción, igual que en producción.
+      // El `tx` es el mismo objeto prisma: así las escrituras del ajuste
+      // (`itemPedido`, `pedidoPropuesta`) quedan registradas en los mocks.
+      if (opts?.efectos) await opts.efectos(prisma);
+      return { id: 1, estado: EstadoPedido.EN_REVISION };
+    });
+
+    const svc = new MostradorService(
+      prisma as never,
+      { cambiarEstado } as never,
+      { cargarYValidar: jest.fn().mockResolvedValue({ id: 1, estado: EstadoPedido.REVISADO }) } as never,
+      { crearDesdeAjuste: jest.fn() } as never,
+      { emitToTienda: jest.fn() } as never,
+      { columnaParaPedido: jest.fn(async () => 'lista1') } as never,
+      {} as never,
+    );
+
+    return { svc, updateMany };
+  }
+
+  it('marca SUPERADA la propuesta pendiente antes de mandar el pedido a bodega', async () => {
+    const { svc, updateMany } = crearConAjuste();
+
+    await svc.ajustar(1, usuario, 'el cliente quiere 2 menos', [
+      { itemId: 10, tipo: 'parcial', cantidad: 2 } as never,
+    ]);
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { pedidoId: 1, estado: 'PENDIENTE' },
+        data: expect.objectContaining({ estado: 'SUPERADA' }),
+      }),
+    );
+  });
+
+  it('también la marca SUPERADA cuando el ajuste NO trae items', async () => {
+    // El caso que se escapó en la primera versión: los `efectos` estaban
+    // condicionados a `hayCambios`, así que un ajuste sin items (el operador
+    // solo describe lo que el cliente quiere) dejaba la propuesta PENDIENTE. El
+    // pedido volvía a bodega con una propuesta viva y bodega chocaba contra el
+    // índice único parcial al cerrar el surtido siguiente.
+    const { svc, updateMany } = crearConAjuste();
+
+    await svc.ajustar(1, usuario, 'el cliente quiere 2 menos');
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { pedidoId: 1, estado: 'PENDIENTE' },
+        data: expect.objectContaining({ estado: 'SUPERADA' }),
+      }),
+    );
   });
 });
 
@@ -144,5 +254,46 @@ describe('MostradorService.marcarLlegada', () => {
 
     await expect(svc.marcarLlegada(1, usuario)).rejects.toThrow(BadRequestException);
     expect(confirmarDesdeMostrador).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Oct 2026: `traerAEntrega` — la salida que faltaba desde asesoría.
+ *
+ * `TRANSICIONES[EN_ASESORIA]` ya contemplaba `REVISADO`, pero ningún endpoint la
+ * disparaba: el operador solo podía "avisar llegada", que registra la presencia
+ * pero NO mete el pedido a la cola (el gate de visibilidad exige `REVISADO`).
+ * Así que el cliente con un pedido en asesoría se quedaba de pie esperando algo
+ * que nunca aparecía en la pantalla del mostrador.
+ */
+describe('MostradorService.traerAEntrega', () => {
+  it('mueve el pedido de asesoría al área de entrega', async () => {
+    const { svc, cambiarEstado } = crearServicio({
+      pedido: { id: 1, estado: EstadoPedido.EN_ASESORIA },
+      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5 },
+    });
+
+    const r = await svc.traerAEntrega(1, usuario, 'el cliente ya está aquí');
+
+    expect(r.estado).toBe(EstadoPedido.REVISADO);
+    expect(cambiarEstado).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ nuevoEstado: EstadoPedido.REVISADO }),
+      usuario,
+      // `asignacion: 'limpiar'` es obligatorio: el caller es el OPERADOR, y con
+      // 'caller' el pedido quedaría asignado a un usuario de mostrador,
+      // invisible en el monitor de bodega.
+      expect.objectContaining({ asignacion: 'limpiar', invalidarMonitor: true }),
+    );
+  });
+
+  it('rechaza un pedido que no está en asesoría', async () => {
+    const { svc, cambiarEstado } = crearServicio({
+      pedido: { id: 1, estado: EstadoPedido.REVISADO },
+      completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5 },
+    });
+
+    await expect(svc.traerAEntrega(1, usuario)).rejects.toThrow(BadRequestException);
+    expect(cambiarEstado).not.toHaveBeenCalled();
   });
 });

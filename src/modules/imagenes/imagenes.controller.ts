@@ -44,8 +44,8 @@ export class ImagenesController {
   @ApiOperation({
     summary: 'Sube una imagen para un producto (Admin)',
     description:
-      'Campo multipart `file` (JPG/PNG/WEBP, máx 5 MB) y campo `colorId` opcional. ' +
-      'Máximo 4 imágenes por (producto, color).',
+      'Campo multipart `file` (JPG/PNG/WEBP, máx 5 MB) y campo `colorId` ' +
+      'obligatorio. Máximo 4 imágenes por (producto, color).',
   })
   // El límite va en el interceptor para que busboy corte el stream a nivel de
   // red. Sin él, memoryStorage bufferiza el archivo COMPLETO en RAM antes de que

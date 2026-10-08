@@ -26,17 +26,17 @@ export interface Responsable {
 }
 
 const RESPONSABLES: Record<EstadoPedido, Responsable> = {
-  [EstadoPedido.PENDING_REVIEW]: {
+  [EstadoPedido.SOLICITADO]: {
     rol: RolUsuario.BODEGA,
     label: 'Bodega',
     queHace: 'por tomar',
   },
-  [EstadoPedido.REVIEWING]: {
+  [EstadoPedido.EN_REVISION]: {
     rol: RolUsuario.BODEGA,
     label: 'Bodega',
     queHace: 'surtiendo',
   },
-  [EstadoPedido.WAITING_CUSTOMER_APPROVAL]: {
+  [EstadoPedido.ESPERANDO_APROBACION]: {
     rol: RolUsuario.CLIENTE,
     label: 'el cliente',
     queHace: 'esperando que apruebe una propuesta',
@@ -46,32 +46,37 @@ const RESPONSABLES: Record<EstadoPedido, Responsable> = {
     label: 'Ventas',
     queHace: 'en asesoría',
   },
-  [EstadoPedido.EN_MOSTRADOR]: {
+  [EstadoPedido.REVISADO]: {
     rol: RolUsuario.MOSTRADOR,
     label: 'Mostrador',
-    queHace: 'listo para revisarse con el cliente',
+    queHace: 'en la plancha, esperando al cliente',
   },
-  [EstadoPedido.PENDING_PAID]: {
+  [EstadoPedido.EN_ATENCION]: {
+    rol: RolUsuario.MOSTRADOR,
+    label: 'Mostrador',
+    queHace: 'atendiendo al cliente',
+  },
+  [EstadoPedido.PENDIENTE_PAGO]: {
     rol: RolUsuario.CAJERO,
     label: 'Caja',
     queHace: 'esperando el pago',
   },
-  [EstadoPedido.PAID]: {
+  [EstadoPedido.PAGADO]: {
     rol: RolUsuario.MOSTRADOR,
     label: 'Mostrador',
     queHace: 'pagado, listo para entregar',
   },
-  [EstadoPedido.SHIPPED]: {
+  [EstadoPedido.ENVIADO]: {
     rol: RolUsuario.MOSTRADOR,
     label: 'Mostrador',
     queHace: 'enviado, pendiente de entrega',
   },
-  [EstadoPedido.COMPLETED]: {
+  [EstadoPedido.ENTREGADO]: {
     rol: null,
     label: 'nadie',
     queHace: 'ya entregado',
   },
-  [EstadoPedido.CANCELLED]: {
+  [EstadoPedido.CANCELADO]: {
     rol: null,
     label: 'nadie',
     queHace: 'cancelado',
@@ -79,7 +84,7 @@ const RESPONSABLES: Record<EstadoPedido, Responsable> = {
 };
 
 /** Estados terminales: ya no hay nada que operar. */
-const TERMINALES = new Set<EstadoPedido>([EstadoPedido.COMPLETED, EstadoPedido.CANCELLED]);
+const TERMINALES = new Set<EstadoPedido>([EstadoPedido.ENTREGADO, EstadoPedido.CANCELADO]);
 
 export function responsableDe(estado: EstadoPedido): Responsable {
   return RESPONSABLES[estado];
@@ -114,7 +119,7 @@ export function puedeOperar(estado: EstadoPedido, rol: RolUsuario | undefined): 
 export function mensajeNoEsTuyo(estado: EstadoPedido): string {
   const r = RESPONSABLES[estado];
   if (TERMINALES.has(estado)) {
-    return estado === EstadoPedido.COMPLETED
+    return estado === EstadoPedido.ENTREGADO
       ? 'Este pedido ya fue entregado.'
       : 'Este pedido está cancelado.';
   }

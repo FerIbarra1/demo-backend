@@ -157,12 +157,14 @@ export class CatalogoService {
           stockDisponible: null,
         };
       });
-      // Imágenes agrupadas por color (colorId null = generales).
+      // Imágenes agrupadas por color. La entrada 'general' queda vacía porque
+      // el bucket general (colorId null) ya no existe: cada imagen vive en un
+      // color. La clave se conserva por compatibilidad con la UI del catálogo.
       const imagenesPorColor: Record<number | 'general', string[]> = {
         general: [],
       };
       for (const img of producto.imagenesProducto) {
-        const k = img.colorId ?? 'general';
+        const k: number | 'general' = img.colorId;
         if (!imagenesPorColor[k]) imagenesPorColor[k] = [];
         imagenesPorColor[k].push(img.url);
       }
@@ -258,7 +260,7 @@ export class CatalogoService {
       general: [],
     };
     for (const img of producto.imagenesProducto) {
-      const k = img.colorId ?? 'general';
+      const k: number | 'general' = img.colorId;
       if (!imagenesPorColor[k]) imagenesPorColor[k] = [];
       imagenesPorColor[k].push(img.url);
     }

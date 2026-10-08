@@ -4,14 +4,14 @@ import { EstadoPedido, ModoEntrega } from '@prisma/client';
 
 /**
  * F16 (sep 2026): el aviso de llegada solo se acepta cuando el pedido YA ESTÁ
- * LISTO para revisarse en tienda (`EN_MOSTRADOR`).
+ * LISTO para revisarse en tienda (`REVISADO`).
  *
  * Ese estado es exactamente el punto en que bodega terminó de verificar (aprobó
  * el pedido tal cual), o el cliente aprobó las modificaciones que bodega o
  * ventas propusieron.
  *
  * Antes solo se rechazaban COMPLETED y CANCELLED, así que el cliente podía
- * avisar desde PENDING_REVIEW: el pedido quedaba marcado "EN TIENDA" antes de
+ * avisar desde SOLICITADO: el pedido quedaba marcado "EN TIENDA" antes de
  * que nadie lo hubiera surtido, y el mostrador no tenía nada que mostrarle.
  */
 
@@ -39,28 +39,28 @@ function crearServicio(pedido: Record<string, unknown> | null) {
 const pedidoBase = {
   id: 1,
   usuarioId: 7,
-  estado: EstadoPedido.EN_MOSTRADOR,
+  estado: EstadoPedido.REVISADO,
   modoEntrega: ModoEntrega.RECOGER_TIENDA,
   tiendaId: 5,
 };
 
 describe('anunciarLlegada — solo cuando el pedido está listo (F16)', () => {
-  it('acepta el aviso en EN_MOSTRADOR (bodega aprobó, o el cliente aprobó cambios)', async () => {
+  it('acepta el aviso en REVISADO (bodega aprobó, o el cliente aprobó cambios)', async () => {
     const { svc, confirmarDesdeCliente } = crearServicio({ ...pedidoBase });
     await svc.anunciarLlegada(1, 7);
     expect(confirmarDesdeCliente).toHaveBeenCalledWith(1);
   });
 
   it.each([
-    ['PENDING_REVIEW', EstadoPedido.PENDING_REVIEW],
-    ['REVIEWING', EstadoPedido.REVIEWING],
-    ['WAITING_CUSTOMER_APPROVAL', EstadoPedido.WAITING_CUSTOMER_APPROVAL],
+    ['SOLICITADO', EstadoPedido.SOLICITADO],
+    ['EN_REVISION', EstadoPedido.EN_REVISION],
+    ['ESPERANDO_APROBACION', EstadoPedido.ESPERANDO_APROBACION],
     ['EN_ASESORIA', EstadoPedido.EN_ASESORIA],
-    ['PENDING_PAID', EstadoPedido.PENDING_PAID],
-    ['PAID', EstadoPedido.PAID],
-    ['SHIPPED', EstadoPedido.SHIPPED],
-    ['COMPLETED', EstadoPedido.COMPLETED],
-    ['CANCELLED', EstadoPedido.CANCELLED],
+    ['PENDIENTE_PAGO', EstadoPedido.PENDIENTE_PAGO],
+    ['PAGADO', EstadoPedido.PAGADO],
+    ['ENVIADO', EstadoPedido.ENVIADO],
+    ['ENTREGADO', EstadoPedido.ENTREGADO],
+    ['CANCELADO', EstadoPedido.CANCELADO],
   ])('rechaza el aviso en %s', async (_nombre, estado) => {
     const { svc, confirmarDesdeCliente } = crearServicio({
       ...pedidoBase,
@@ -74,7 +74,7 @@ describe('anunciarLlegada — solo cuando el pedido está listo (F16)', () => {
   it('el mensaje explica por qué no se puede todavía', async () => {
     const { svc } = crearServicio({
       ...pedidoBase,
-      estado: EstadoPedido.REVIEWING,
+      estado: EstadoPedido.EN_REVISION,
     });
     await expect(svc.anunciarLlegada(1, 7)).rejects.toThrow(/preparando tu pedido/i);
   });

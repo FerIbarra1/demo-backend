@@ -42,7 +42,7 @@ function crearSurtido(items: any[], opts: { propuestaAceptada?: boolean } = {}) 
     pedido: {
       findUnique: jest.fn(async () => ({
         id: 1,
-        estado: EstadoPedido.REVIEWING,
+        estado: EstadoPedido.EN_REVISION,
         tiendaId: 5,
         asignadoAId: usuario.userId,
         modoEntrega: ModoEntrega.KIOSKO,
@@ -50,10 +50,15 @@ function crearSurtido(items: any[], opts: { propuestaAceptada?: boolean } = {}) 
         impuestos: new Prisma.Decimal(0),
         items,
       })),
+      // `recalcularTotalesPedido` escribe subtotal/total al cerrar el surtido.
+      update: jest.fn(async () => ({})),
     },
     pedidoPropuesta: {
       findFirst: jest.fn(async () => (opts.propuestaAceptada ? { id: 77 } : null)),
       update: jest.fn(async () => ({})),
+      // F17: el cierre de surtido crea la propuesta automáticamente cuando hay
+      // faltantes y el pedido va a la plancha.
+      create: jest.fn(async () => ({ id: 88 })),
     },
     itemPedido: {
       findUnique: jest.fn(async ({ where }: any) => {
@@ -64,6 +69,9 @@ function crearSurtido(items: any[], opts: { propuestaAceptada?: boolean } = {}) 
       findMany: jest.fn(async () => items.filter((i) => !i.cancelada)),
     },
     pedidoReposicion: { create: jest.fn(async () => ({})) },
+    // F18: el cierre automático crea el mensaje de chat con la propuesta
+    // adjunta — sin él el cliente no tiene dónde verla ni responderla.
+    pedidoMensaje: { create: jest.fn(async () => ({})) },
   };
 
   const state = {
@@ -82,11 +90,11 @@ function crearSurtido(items: any[], opts: { propuestaAceptada?: boolean } = {}) 
     { cargarYValidar: jest.fn(async () => ({ id: 1 })) } as never,
     state as never,
     { enviar: jest.fn() } as never,
-    { emitToPedido: jest.fn(), emitToTienda: jest.fn() } as never,
+    { emitToPedido: jest.fn(), emitToTienda: jest.fn(), emitToUser: jest.fn() } as never,
     { resolverImagen: jest.fn((u: any) => u) } as never,
   );
 
-  return { svc, prisma, transiciones };
+  return { svc, prisma, transiciones, pedidoPropuestaCreate: prisma.pedidoPropuesta.create };
 }
 
 /** Un item base del pedido. */
@@ -119,7 +127,7 @@ describe('confirmarSurtido: los items cancelados no son faltantes', () => {
     ]);
 
     await expect(svc.confirmarSurtido(1, usuario, false)).resolves.toBeDefined();
-    expect(transiciones[0].nuevoEstado).toBe(EstadoPedido.EN_MOSTRADOR);
+    expect(transiciones[0].nuevoEstado).toBe(EstadoPedido.REVISADO);
   });
 
   it('un item cancelado con PARCIAL NO bloquea la confirmación', async () => {
@@ -142,15 +150,18 @@ describe('confirmarSurtido: los items cancelados no son faltantes', () => {
     await expect(svc.confirmarSurtido(1, usuario, false)).resolves.toBeDefined();
   });
 
-  it('un faltante GENUINO (no cancelado) sí sigue pidiendo propuesta', async () => {
-    // La regla de negocio: bodega surtió menos de lo aprobado → nueva
-    // aprobación del cliente. Este es el caso legítimo del 400.
-    const { svc } = crearSurtido([
+  it('un faltante GENUINO (no cancelado) cierra el surtido y crea la propuesta', async () => {
+    // F17 (oct 2026): antes este caso lanzaba un 400 pidiendo "envía la
+    // propuesta y espera". Contradecía el piso: la bolsa con el ticket YA está
+    // en la mesa de mostrador. Ahora el cierre es un solo paso — el sistema
+    // crea la propuesta y manda el pedido a la plancha.
+    const { svc, pedidoPropuestaCreate } = crearSurtido([
       item({ id: 1, estadoSurtido: EstadoSurtido.PARCIAL, cantidadSurtida: 1 }),
       item({ id: 2 }),
     ]);
 
-    await expect(svc.confirmarSurtido(1, usuario, false)).rejects.toThrow(BadRequestException);
+    await expect(svc.confirmarSurtido(1, usuario, false)).resolves.toBeDefined();
+    expect(pedidoPropuestaCreate).toHaveBeenCalled();
   });
 
   it('un item cancelado COMPLETO no cuenta como producto activo', async () => {
@@ -236,11 +247,14 @@ function crearPropuesta(items: any[]) {
 
   const svc = new PropuestaService(
     { pedidoPropuesta: { update: jest.fn() } } as never,
-    { emitToPedido: jest.fn(), emitToTienda: jest.fn() } as never,
+    { emitToPedido: jest.fn(), emitToTienda: jest.fn(), emitToUser: jest.fn() } as never,
     { cargarYValidar: jest.fn() } as never,
     { cambiarEstado: jest.fn() } as never,
     { crearDesdePedido: jest.fn() } as never,
     { columnaParaPedido: jest.fn(async () => 'precio1') } as never,
+    // Oct 2026: NotificationsService. Los tests de este spec no ejercen el
+    // envío de correos; basta con que exista para que el constructor resuelva.
+    { enviar: jest.fn() } as never,
   );
 
   const aplicar = (svc as any).aplicarPropuestaDeVentas.bind(svc);

@@ -15,7 +15,7 @@ import { aplicarCambiosFisicos } from './aplicar-cambios-surtido.util';
  *           items PENDIENTE.
  *   T3    — H2 red de seguridad: si por una carrera se cuela un item
  *           PENDIENTE en `aprobarPropuestaBodega`, el pedido vuelve a
- *           REVIEWING en vez de avanzar a pago.
+ *           EN_REVISION en vez de avanzar a pago.
  *   T4    — H3: `aplicarPropuestaDeVentas` rechaza dejar 0 items activos.
  *   T5/T6 — H4: una propuesta de ventas que omite un item PARCIAL/
  *           NO_DISPONIBLE residual hace que `quedanPendientes` sea
@@ -76,7 +76,7 @@ function crearPropuestaServiceParaEnvio(items: any[], opts: { pedidoEncontrado?:
 
   const pedido = opts.pedidoEncontrado ?? {
     id: 1,
-    estado: EstadoPedido.REVIEWING,
+    estado: EstadoPedido.EN_REVISION,
     tiendaId: 5,
   };
 
@@ -102,9 +102,21 @@ function crearPropuestaServiceParaEnvio(items: any[], opts: { pedidoEncontrado?:
   prisma.$transaction = jest.fn(async (fn: any) => fn(prisma));
 
   const state = {
-    // No usamos cambiarEstado en este test (la propuesta no transiciona
-    // estado al enviar; eso pasa al aprobar).
-    cambiarEstado: jest.fn(),
+    // `enviarPropuesta` sí transiciona (a ESPERANDO_APROBACION) y ahora lee los
+    // `efectos` del retorno para dispararlos tras el commit: con `tx` la
+    // máquina de estados no puede emitirlos ella misma. El mock devuelve el
+    // shape real (`{ pedido, efectos }`) para que el destructuring no reviente.
+    cambiarEstado: jest.fn(async () => ({
+      pedido: { id: 1 },
+      efectos: {
+        tiendaId: 5,
+        estadoAnterior: EstadoPedido.EN_REVISION,
+        estadoNuevo: EstadoPedido.ESPERANDO_APROBACION,
+        invalidarMonitor: true,
+        notifTipo: null,
+      },
+    })),
+    dispararEfectosDeTransicion: jest.fn(),
   };
 
   const realtime = {
@@ -124,6 +136,7 @@ function crearPropuestaServiceParaEnvio(items: any[], opts: { pedidoEncontrado?:
     state as never,
     reposicion as never,
     precios as never,
+    { enviar: jest.fn() } as never, // notifications
   );
 
   const enviar = svc.enviarPropuesta.bind(svc);
@@ -213,7 +226,7 @@ describe('T1/T2 — H2 prevención: enviarPropuesta valida items PENDIENTE', () 
   });
 
   it('NO valida items PENDIENTE si el rol es VENTAS (su propio flujo)', async () => {
-    // Ventas opera sobre pedidos en EN_ASESORIA/WAITING_CUSTOMER_APPROVAL;
+    // Ventas opera sobre pedidos en EN_ASESORIA/ESPERANDO_APROBACION;
     // el concepto de "PENDIENTE" es propio de bodega. Validar que la
     // guardia NO se dispara cuando el rol es ventas.
     const { enviar, creado } = crearPropuestaServiceParaEnvio(
@@ -251,12 +264,12 @@ describe('T1/T2 — H2 prevención: enviarPropuesta valida items PENDIENTE', () 
 });
 
 // =============================================================================
-// T3 — H2 red de seguridad: aprobarPropuestaBodega vuelve a REVIEWING
+// T3 — H2 red de seguridad: aprobarPropuestaBodega vuelve a EN_REVISION
 //      si hay items PENDIENTE residuales
 // =============================================================================
 
-describe('T3 — H2 red: aprobarPropuestaBodega vuelve a REVIEWING si hay PENDIENTE', () => {
-  it('transiciona a REVIEWING y consume la propuesta, no avanza a mostrador/pago', async () => {
+describe('T3 — H2 red: aprobarPropuestaBodega vuelve a EN_REVISION si hay PENDIENTE', () => {
+  it('transiciona a EN_REVISION y consume la propuesta, no avanza a mostrador/pago', async () => {
     // Setup mínimo para `aprobarPropuestaBodega`.
     const transiciones: Array<{ nuevoEstado: EstadoPedido }> = [];
 
@@ -281,7 +294,7 @@ describe('T3 — H2 red: aprobarPropuestaBodega vuelve a REVIEWING si hay PENDIE
           if (include?.items) {
             return {
               id: 1,
-              estado: EstadoPedido.WAITING_CUSTOMER_APPROVAL,
+              estado: EstadoPedido.ESPERANDO_APROBACION,
               tiendaId: 5,
               modoEntrega: ModoEntrega.KIOSKO,
               descuento: new Prisma.Decimal(0),
@@ -329,6 +342,7 @@ describe('T3 — H2 red: aprobarPropuestaBodega vuelve a REVIEWING si hay PENDIE
       state as never,
       { crearDesdePedido: jest.fn() } as never,
       { columnaParaPedido: jest.fn() } as never,
+      { enviar: jest.fn() } as never, // notifications
     );
 
     const aprobar = (svc as any).aprobarPropuestaBodega.bind(svc);
@@ -344,10 +358,10 @@ describe('T3 — H2 red: aprobarPropuestaBodega vuelve a REVIEWING si hay PENDIE
       new Date(),
     );
 
-    expect(result.estado).toBe(EstadoPedido.REVIEWING);
+    expect(result.estado).toBe(EstadoPedido.EN_REVISION);
     expect(result.mensaje).toMatch(/quedaron pendientes/i);
     expect(transiciones).toHaveLength(1);
-    expect(transiciones[0].nuevoEstado).toBe(EstadoPedido.REVIEWING);
+    expect(transiciones[0].nuevoEstado).toBe(EstadoPedido.EN_REVISION);
   });
 });
 
@@ -386,6 +400,7 @@ describe('T4 — H3: ventas no avanza con 0 items activos', () => {
       { cambiarEstado: jest.fn() } as never,
       { crearDesdePedido: jest.fn() } as never,
       { columnaParaPedido: jest.fn(async () => 'precio1') } as never,
+      { enviar: jest.fn() } as never, // notifications
     );
 
     const aplicar = (svc as any).aplicarPropuestaDeVentas.bind(svc);
@@ -475,6 +490,7 @@ describe('T5/T6 — H4: quedanPendientes refleja items no-COMPLETO residuales', 
       { cambiarEstado: jest.fn() } as never,
       { crearDesdePedido: jest.fn() } as never,
       { columnaParaPedido: jest.fn(async () => 'precio1') } as never,
+      { enviar: jest.fn() } as never, // notifications
     );
 
     const aplicar = (svc as any).aplicarPropuestaDeVentas.bind(svc);
@@ -518,7 +534,7 @@ describe('T7/T8 — H5: marcarItem rechaza cantidades inválidas y cancelados', 
       pedido: {
         findUnique: jest.fn(async () => ({
           id: 1,
-          estado: EstadoPedido.REVIEWING,
+          estado: EstadoPedido.EN_REVISION,
           tiendaId: 5,
         })),
       },

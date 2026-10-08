@@ -45,34 +45,74 @@ enum RolUsuario {
   ADMIN
 }
 
+// F17 (oct 2026): los 8 procesos del negocio, con los nombres del negocio.
+//
+// Antes el enum tenía nombres técnicos y el negocio hablaba de otra cosa
+// ("plancha", "mesa", "revisado"), así que código y pantalla decían distinto.
+// Ahora dicen lo mismo. El estado NO se persiste en Firebird (el agente lee el
+// campo pero no lo usa para nada), así que el renombrado no toca la
+// sincronización.
+//
+//   1 SOLICITADO            el cliente lo creó. En cola de bodega.
+//   2 EN_REVISION           un bodeguero lo tomó y lo está surtiendo.
+//   3 REVISADO              la PLANCHA. El bodeguero cerró el surtido —completo
+//                           o incompleto— y la bolsa con el ticket está en la
+//                           mesa de mostrador. Si hay faltantes, el sistema ya
+//                           mandó la propuesta y el cliente debe decidir.
+//   4 EN_ATENCION           el operador llamó al cliente y está haciendo el
+//                           recuento con él, enfrente.
+//   5 PENDIENTE_PAGO        se envió a pagar. AQUÍ entra al ERP.
+//   6 PAGADO                cobrado en VFP.
+//   7 (listo para entregar) PAGADO sin domicilio: el operador entrega.
+//   8 ENTREGADO             cerrado.
+//
+// Domicilio: PAGADO → ENVIADO → ENTREGADO.
 enum EstadoPedido {
-  PENDING_REVIEW
-  REVIEWING
-  WAITING_CUSTOMER_APPROVAL
+  SOLICITADO
+  EN_REVISION
   // F13 (sep 2026): el cliente pidió un asesor de ventas, o rechazó la
   // propuesta del vendedor y quiere re-negociar. El pedido sale de la cola
   // de bodega y entra a la cola de VENTAS de su tienda.
   EN_ASESORIA
-  // F16 (sep 2026): el pedido pasó por mostrador ANTES de pagar. Bodega ya
-  // verificó físicamente los productos y el pedido está apartado, esperando
-  // que el cliente lo revise en tienda. Es el "pedido retenido" del negocio,
-  // ahora explícito en el modelo.
+  // F13: el cliente debe decidir sobre una propuesta. Estado PROPIO (y no
+  // REVISADO) porque el pedido todavía no puede mostrarse: hay faltantes sin
+  // resolver y mostrador no tiene nada que enseñar. Sale de aquí cuando el
+  // cliente responde (aprobar → REVISADO, rechazar → CANCELADO, asesor →
+  // EN_ASESORIA).
   //
-  // Por qué un estado y no una columna sobre PENDING_PAID: con una columna,
+  // OJO: este es el único camino que NO pasa por la plancha. El cierre de
+  // surtido normal (SurtidoService.confirmarSurtido) manda a REVISADO incluso
+  // con faltantes, y crea la propuesta ahí mismo.
+  ESPERANDO_APROBACION
+  // F16 (sep 2026) / F17: LA PLANCHA. Bodega ya verificó físicamente los
+  // productos y el pedido está apartado en la mesa, esperando al cliente.
+  //
+  // Por qué un estado y no una columna sobre PENDIENTE_PAGO: con una columna,
   // CADA query del cajero tendría que acordarse de filtrarla, y un solo
   // filtro olvidado manda a un cliente a pagar antes de que mostrador le
   // muestre su pedido. Con estado propio, un pedido no liberado es
   // estructuralmente invisible para el pago.
   //
-  // Salidas: PENDING_PAID (liberar — aquí se encola a Firebird),
-  //          REVIEWING (ajustar — el cliente cambió algo, bodega re-surte),
-  //          CANCELLED (cancelar + lista de reposición).
-  EN_MOSTRADOR
-  PENDING_PAID
-  PAID
-  SHIPPED
-  COMPLETED
-  CANCELLED
+  // Salidas: EN_ATENCION (llamar al cliente),
+  //          EN_REVISION  (ajustar — el cliente cambió algo, bodega re-surte),
+  //          PENDIENTE_PAGO (enviar a pagar — aquí se encola a Firebird),
+  //          CANCELADO    (cancelar + lista de reposición).
+  REVISADO
+  // F17 (oct 2026): el operador llamó al cliente y lo está atendiendo. Antes
+  // esto era la columna `Pedido.llamadoAt`, que no distinguía "llamado" de
+  // "atendiendo" y obligaba a cada query a recordar el filtro. Con estado
+  // propio, el panel "Atendiendo" de la TV es un WHERE, no un cálculo.
+  //
+  // Salidas: REVISADO (deshacer la llamada — el cliente no llegó),
+  //          EN_REVISION (ajustar durante el recuento),
+  //          PENDIENTE_PAGO (enviar a pagar),
+  //          CANCELADO.
+  EN_ATENCION
+  PENDIENTE_PAGO
+  PAGADO
+  ENVIADO
+  ENTREGADO
+  CANCELADO
 }
 
 // F12 (sep 2026): estado de una propuesta de ajuste que bodega envía al
@@ -344,7 +384,9 @@ model Producto {
 model ProductoImagen {
   id          Int      @id @default(autoincrement())
   productoId  Int      @map("producto_id")
-  colorId     Int?     @map("color_id")
+  // Toda imagen pertenece a un color del producto. El bucket "general"
+  // (colorId NULL) se eliminó: si no hay color, no hay imagen.
+  colorId     Int      @map("color_id")
   url         String   @db.VarChar(500)
   orden       Int      @default(0)
   esPrincipal Boolean  @default(false) @map("es_principal")
@@ -352,7 +394,7 @@ model ProductoImagen {
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   producto Producto @relation(fields: [productoId], references: [id], onDelete: Cascade)
-  color    Color?   @relation(fields: [colorId], references: [id], onDelete: SetNull)
+  color    Color    @relation(fields: [colorId], references: [id], onDelete: Restrict)
 
   @@index([productoId, colorId])
   @@index([productoId, esPrincipal])
@@ -494,7 +536,7 @@ model Pedido {
   numeroPedido String       @unique @map("numero_pedido") @db.VarChar(20)
   usuarioId    Int          @map("usuario_id")
   tiendaId     Int          @map("tienda_id")
-  estado       EstadoPedido @default(PENDING_REVIEW)
+  estado       EstadoPedido @default(SOLICITADO)
   canalOrigen  CanalOrigen  @default(WEB) @map("canal_origen")
   // KIOSKO: si el pedido se originó en un kiosko físico, apunta al kiosko
   // que lo creó. NULL = pedido web. Permite trazabilidad: el cliente ve en su
@@ -564,8 +606,11 @@ model Pedido {
   // y entra a la cola de VENTAS de su tienda (que es 1 por tienda, sin
   // asignación 1:1 — no hay vendedorAsignadoId).
   asesorSolicitadoAt  DateTime? @map("asesor_solicitado_at")
-  // F13: nota libre del cliente al pedir asesor (qué quiere negociar).
-  asesorSolicitudNota String?   @map("asesor_solicitud_nota") @db.Text
+  // Oct 2026: aquí vivía `asesorSolicitudNota` (F13), la nota libre que el
+  // cliente escribía al pedir un asesor. Se ELIMINÓ: ese texto ahora ES el
+  // primer mensaje del chat con el asesor (`PedidoMensaje`), así que la
+  // columna era una segunda copia del mismo dato — justo la que el asesor leía
+  // en su cola, mientras el cliente seguía escribiendo en el chat.
 
   // PR7 (sep 2026): aviso de "el cliente ya está en tienda" para pedidos
   // web que se recogerán en mostrador. Es una señal de cola, NO un

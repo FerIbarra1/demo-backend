@@ -15,7 +15,7 @@ import { EstadoPedido, Prisma, RolUsuario, ModoEntrega } from '@prisma/client';
 /**
  * Servicio del dominio CAJERO.
  *
- * Responsabilidad: cola de pedidos del kiosko en PENDING_PAID, asignar
+ * Responsabilidad: cola de pedidos del kiosko en PENDIENTE_PAGO, asignar
  * pedidos a la ventanilla del cajero logueado (1:1), liberar y listar
  * mis pedidos. NO dispara transiciones de estado: sólo cambia la
  * asignación de ventanilla. El cobro se confirma en un sistema externo
@@ -41,15 +41,15 @@ export class CajeroService {
      * pedidos web, que con el flujo nuevo SÍ llegan a caja (mostrador los
      * libera). El filtro sigue existiendo como comodidad de UI — la cajera
      * puede querer ver solo los de kiosko — pero ya no es un gate: el gate real
-     * es el ESTADO (`PENDING_PAID`), al que solo se llega por liberación de
+     * es el ESTADO (`PENDIENTE_PAGO`), al que solo se llega por liberación de
      * mostrador (o por domicilio, que no pasa por caja).
      */
     canal: 'KIOSKO' | 'WEB' | 'TODOS' = 'TODOS',
   ) {
     const where: Prisma.PedidoWhereInput = {
-      estado: EstadoPedido.PENDING_PAID,
+      estado: EstadoPedido.PENDIENTE_PAGO,
       cajeroAsignadoId: null,
-      // Un pedido a DOMICILIO en PENDING_PAID no se cobra en ventanilla: el
+      // Un pedido a DOMICILIO en PENDIENTE_PAGO no se cobra en ventanilla: el
       // cliente no va a la tienda. Antes quedaba excluido de facto por el
       // filtro de KIOSKO; al quitarlo hay que ser explícito.
       modoEntrega: { not: ModoEntrega.DOMICILIO },
@@ -98,12 +98,12 @@ export class CajeroService {
       // F16 (sep 2026): el candado de canal se eliminó. Antes rechazaba todo
       // pedido no-KIOSKO con 400, y con el flujo nuevo los pedidos web SÍ
       // llegan a caja (mostrador los libera tras mostrárselos al cliente).
-      // El gate real es el ESTADO: solo `PENDING_PAID` entra al monitor de
+      // El gate real es el ESTADO: solo `PENDIENTE_PAGO` entra al monitor de
       // ventanillas, y a ese estado solo se llega por liberación de mostrador
       // o por el camino de domicilio (que no pasa por caja).
-      if (pedido.estado !== EstadoPedido.PENDING_PAID) {
+      if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO) {
         throw new BadRequestException(
-          `Sólo se toman pedidos en PENDING_PAID (actual: ${pedido.estado})`,
+          `Sólo se toman pedidos en PENDIENTE_PAGO (actual: ${pedido.estado})`,
         );
       }
       // Un pedido a domicilio no se cobra en ventanilla.
@@ -128,8 +128,8 @@ export class CajeroService {
       await tx.historialPedido.create({
         data: {
           pedidoId,
-          estadoAnterior: EstadoPedido.PENDING_PAID,
-          estadoNuevo: EstadoPedido.PENDING_PAID,
+          estadoAnterior: EstadoPedido.PENDIENTE_PAGO,
+          estadoNuevo: EstadoPedido.PENDIENTE_PAGO,
           observacion: `Tomado para ventanilla por ${usuario.nombre}`,
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
@@ -208,7 +208,7 @@ export class CajeroService {
   async obtenerMisPedidosCajero(usuarioId: number, tiendaId?: number) {
     const where: Prisma.PedidoWhereInput = {
       cajeroAsignadoId: usuarioId,
-      estado: EstadoPedido.PENDING_PAID,
+      estado: EstadoPedido.PENDIENTE_PAGO,
     };
     if (tiendaId) where.tiendaId = tiendaId;
 
@@ -225,7 +225,7 @@ export class CajeroService {
 
   /**
    * F11 (ago 2026): "Llamar siguiente" — el cajero presiona el botón, toma el
-   * primer pedido en PENDING_PAID sin asignar (FIFO por fechaPedido) y se lo
+   * primer pedido en PENDIENTE_PAGO sin asignar (FIFO por fechaPedido) y se lo
    * asigna a su ventanilla.
    *
    * F16 (sep 2026): ya NO filtra por canal. Antes solo tomaba pedidos KIOSKO,
@@ -261,7 +261,7 @@ export class CajeroService {
     const siguiente = await this.prisma.pedido.findFirst({
       where: {
         tiendaId: usuario.tiendaId,
-        estado: EstadoPedido.PENDING_PAID,
+        estado: EstadoPedido.PENDIENTE_PAGO,
         // Los pedidos a domicilio no se cobran en ventanilla.
         modoEntrega: { not: ModoEntrega.DOMICILIO },
         cajeroAsignadoId: null,

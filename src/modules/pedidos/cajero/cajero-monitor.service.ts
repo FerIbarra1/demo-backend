@@ -5,7 +5,7 @@ import { minutosEntre } from '../core/urgencia.util';
 
 /**
  * Monitor de ventanillas (jun 2026): snapshot por VENTANILLA (1, 2, 3…)
- * de la tienda, con sus pedidos en PENDING_PAID asignados y la cola
+ * de la tienda, con sus pedidos en PENDIENTE_PAGO asignados y la cola
  * sin asignar ("Turnos siguientes").
  *
  * F11 (ago 2026): cada ventanilla tiene un número físico (1..N) definido
@@ -73,7 +73,7 @@ export class CajeroMonitorService {
         const pedidosRaw = cajeroActivo
           ? await this.prisma.pedido.findMany({
               where: {
-                estado: EstadoPedido.PENDING_PAID,
+                estado: EstadoPedido.PENDIENTE_PAGO,
                 cajeroAsignadoId: v.cajeroId,
                 // F16: sin filtro de canal (los web también se cobran aquí).
                 modoEntrega: { not: ModoEntrega.DOMICILIO },
@@ -119,13 +119,13 @@ export class CajeroMonitorService {
       }),
     );
 
-    // 2) Cola sin asignar (PENDING_PAID + cajeroAsignadoId null).
+    // 2) Cola sin asignar (PENDIENTE_PAGO + cajeroAsignadoId null).
     // F16: sin filtro de canal; se excluyen los domicilio (no se cobran en
     // ventanilla).
     const colaRaw = await this.prisma.pedido.findMany({
       where: {
         tiendaId,
-        estado: EstadoPedido.PENDING_PAID,
+        estado: EstadoPedido.PENDIENTE_PAGO,
         modoEntrega: { not: ModoEntrega.DOMICILIO },
         cajeroAsignadoId: null,
       },

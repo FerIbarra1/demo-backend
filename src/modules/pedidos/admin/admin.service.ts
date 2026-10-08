@@ -91,7 +91,7 @@ export class AdminService {
     await this.access.cargarYValidar(pedidoId, usuario);
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
-    if (pedido.estado !== EstadoPedido.CANCELLED) {
+    if (pedido.estado !== EstadoPedido.CANCELADO) {
       throw new BadRequestException('Sólo se pueden eliminar pedidos en estado CANCELLED');
     }
     await this.prisma.pedido.delete({ where: { id: pedidoId } });
@@ -117,7 +117,7 @@ export class AdminService {
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
-    if (pedido.estado === EstadoPedido.PAID) {
+    if (pedido.estado === EstadoPedido.PAGADO) {
       return pedido;
     }
     // El agente externo (Firebird) inyecta userId=0 vía ApiKeyGuard. Puede
@@ -125,20 +125,20 @@ export class AdminService {
     // cobro ya ocurrió, no tiene sentido rechazar por el estado de la nube.
     //
     // F13: PERO solo si el pedido ya llegó a Firebird. Un pedido en
-    // EN_ASESORIA o WAITING_CUSTOMER_APPROVAL nunca se encoló (la fila de
-    // `PedidoPendienteEnvio` se crea al pasar a PENDING_PAID), así que no
+    // EN_ASESORIA o ESPERANDO_APROBACION nunca se encoló (la fila de
+    // `PedidoPendienteEnvio` se crea al pasar a PENDIENTE_PAGO), así que no
     // existe en el ERP: marcarlo PAID dejaría un pedido pagado sin folio, sin
     // items confirmados y sin nada que cobrar. Se exige la fila de cola.
     const esAgente = usuario.userId === 0;
-    if (pedido.estado !== EstadoPedido.PENDING_PAID) {
-      const terminales: EstadoPedido[] = [EstadoPedido.CANCELLED, EstadoPedido.COMPLETED];
+    if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO) {
+      const terminales: EstadoPedido[] = [EstadoPedido.CANCELADO, EstadoPedido.ENTREGADO];
       if (!esAgente || terminales.includes(pedido.estado)) {
         throw new BadRequestException(
-          `Sólo se marca como pagado un pedido en PENDING_PAID (actual: ${pedido.estado})`,
+          `Sólo se marca como pagado un pedido en PENDIENTE_PAGO (actual: ${pedido.estado})`,
         );
       }
       // El agente solo puede saltarse el gate si el pedido ya fue encolado a
-      // Firebird (es decir, pasó por PENDING_PAID en algún momento).
+      // Firebird (es decir, pasó por PENDIENTE_PAGO en algún momento).
       const encolado = await this.prisma.pedidoPendienteEnvio.findUnique({
         where: { pedidoId },
         select: { id: true },
@@ -160,7 +160,7 @@ export class AdminService {
       throw new BadRequestException('fechaPago inválido');
     }
 
-    // El estado real del pedido (PENDING_PAID para admin humano; cualquier
+    // El estado real del pedido (PENDIENTE_PAGO para admin humano; cualquier
     // no-terminal para el agente). Se usa como guarda del updateMany para
     // evitar una race condition entre la lectura y la escritura.
     const estadoAnterior = pedido.estado;
@@ -171,11 +171,11 @@ export class AdminService {
         // update (race-safe atómico). Si el pedido ya está PAID, updateMany
         // no aplica y caemos al branch de result.count !== 1 → retorno
         // idempotente. Mantenemos `estado: estadoAnterior` para el caso del
-        // agente (cualquier estado no-terminal) o del admin (PENDING_PAID).
+        // agente (cualquier estado no-terminal) o del admin (PENDIENTE_PAGO).
         // El `not: PAID` cubre la condición de "ya pagado".
-        where: { id: pedidoId, estado: { not: EstadoPedido.PAID } },
+        where: { id: pedidoId, estado: { not: EstadoPedido.PAGADO } },
         data: {
-          estado: EstadoPedido.PAID,
+          estado: EstadoPedido.PAGADO,
           fechaPago,
           cajeroAsignadoId: null,
         },
@@ -186,7 +186,7 @@ export class AdminService {
           select: { estado: true },
         });
         // Idempotencia: si ya estaba PAID, no hay transición que anunciar.
-        if (actual?.estado === EstadoPedido.PAID) return { yaPagado: true as const };
+        if (actual?.estado === EstadoPedido.PAGADO) return { yaPagado: true as const };
         throw new ConflictException('El estado del pedido cambió durante el pago');
       }
       const pedidoActualizado = await tx.pedido.findUnique({ where: { id: pedidoId } });
@@ -196,7 +196,7 @@ export class AdminService {
         data: {
           pedidoId,
           estadoAnterior,
-          estadoNuevo: EstadoPedido.PAID,
+          estadoNuevo: EstadoPedido.PAGADO,
           observacion: body?.referencia
             ? `Pago confirmado (ref: ${body.referencia})`
             : 'Pago confirmado por sistema externo',
@@ -222,12 +222,12 @@ export class AdminService {
     this.realtime.emitToTienda(resultado.tiendaId, 'pedido.estado', {
       id: pedidoId,
       estadoAnterior,
-      estadoNuevo: EstadoPedido.PAID,
+      estadoNuevo: EstadoPedido.PAGADO,
     });
     this.realtime.emitToPedido(pedidoId, 'pedido.estado', {
       id: pedidoId,
       estadoAnterior,
-      estadoNuevo: EstadoPedido.PAID,
+      estadoNuevo: EstadoPedido.PAGADO,
     });
 
     const pedidoCompleto = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });

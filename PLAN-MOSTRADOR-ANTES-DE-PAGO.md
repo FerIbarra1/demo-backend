@@ -10,6 +10,57 @@
 
 ---
 
+## F17 (oct 2026): la plancha, el cierre en un paso y los nombres del negocio
+
+> **Esta sección es posterior al plan original.** Documenta lo que cambió
+> después de que el flujo F16 estuviera en producción y el negocio lo usara.
+
+**El hallazgo que lo motivó.** El plan F16 modeló el paso por mostrador como un
+estado (`EN_MOSTRADOR`), pero el piso ya tenía un nombre para eso: **la
+plancha** — la mesa donde el bodeguero deja la bolsa con el ticket impreso. Y
+había un desajuste de fondo: `confirmarSurtido` **bloqueaba** los pedidos
+incompletos (exigía una propuesta ACEPTADA por el cliente antes de mover el
+pedido), cuando en la tienda la bolsa ya estaba en la mesa. El bodeguero
+quedaba con un pedido abierto que físicamente ya había entregado.
+
+**Las cuatro decisiones de F17** (todas del usuario):
+
+1. **Los estados se renombran a los nombres del negocio.** Los 8 procesos:
+   Solicitado, En revisión, Revisado (la plancha), En mostrador, Pendiente de
+   pago, Pagado, Enviado, Entregado. Renombrado real del enum de PostgreSQL, no
+   solo de las etiquetas de pantalla.
+2. **El proceso 4 es un estado propio** (`EN_ATENCION`), no la columna
+   `llamadoAt`. Se llama así —y no `EN_MOSTRADOR`— a propósito: con un nombre
+   nuevo, toda referencia vieja rompe la compilación y el compilador enumera los
+   sitios; con el nombre viejo habría compilado en silencio con el significado
+   invertido.
+3. **El cierre de surtido es UN SOLO PASO.** El bodeguero marca, aprieta
+   "Terminar surtido", y el sistema decide: si hay faltantes crea la propuesta
+   (`core/propuesta-bodega.util.ts`) y manda el pedido a la plancha igual.
+4. **El checklist de retiro es obligatorio.** Cuando un pedido vuelve de la
+   plancha con cambios, el bodeguero no puede cerrar hasta marcar cada prenda
+   que sacó de la bolsa.
+
+**Lo que se construyó:**
+
+| Pieza | Dónde |
+|---|---|
+| Renombrado del enum + `EN_ATENCION` | `prisma/migrations/20261005120000_estados_pedido_negocio/` |
+| Propuesta automática server-side | `core/propuesta-bodega.util.ts` |
+| Cierre en un paso | `SurtidoService.confirmarSurtido` |
+| Endpoint de la plancha | `GET /bodega/pedidos/ajustes-plancha` |
+| Tarjeta de aviso | `TarjetaAjustesPlancha.tsx` |
+| Checklist de retiro | `ChecklistRetiro` en `BodegaSurtidoSheet.tsx` |
+| Reposición por ajuste | `ReposicionService.crearDesdeAjuste` + `/bodega/reposicion` |
+
+**Trampa que hay que recordar:** `estado` **sí viaja** en el payload de descarga
+al ERP (`pedido-descarga.handler.ts:283`), pero el agente **nunca lo lee**
+(verificado en `agent/src/down-processor.ts`). Por eso el renombrado no toca la
+sincronización — pero si algún día el agente empieza a usar ese campo, hay que
+revisar el contrato.
+
+---
+
 ## 1. Decisiones confirmadas
 
 Estas son las respuestas del negocio a las preguntas de diseño. Todo el plan

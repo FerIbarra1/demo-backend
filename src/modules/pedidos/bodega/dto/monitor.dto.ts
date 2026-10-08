@@ -14,7 +14,7 @@ export class MonitorPedidoDto {
   @ApiProperty({ nullable: true, type: String })
   fechaAsignacion: string | null;
   @ApiProperty({
-    description: 'Minutos desde que se creó el pedido (o se asignó, si está REVIEWING)',
+    description: 'Minutos desde que se creó el pedido (o se asignó, si está EN_REVISION)',
   })
   minutosEnCola: number;
   @ApiProperty({ description: '0=normal, 1=aviso, 2=alerta, 3=crítico' })
@@ -23,7 +23,7 @@ export class MonitorPedidoDto {
   asignadoAId: number | null;
   @ApiProperty({ nullable: true, type: String })
   asignadoANombre: string | null;
-  // Cajero (monitor de ventanillas): sólo aplica a pedidos KIOSKO en PENDING_PAID.
+  // Cajero (monitor de ventanillas): sólo aplica a pedidos KIOSKO en PENDIENTE_PAGO.
   @ApiProperty({ nullable: true, type: String })
   cajeroAsignadoId: number | null;
   @ApiProperty({ nullable: true, type: String })
@@ -40,7 +40,7 @@ export class MonitorPedidoDto {
   @ApiProperty({ default: 0 })
   itemsCompartidos: number;
   /**
-   * F6 (jul 2026): true si el pedido está en REVIEWING sin asignado
+   * F6 (jul 2026): true si el pedido está en EN_REVISION sin asignado
    * (otro bodeguero lo liberó). El monitor lo destaca con badge "LIBRE"
    * y leve pulse para que quien mira la TV identifique que está disponible
    * para tomar.
@@ -51,16 +51,17 @@ export class MonitorPedidoDto {
   /**
    * F16 (sep 2026): por qué el pedido volvió a la cola de bodega.
    *
-   * `esLiberado` confluye tres casos distintos, y dos traen trabajo real que el
-   * bodeguero no podía distinguir sin abrir el historial:
+   * `esLiberado` confluye varios casos distintos, y la mayoría traen trabajo
+   * real que el bodeguero no podía distinguir sin abrir el historial:
    *   - LIBERADO         → otro bodeguero lo soltó. Nada nuevo que surtir.
    *   - AJUSTE_MOSTRADOR → el cliente cambió algo en tienda.
    *   - PROPUESTA_VENTAS → el cliente aprobó la contrapropuesta del asesor.
+   *   - ASESORIA         → el asesor lo devolvió: el pedido original estaba bien.
    *
    * `null` = el pedido nunca salió de bodega (es nuevo).
    */
   @ApiProperty({
-    enum: ['LIBERADO', 'AJUSTE_MOSTRADOR', 'PROPUESTA_VENTAS'],
+    enum: ['LIBERADO', 'AJUSTE_MOSTRADOR', 'PROPUESTA_VENTAS', 'ASESORIA'],
     nullable: true,
     description: 'Motivo por el que el pedido volvió a la cola de bodega.',
   })

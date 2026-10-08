@@ -13,7 +13,7 @@ export interface PedidoListoEnTiendaProps {
 
 /**
  * El pedido quedó apartado en tienda esperando que el cliente lo revise antes
- * de pagar (estado EN_MOSTRADOR).
+ * de pagar (estado REVISADO).
  *
  * Este correo cubre un hueco real: el estado exige que el cliente se presente
  * físicamente, y antes no se le avisaba — se enteraba sólo si abría la app.

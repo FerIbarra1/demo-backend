@@ -12,7 +12,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { KioskoService } from './kiosko.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import { firmarLlegoQr, verificarLlegoQr, tokenEsDeTienda } from '../pedidos/core/qr-llegada.util';
-import { motivoNoAvisable } from '../pedidos/core/llegada-aviso.util';
+import { motivoNoAvisable, evaluarAviso } from '../pedidos/core/llegada-aviso.util';
 import { estadoPedidoLabel } from '../mail/estado-labels';
 import { CanalLlegada, EstadoPedido, ModoEntrega, Prisma } from '@prisma/client';
 import type { UserContext } from '../../types/pedido.types';
@@ -63,8 +63,8 @@ const REINTENTO_WINDOW_MS = 10 * 60_000;
  *    por pedido; segundo factor (últimos 4 del teléfono) recomendado
  *    en producción pero fuera de este MVP.
  *  - NO se agrega `un estado al enum. La llegada es ortogonal al
- *    ciclo de vida del pedido (puede ocurrir en REVIEWING,
- *    PENDING_PAID, PAID, SHIPPED). En su lugar, columnas.
+ *    ciclo de vida del pedido (puede ocurrir en EN_REVISION,
+ *    PENDIENTE_PAGO, PAID, SHIPPED). En su lugar, columnas.
  *  - Idempotencia: avisar 2 veces en <60s devuelve el mismo payload
  *    sin re-emit realtime (no spam en mostrador).
  *  - Validar que el kiosko tiene deviceToken (PR2) — sin él, no se
@@ -193,7 +193,18 @@ export class KioskoLlegadaService {
     });
     if (!completo) throw new NotFoundException('Pedido no encontrado');
 
-    this.exigirAvisable(completo);
+    // Oct 2026: la regla del OPERADOR, no la del cliente. Antes se usaba
+    // `exigirAvisable`, que solo dejaba pasar `REVISADO` — así que si el
+    // cliente llegaba y su pedido todavía estaba en bodega, esperando aprobar
+    // una propuesta o en caja, el operador recibía un 409 y se quedaba sin
+    // salida con el cliente enfrente.
+    const evaluacion = evaluarAviso(completo, 'OPERADOR');
+    if (!evaluacion.puede) {
+      throw new ConflictException({
+        codigo: evaluacion.codigo,
+        message: evaluacion.message,
+      });
+    }
 
     const resultado = await this.registrarAviso(completo, {
       canal: CanalLlegada.MOSTRADOR,
@@ -202,13 +213,16 @@ export class KioskoLlegadaService {
     });
 
     // Mismo patrón que `MostradorService.llamar` y `.descartarLlegada`:
-    // historial sin cambio de estado, para que la acción quede auditable.
+    // historial sin cambio de estado, para que la acción quede auditable. Se
+    // anota el estado en que se marcó: con la regla nueva se puede marcar antes
+    // de que el pedido esté listo, y hace falta poder auditar cuántas llegadas
+    // se registran por adelantado.
     await this.prisma.historialPedido.create({
       data: {
         pedidoId,
         estadoAnterior: completo.estado,
         estadoNuevo: completo.estado,
-        observacion: `Llegada marcada por ${usuario.nombre} desde mostrador`,
+        observacion: `Llegada marcada por ${usuario.nombre} desde mostrador (pedido en ${completo.estado})`,
         usuarioId: usuario.userId,
         usuarioNombre: usuario.nombre,
       },
@@ -224,10 +238,33 @@ export class KioskoLlegadaService {
       this.realtime.emitToTienda(completo.tiendaId, 'monitor.invalidado', {
         pedidoId,
       });
+      // Oct 2026: si el pedido NO est�� en mostrador, las consolas que necesitan
+      // enterarse son las que tienen el pedido en sus manos — bodega (hay que
+      // surtirlo ya) o ventas (el asesor tiene que atender al cliente que está
+      // esperando de pie). `monitor.invalidado` no lo escuchan.
+      //
+      // Se emite el MISMO evento de llegada que ya existe, para no inventar un
+      // nombre nuevo que un typo podría dejar en silencio. El payload lleva
+      // `canal` y `canalOrigen` para que cada consola distinga el caso: un
+      // pedido de KIOSKO ya estaba en tienda por definición, uno de WEB con
+      // llegada es el evento que importa.
+      if (!evaluacion.entraACola) {
+        this.realtime.emitToTienda(completo.tiendaId, 'pedido.llegada-anunciada', {
+          pedidoId,
+          numeroPedido: completo.numeroPedido,
+          folioVisible: completo.numeroPedido,
+          clienteNombre: completo.clienteNombre,
+          estado: completo.estado,
+          canal: CanalLlegada.MOSTRADOR,
+          canalOrigen: completo.canalOrigen,
+          esperandoDesdeMin: resultado.esperandoDesdeMin,
+          tienda: completo.tienda?.nombre,
+        });
+      }
     }
 
     this.logger.log(
-      `Pedido ${pedidoId} (${completo.numeroPedido}): llegada marcada por ${usuario.nombre} desde mostrador`,
+      `Pedido ${pedidoId} (${completo.numeroPedido}): llegada marcada por ${usuario.nombre} desde mostrador (estado ${completo.estado}, entraACola=${evaluacion.entraACola})`,
     );
 
     return {
@@ -236,6 +273,11 @@ export class KioskoLlegadaService {
       folioVisible: completo.numeroPedido,
       reanudado: resultado.reanudado,
       esperandoDesdeMin: resultado.esperandoDesdeMin,
+      /**
+       * `true` si el pedido ya está en la cola del mostrador. El frontend lo usa
+       * para elegir el copy: "ya está en la cola" vs. "avisamos a bodega".
+       */
+      entraACola: evaluacion.entraACola,
     };
   }
 
@@ -552,7 +594,7 @@ export class KioskoLlegadaService {
   private labelParaEstado(estado: EstadoPedido): string {
     // Fuente única: `mail/estado-labels.ts`. Antes había un mapa local que
     // decía reutilizar las etiquetas pero en realidad las duplicaba, y ya
-    // divergían (EN_MOSTRADOR salía "Listo en tienda" aquí y "Listo en tienda ·
+    // divergían (REVISADO salía "Listo en tienda" aquí y "Listo en tienda ·
     // revísalo" en el correo). El cliente veía dos vocabularios para el mismo
     // paso según dónde mirara.
     return estadoPedidoLabel(estado);
@@ -560,13 +602,13 @@ export class KioskoLlegadaService {
 
   private mensajeParaEstado(estado: EstadoPedido): string {
     if (
-      estado === EstadoPedido.PENDING_REVIEW ||
-      estado === EstadoPedido.REVIEWING ||
-      estado === EstadoPedido.SHIPPED
+      estado === EstadoPedido.SOLICITADO ||
+      estado === EstadoPedido.EN_REVISION ||
+      estado === EstadoPedido.ENVIADO
     ) {
       return 'Listo, ya avisamos al equipo. Tu pedido sigue en preparación.';
     }
-    if (estado === EstadoPedido.WAITING_CUSTOMER_APPROVAL) {
+    if (estado === EstadoPedido.ESPERANDO_APROBACION) {
       return 'Ya avisamos al equipo. Tienes una propuesta pendiente de aprobar.';
     }
     if (estado === EstadoPedido.EN_ASESORIA) {
@@ -576,13 +618,13 @@ export class KioskoLlegadaService {
     // revise. No es un error de compilación (esta función es una cadena de
     // `if` con fallback), pero sin este caso el cliente recibiría el copy
     // genérico justo cuando más necesita saber qué sigue.
-    if (estado === EstadoPedido.EN_MOSTRADOR) {
+    if (estado === EstadoPedido.REVISADO) {
       return '¡Listo! Ya avisamos al equipo. Pasa a mostrador a revisar tu pedido.';
     }
-    if (estado === EstadoPedido.PENDING_PAID) {
+    if (estado === EstadoPedido.PENDIENTE_PAGO) {
       return 'Ya avisamos al equipo. Pasa a caja a pagar.';
     }
-    if (estado === EstadoPedido.PAID) {
+    if (estado === EstadoPedido.PAGADO) {
       return '¡Listo, ya avisamos al equipo! Te llamaremos por tu nombre.';
     }
     return 'Listo, ya avisamos al equipo.';

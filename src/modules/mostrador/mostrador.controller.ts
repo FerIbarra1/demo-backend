@@ -14,9 +14,9 @@ import { RolUsuario } from '@prisma/client';
  * F16 (sep 2026): el mostrador pasó de ser la última parada a la penúltima.
  * Ahora tiene DOS colas y cinco acciones:
  *
- *   Cola "por revisar" (`EN_MOSTRADOR`):
- *     - `POST :id/enviar-a-pagar` → PENDING_PAID (aquí entra al ERP)
- *     - `POST :id/ajustar`  → REVIEWING (el cliente pidió cambios)
+ *   Cola "por revisar" (`REVISADO`):
+ *     - `POST :id/enviar-a-pagar` → PENDIENTE_PAGO (aquí entra al ERP)
+ *     - `POST :id/ajustar`  → EN_REVISION (el cliente pidió cambios)
  *     - `POST :id/cancelar` → CANCELLED + reposición
  *
  *   Cola "por entregar" (`PAID` / `SHIPPED`):
@@ -47,7 +47,7 @@ export class MostradorController {
   @Get('cola')
   @ApiOperation({
     summary:
-      'F16: pedidos en EN_MOSTRADOR esperando revisión con el cliente. ' +
+      'F16: pedidos en REVISADO esperando revisión con el cliente. ' +
       'Kiosko siempre visible; web solo si el cliente avisó llegada.',
   })
   @ApiQuery({ name: 'tiendaId', required: false, type: Number })
@@ -102,7 +102,7 @@ export class MostradorController {
   /**
    * Oct 2026: la cara visible del contador `sinCliente` del monitor.
    *
-   * Son los pedidos web en `EN_MOSTRADOR` que nadie ha avisado que llegaron.
+   * Son los pedidos web en `REVISADO` que nadie ha avisado que llegaron.
    * El gate de D5 los esconde de la cola, así que sin esta lista el operador no
    * tenía forma de encontrar al cliente que llegó sin teléfono ni folio.
    *
@@ -132,16 +132,38 @@ export class MostradorController {
     );
   }
 
+  /**
+   * Oct 2026: el buscador del operador. Es la herramienta para el cliente que
+   * llega SIN ticket y SIN número de pedido.
+   *
+   * Antes cubría 3 de los 10 estados (EN_MOSTRADOR | PAID | SHIPPED), así que un
+   * pedido que todavía estaba en bodega, esperando aprobación, en asesoría o en
+   * caja NO SE ENCONTRABA. Ahora busca en todos, por folio interno, folio de
+   * VFP (el del ticket), nombre y correo.
+   *
+   * Devuelve `{ data, meta }` como el resto de listados del mostrador: antes el
+   * `take: 20` era un corte silencioso.
+   */
   @Get('buscar')
   @ApiOperation({
-    summary: 'Búsqueda rápida por número de pedido o nombre del cliente (sufijo/contains)',
+    summary:
+      'Oct 2026: busca en TODOS los estados por folio interno, folio de VFP, ' +
+      'nombre o correo. Paginado.',
   })
   async buscar(@Query() query: BuscarPedidoDto, @CurrentUser() user: any) {
     if (!query.q || query.q.trim().length < 2) {
-      return { data: [] };
+      return {
+        data: [],
+        meta: { total: 0, pagina: 1, limite: query.limite ?? 20, totalPaginas: 0 },
+      };
     }
-    const data = await this.mostradorQuery.buscarPedidos(query.q.trim(), user, user.tiendaId);
-    return { data };
+    return this.mostradorQuery.buscarPedidos(
+      query.q.trim(),
+      user,
+      user.tiendaId,
+      query.pagina ?? 1,
+      query.limite ?? 20,
+    );
   }
 
   @Get(':id')
@@ -161,7 +183,7 @@ export class MostradorController {
   }
 
   // ------------------------------------------------------------------
-  // F16 (sep 2026): las tres acciones sobre un pedido en EN_MOSTRADOR
+  // F16 (sep 2026): las tres acciones sobre un pedido en REVISADO
   // ------------------------------------------------------------------
 
   @Post(':id/llamar')
@@ -223,10 +245,25 @@ export class MostradorController {
     return this.mostradorService.devolverACola(id, user);
   }
 
+  @Post(':id/traer-a-entrega')
+  @ApiOperation({
+    summary:
+      'Oct 2026: EN_ASESORIA → REVISADO. Trae al área de entrega un pedido que ' +
+      'estaba con un asesor de ventas. Para el cliente que ya está enfrente y ' +
+      'cuyo pedido no necesita más negociación.',
+  })
+  async traerAEntrega(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: EnviarAPagarDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.mostradorService.traerAEntrega(id, user, dto.nota);
+  }
+
   @Post(':id/enviar-a-pagar')
   @ApiOperation({
     summary:
-      'EN_MOSTRADOR → PENDING_PAID. El cliente aprobó su pedido; pasa a caja. ' +
+      'REVISADO → PENDIENTE_PAGO. El cliente aprobó su pedido; pasa a caja. ' +
       'AQUÍ se encola a Firebird (el ERP solo ve pedidos ya confirmados).',
   })
   async enviarAPagar(
@@ -240,7 +277,7 @@ export class MostradorController {
   @Post(':id/ajustar')
   @ApiOperation({
     summary:
-      'EN_MOSTRADOR → REVIEWING. El cliente pidió cambios; el pedido vuelve ' +
+      'REVISADO → EN_REVISION. El cliente pidió cambios; el pedido vuelve ' +
       'a bodega a surtir lo nuevo. Acepta los cambios de items del editor POS.',
   })
   async ajustar(
@@ -253,7 +290,7 @@ export class MostradorController {
 
   @Post(':id/cancelar')
   @ApiOperation({
-    summary: 'EN_MOSTRADOR → CANCELLED + lista de reposición. La mercancía vuelve al anaquel.',
+    summary: 'REVISADO → CANCELLED + lista de reposición. La mercancía vuelve al anaquel.',
   })
   async cancelar(
     @Param('id', ParseIntPipe) id: number,

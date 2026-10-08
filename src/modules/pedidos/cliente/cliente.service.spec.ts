@@ -202,7 +202,7 @@ describe('ClienteService.crearPedido — precio por lista (Fase 0)', () => {
 
     await svc.crearPedido(dtoBase as never, usuarioBase as never);
 
-    expect(pedidoCreado.data.estado).toBe(EstadoPedido.PENDING_REVIEW);
+    expect(pedidoCreado.data.estado).toBe(EstadoPedido.SOLICITADO);
     expect(pedidoCreado.data.canalOrigen).toBe(CanalOrigen.WEB);
     expect(pedidoCreado.data.modoEntrega).toBe(ModoEntrega.RECOGER_TIENDA);
     // El precio de lista no debe alterar el snapshot de cantidad original.
