@@ -259,19 +259,22 @@ export class MessagesService {
 
     const esCliente = usuario.rol === RolUsuario.CLIENTE;
     const esVentas = usuario.rol === RolUsuario.VENTAS;
-    const esBodega = usuario.rol === RolUsuario.BODEGA;
     const esAdmin = usuario.rol === RolUsuario.ADMIN;
 
-    // F14 (sep 2026): bodega también puede enviar propuestas con adjunto.
-    // El flujo es: bodeguero marca "No hay"/"Hay menos" en el surtido, arma
-    // la propuesta, y la manda como un solo mensaje-con-adjunto al cliente.
-    // Sin esto, la propuesta se creaba en BD pero el cliente no veía nada en
-    // el chat (sólo el badge "Esperando tu aprobación" sin propuesta visible).
-    if (!esCliente && !esVentas && !esBodega && !esAdmin) {
+    // Oct 2026: BODEGA sale de la lista. F14 le había abierto este endpoint
+    // para que mandara su propuesta al cliente desde el surtido, pero F17 lo
+    // hizo innecesario: el servidor arma la propuesta de bodega solo, al cerrar
+    // el surtido (`core/propuesta-bodega.util.ts`), sin pasar por el chat.
+    //
+    // Era una inconsistencia viva: `crear` (arriba) ya prohibía a bodega
+    // escribir, y CLAUDE.md dice que desde F13 bodega no lee ni escribe el
+    // chat. Solo este endpoint lo dejaba pasar. Verificado: el frontend no lo
+    // llama desde ninguna vista de bodega.
+    if (!esCliente && !esVentas && !esAdmin) {
       throw new BadRequestException(
-        'Sólo el cliente dueño del pedido, bodega, el asesor de ventas o ' +
-          'admin pueden escribir mensajes con adjunto. Monitores y cajero ' +
-          'tienen acceso de sólo lectura.',
+        'Sólo el cliente dueño del pedido, el asesor de ventas o admin pueden ' +
+          'escribir mensajes con adjunto. Bodega, monitores y cajero tienen ' +
+          'acceso de sólo lectura.',
       );
     }
 
