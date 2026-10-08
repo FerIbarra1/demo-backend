@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException, BadRequestException } from '@nes
 import { PrismaService } from '../../../prisma/prisma.service';
 import { StorageService } from '../../imagenes/storage.service';
 import { PedidoStateService } from '../core/pedido-state.service';
+import { contarMensajesNoLeidos } from '../core/mensajes-no-leidos.util';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, Prisma } from '@prisma/client';
 
@@ -153,10 +154,20 @@ export class VentasService {
     ]);
 
     const ahora = new Date();
+    // Oct 2026: cuántos mensajes del CLIENTE esperan respuesta en cada pedido.
+    // Sin esto el asesor no sabía qué conversaciones tenían algo nuevo sin
+    // abrirlas una por una. Derivado del watermark, igual que en la lista del
+    // cliente (`core/mensajes-no-leidos.util.ts`).
+    const noLeidos = await contarMensajesNoLeidos(
+      this.prisma,
+      pedidos.map((p) => p.id),
+      'tienda',
+    );
     return {
       data: pedidos.map((p) => ({
         ...p,
         total: Number(p.total),
+        mensajesNoLeidos: noLeidos.get(p.id) ?? 0,
         // Cuánto lleva esperando el cliente desde que pidió asesor.
         minutosEsperando: p.asesorSolicitadoAt
           ? Math.max(0, Math.floor((ahora.getTime() - p.asesorSolicitadoAt.getTime()) / 60000))

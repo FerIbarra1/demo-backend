@@ -15,9 +15,14 @@ import { VentasService } from './ventas.service';
 function crearServicio() {
   const findMany = jest.fn().mockResolvedValue([]);
   const count = jest.fn().mockResolvedValue(0);
+  // Oct 2026: `obtenerCola` cuenta los mensajes sin leer con una subconsulta
+  // cruda. Estos tests solo miran el `orderBy`, así que basta con que devuelva
+  // vacío — el conteo en sí tiene su propio spec (`mensajes-no-leidos.spec.ts`).
+  const $queryRaw = jest.fn().mockResolvedValue([]);
 
   const prisma = {
     pedido: { findMany, count },
+    $queryRaw,
   };
 
   const svc = new VentasService(

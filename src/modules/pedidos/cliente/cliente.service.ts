@@ -13,6 +13,7 @@ import { PedidoStateService } from '../core/pedido-state.service';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
 import { motivoNoAvisable } from '../core/llegada-aviso.util';
 import { construirItemPedido } from '../core/item-pedido.util';
+import { contarMensajesNoLeidos } from '../core/mensajes-no-leidos.util';
 import { PreciosService } from '../../precios/precios.service';
 import {
   precioDeLista,
@@ -331,8 +332,15 @@ export class ClienteService {
       }),
       this.prisma.pedido.count({ where: { usuarioId } }),
     ]);
+    // Oct 2026: el badge de "mensajes nuevos" se deriva del watermark, no de un
+    // contador en localStorage del navegador. Ver `contarMensajesNoLeidos`.
+    const noLeidos = await contarMensajesNoLeidos(
+      this.prisma,
+      pedidos.map((p) => p.id),
+      'cliente',
+    );
     return {
-      data: pedidos,
+      data: pedidos.map((p) => ({ ...p, mensajesNoLeidos: noLeidos.get(p.id) ?? 0 })),
       meta: { total, pagina, limite, totalPaginas: Math.ceil(total / limite) },
     };
   }
