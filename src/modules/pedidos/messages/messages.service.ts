@@ -417,8 +417,8 @@ export class MessagesService {
    * F15 (sep 2026): marca de agua de lectura del chat (modelo WhatsApp/Telegram).
    *
    * El caller puede ser:
-   *   - CLIENTE → bumpea `cliente_ultimo_mensaje_leido_id` y opcionalmente
-   *     `cliente_ultimo_mensaje_entregado_id` (cuando recibe el eco del socket).
+   *   - CLIENTE → bumpea `cliente_ultimo_mensaje_leido_id` (y, por implicación,
+   *     `cliente_ultimo_mensaje_entregado_id`).
    *   - VENTAS / BODEGA_MONITOR / CAJERO / ADMIN → bumpea `tienda_ultimo_mensaje_leido_id`.
    *     El watermark es por LADO, no por usuario (1 asesor por tienda).
    *
@@ -428,6 +428,11 @@ export class MessagesService {
    *
    * Después de bumpear, emite `mensaje.leido` al room del pedido y al cliente
    * para que el otro lado vea los ticks ✓✓ actualizarse en tiempo real.
+   *
+   * Oct 2026: el flag `entregado` del DTO se eliminó junto con su estado en el
+   * frontend. El avance de `clienteUltimoMensajeEntregadoId` se conserva porque
+   * un leído SIEMPRE implica entregado, y la columna sigue en BD como dato
+   * histórico.
    */
   async marcarLeido(pedidoId: number, dto: MarcarLeidoDto, usuario: UserContext) {
     await this.access.cargarYValidar(pedidoId, usuario);
@@ -456,25 +461,18 @@ export class MessagesService {
 
     // 2. Si el cliente marcó leído, garantizamos que el watermark de
     // entregado al menos refleje ese id (un leído implica entregado).
+    //
+    // Oct 2026: ya no hay forma de pedir "entregado" sin "leído" — el flag se
+    // eliminó del DTO. Este bloque se conserva porque la columna sigue en BD y
+    // el invariante entregado >= leído debe mantenerse.
     if (esCliente) {
-      const pedidoAntes = await this.prisma.pedido.findUnique({
-        where: { id: pedidoId },
-        select: { clienteUltimoMensajeEntregadoId: true },
+      await this.prisma.pedido.updateMany({
+        where: {
+          id: pedidoId,
+          OR: [{ [campoEntregado]: null }, { [campoEntregado]: { lt: ultimoId } }],
+        },
+        data: { [campoEntregado]: ultimoId },
       });
-      const entregadoActual = pedidoAntes?.clienteUltimoMensajeEntregadoId ?? null;
-      // Si pidió bumpear entregado explícitamente O si el leído supera al
-      // entregado actual, avanzamos. El leído siempre implica entregado.
-      const debeAvanzarEntregado =
-        dto.entregado || entregadoActual == null || ultimoId > entregadoActual;
-      if (debeAvanzarEntregado) {
-        await this.prisma.pedido.updateMany({
-          where: {
-            id: pedidoId,
-            OR: [{ [campoEntregado]: null }, { [campoEntregado]: { lt: ultimoId } }],
-          },
-          data: { [campoEntregado]: ultimoId },
-        });
-      }
     }
 
     // 3. Releer el estado final para emitir el evento con los watermarks reales.

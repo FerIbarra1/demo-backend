@@ -24,24 +24,17 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
  * El backend deriva el LADO del caller desde el JWT (no del body) y avanza
  * el watermark de forma idempotente y monotona (nunca decrementa).
  *
- * `entregado: true` se usa cuando el cliente recibe el eco del socket y bumpea
- * el watermark `cliente_ultimo_mensaje_entregado_id` sin pasar por REST.
+ * Oct 2026: se quitó el flag `entregado`. Existía para el estado 'entregado'
+ * (✓✓ gris) del frontend, que se eliminó porque se alimentaba del watermark del
+ * lado equivocado y no distinguía ninguna decisión en un chat 1:1. La columna
+ * `cliente_ultimo_mensaje_entregado_id` sigue en BD (dato histórico) y el
+ * service la mantiene al día: un leído siempre implica entregado.
  */
 export class MarcarLeidoDto {
   @ApiProperty({ description: 'ID del último mensaje que el caller ya vió.' })
   @IsInt()
   @Min(1)
   ultimoMensajeId: number;
-
-  @ApiPropertyOptional({
-    description:
-      'Sólo usado por el cliente: confirma que recibió el eco del socket ' +
-      '(entregado). Si se manda junto con leído, el backend garantiza que ' +
-      'entregado >= leído (un leído implica entregado).',
-  })
-  @IsOptional()
-  @IsBoolean()
-  entregado?: boolean;
 }
 
 export class CrearMensajeDto {
