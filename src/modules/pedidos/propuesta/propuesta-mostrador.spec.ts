@@ -633,3 +633,177 @@ describe('CrearMensajeConAdjuntoDto valida contenido cuando NO hay propuesta', (
     expect(dto.contenido === '').toBe(true);
   });
 });
+
+/**
+ * Oct 2026: el cliente pide un SEGUNDO ajuste, esta vez sobre una propuesta
+ * del ASESOR.
+ *
+ * El bug que estos tests previenen: el botón "Quiero ajustes" del cliente manda
+ * `CONTACTAR_ASESOR` sobre una propuesta de bodega pero `RECHAZAR` sobre una de
+ * ventas (tiene que ser así: `CONTACTAR_ASESOR` sobre ventas es un 400 a
+ * propósito, el pedido ya está en asesoría). `rechazarPropuestaVentas` guardaba
+ * el texto SOLO en `PedidoPropuesta.notaCliente` y no creaba ningún
+ * `PedidoMensaje`, así que el texto del cliente llegaba al chat la primera vez y
+ * nunca más. El asesor veía la conversación cortada justo cuando el cliente
+ * pedía el segundo ajuste.
+ *
+ * El hueco de cobertura era exactamente este: el único test de "segundo ajuste"
+ * que había llamaba `CONTACTAR_ASESOR` sobre una propuesta de BODEGA, que nunca
+ * pasa por `rechazarPropuestaVentas`.
+ */
+describe('rechazarPropuestaVentas — el cliente pide otro ajuste sobre la propuesta del asesor', () => {
+  const TEXTO_SEGUNDO_AJUSTE = 'Mejor 10 piezas, no 20. Y la negra cámbiala por gris.';
+
+  function crearServicioVentas() {
+    const mensajeCreate = jest.fn().mockResolvedValue({
+      id: 42,
+      autorId: 7,
+      autorRol: RolUsuario.CLIENTE,
+      contenido: TEXTO_SEGUNDO_AJUSTE,
+      createdAt: new Date('2026-10-13T10:00:00Z'),
+      autor: { nombre: 'Juan Pérez' },
+    });
+    const propuestaUpdate = jest.fn().mockResolvedValue({});
+    const emitToPedido = jest.fn();
+    const emitToUser = jest.fn();
+
+    const cambiarEstado = jest.fn(async (_id: number, _dto: any, _u: any, opts: any) => {
+      // El `tx` de los efectos es el mismo objeto prisma, así que las escrituras
+      // quedan registradas en los mocks.
+      if (opts?.efectos) await opts.efectos(prisma);
+      return { id: 1, estado: EstadoPedido.EN_ASESORIA };
+    });
+
+    const prisma: Record<string, any> = {
+      pedidoPropuesta: {
+        // La propuesta que el cliente está respondiendo la creó VENTAS: es la
+        // contrapropuesta del asesor, no la original de bodega.
+        findFirst: jest.fn().mockResolvedValue({
+          id: 99,
+          pedidoId: 1,
+          estado: EstadoPropuesta.PENDIENTE,
+          creadaPorRol: RolUsuario.VENTAS,
+        }),
+        findUnique: jest.fn().mockResolvedValue({ estado: EstadoPropuesta.RECHAZADA }),
+        update: propuestaUpdate,
+      },
+      pedido: {
+        findUnique: jest.fn().mockResolvedValue({
+          id: 1,
+          tiendaId: 5,
+          usuarioId: 7,
+          clienteEmail: 'cliente@ejemplo.com',
+          numeroPedido: 'PD-2026-000123',
+          estado: EstadoPedido.ESPERANDO_APROBACION,
+          descuento: 0,
+          impuestos: 0,
+          asesorSolicitadoAt: new Date('2026-10-12T09:00:00Z'),
+          items: [],
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      historialPedido: { create: jest.fn().mockResolvedValue({}) },
+      pedidoMensaje: { create: mensajeCreate },
+      itemPedido: {
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(1),
+      },
+      $transaction: jest.fn(async (fn: any) => fn(prisma)),
+    };
+
+    const svc = new PropuestaService(
+      prisma as never,
+      { emitToPedido, emitToTienda: jest.fn(), emitToUser } as never,
+      { cargarYValidar: jest.fn().mockResolvedValue({ id: 1 }) } as never,
+      { cambiarEstado, dispararEfectosDeTransicion: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      { enviar: jest.fn() } as never,
+    );
+
+    return { svc, mensajeCreate, propuestaUpdate, emitToPedido, emitToUser };
+  }
+
+  it('crea el mensaje del chat con el texto del cliente', async () => {
+    const { svc, mensajeCreate } = crearServicioVentas();
+
+    await svc.responderPropuesta(
+      1,
+      99,
+      { decision: 'RECHAZAR', nota: TEXTO_SEGUNDO_AJUSTE },
+      cliente,
+    );
+
+    expect(mensajeCreate).toHaveBeenCalledTimes(1);
+    const data = mensajeCreate.mock.calls[0][0].data;
+    expect(data.contenido).toBe(TEXTO_SEGUNDO_AJUSTE);
+    expect(data.autorRol).toBe(RolUsuario.CLIENTE);
+    expect(data.visibleParaCliente).toBe(true);
+  });
+
+  it('NO duplica el texto en notaCliente de la propuesta', async () => {
+    const { svc, propuestaUpdate } = crearServicioVentas();
+
+    await svc.responderPropuesta(
+      1,
+      99,
+      { decision: 'RECHAZAR', nota: TEXTO_SEGUNDO_AJUSTE },
+      cliente,
+    );
+
+    // El dato vive en un solo sitio: el mensaje del chat. Duplicarlo en la
+    // propuesta crearía dos copias que pueden divergir — el mismo criterio que
+    // ya aplica `contactarAsesor`.
+    const data = propuestaUpdate.mock.calls[0][0].data;
+    expect(data.estado).toBe(EstadoPropuesta.RECHAZADA);
+    expect(data).not.toHaveProperty('notaCliente');
+  });
+
+  it('emite mensaje.creado al pedido y al cliente, después del commit', async () => {
+    const { svc, emitToPedido, emitToUser } = crearServicioVentas();
+
+    await svc.responderPropuesta(
+      1,
+      99,
+      { decision: 'RECHAZAR', nota: TEXTO_SEGUNDO_AJUSTE },
+      cliente,
+    );
+
+    // Sin esto el asesor con la pantalla abierta no ve el mensaje hasta que el
+    // polling de 15s lo traiga.
+    expect(emitToPedido).toHaveBeenCalledWith(
+      1,
+      'mensaje.creado',
+      expect.objectContaining({ contenido: TEXTO_SEGUNDO_AJUSTE, autorRol: RolUsuario.CLIENTE }),
+    );
+    expect(emitToUser).toHaveBeenCalledWith(
+      7,
+      'mensaje.creado',
+      expect.objectContaining({ contenido: TEXTO_SEGUNDO_AJUSTE }),
+    );
+  });
+
+  it('rechaza con 400 si el CLIENTE no escribe nada', async () => {
+    const { svc, mensajeCreate } = crearServicioVentas();
+
+    // Sin texto no hay mensaje que mandar: el asesor abriría la conversación a
+    // ciegas. El DTO también lo exige; el service es frontera de confianza
+    // propia (lo llaman los tests y el camino del operador).
+    await expect(
+      svc.responderPropuesta(1, 99, { decision: 'RECHAZAR' }, cliente),
+    ).rejects.toThrow(BadRequestException);
+    expect(mensajeCreate).not.toHaveBeenCalled();
+  });
+
+  it('el OPERADOR puede rechazar sin texto y no crea mensaje', async () => {
+    const { svc, mensajeCreate } = crearServicioVentas();
+
+    // La UI de mostrador solo ofrece Aprobar/Rechazar, sin captura de texto: para
+    // el operador el motivo es opcional. El pedido vuelve igual a la cola del
+    // asesor, que ve el cambio de estado aunque no haya mensaje nuevo.
+    await expect(
+      svc.responderPropuestaDesdeMostrador(1, 99, { decision: 'RECHAZAR' }, operador),
+    ).resolves.toBeDefined();
+    expect(mensajeCreate).not.toHaveBeenCalled();
+  });
+});

@@ -513,7 +513,18 @@ export class PropuestaService {
         case 'RECHAZAR':
           return esDeBodega
             ? this.rechazarPropuestaBodega(pedido, propuesta, dto, usuario, ahora)
-            : this.rechazarPropuestaVentas(pedido, propuesta, dto, usuario, ahora);
+            : this.rechazarPropuestaVentas(
+                pedido,
+                propuesta,
+                dto,
+                usuario,
+                ahora,
+                // El OPERADOR rechaza en nombre del cliente que tiene enfrente y
+                // su UI no captura texto: para él el motivo es opcional. El
+                // CLIENTE sí escribe — su botón "Quiero ajustes" abre un input
+                // obligatorio, y ese texto es el mensaje del chat.
+                { textoObligatorio: !opts.enNombreDelCliente },
+              );
 
         case 'CONTACTAR_ASESOR':
           return this.contactarAsesor(pedido, propuesta, dto, usuario, ahora);
@@ -929,19 +940,63 @@ export class PropuestaService {
   /**
    * Cliente RECHAZÓ una propuesta de VENTAS: el pedido vuelve a EN_ASESORIA
    * para que el asesor re-negocie. El chat sigue vivo.
+   *
+   * Oct 2026 — el texto del cliente ES un mensaje del chat, igual que en
+   * `contactarAsesor`.
+   *
+   * Antes este método guardaba el texto solo en `PedidoPropuesta.notaCliente` y
+   * no creaba ningún `PedidoMensaje`. Como el botón "Quiero ajustes" del cliente
+   * manda `CONTACTAR_ASESOR` sobre una propuesta de bodega pero `RECHAZAR` sobre
+   * una de ventas (las dos ramas tienen que existir: `CONTACTAR_ASESOR` sobre
+   * ventas es un 400 a propósito, el pedido ya está en asesoría), el resultado
+   * era que **el texto del cliente llegaba al chat la primera vez y nunca más**.
+   * El asesor veía la conversación cortada justo cuando el cliente pedía el
+   * segundo ajuste, y el texto quedaba enterrado en la card colapsada del
+   * historial de propuestas.
+   *
+   * `notaCliente` NO se llena aquí: el dato vive en un solo sitio, donde se lee
+   * (mismo criterio que `contactarAsesor`). La columna sigue viva para las
+   * decisiones donde sí es el motivo libre — rechazo de propuesta de bodega,
+   * cancelación, aprobación.
    */
   private async rechazarPropuestaVentas(
-    pedido: { id: number; tiendaId: number },
+    pedido: { id: number; tiendaId: number; usuarioId: number },
     propuesta: { id: number },
     dto: { nota?: string },
     usuario: UserContext,
     ahora: Date,
+    /**
+     * Si el texto es obligatorio. `true` para el cliente (su botón "Quiero
+     * ajustes" abre un input que no se puede confirmar vacío), `false` para el
+     * operador de mostrador, cuya UI solo ofrece Aprobar/Rechazar sin captura.
+     */
+    opts: { textoObligatorio: boolean } = { textoObligatorio: true },
   ) {
+    const textoCliente = dto.nota?.trim();
+
+    // Sin texto no hay mensaje que mandar al chat. Para el cliente es un error
+    // (el asesor abriría la conversación a ciegas); para el operador es normal:
+    // rechaza la propuesta y el pedido vuelve a la cola del asesor, que verá el
+    // cambio de estado aunque no haya un mensaje nuevo.
+    if (!textoCliente && opts.textoObligatorio) {
+      throw new BadRequestException(
+        'Cuéntanos qué cambios quieres en tu pedido para que el asesor pueda hacer el ajuste.',
+      );
+    }
+
+    // Se captura dentro del closure y se emite después del commit: emitir
+    // dentro de la transacción anunciaría un mensaje que un rollback podría
+    // deshacer. Va en un contenedor y no en una `let` suelta porque TypeScript
+    // no rastrea las asignaciones hechas dentro de un closure.
+    const capturado: { mensajeCliente: MensajeSistemaCreado | null } = {
+      mensajeCliente: null,
+    };
+
     await this.state.cambiarEstado(
       pedido.id,
       {
         nuevoEstado: EstadoPedido.EN_ASESORIA,
-        observacion: `Cliente rechazó la propuesta #${propuesta.id} del asesor — sigue en asesoría${dto.nota ? `: ${dto.nota}` : ''}`,
+        observacion: `Cliente rechazó la propuesta #${propuesta.id} del asesor — sigue en asesoría${textoCliente ? `: ${textoCliente}` : ''}`,
       },
       usuario,
       {
@@ -954,12 +1009,22 @@ export class PropuestaService {
             data: {
               estado: EstadoPropuesta.RECHAZADA,
               respondidaAt: ahora,
-              notaCliente: dto.nota ?? null,
             },
           });
+
+          if (textoCliente) {
+            capturado.mensajeCliente = await this.crearMensajeDeCliente(
+              tx,
+              pedido,
+              usuario,
+              textoCliente,
+            );
+          }
         },
       },
     );
+
+    this.emitirMensajeDeCliente(pedido, capturado.mensajeCliente);
 
     this.logger.log(
       `Pedido ${pedido.id}: cliente rechazó propuesta #${propuesta.id} de ventas → EN_ASESORIA`,
@@ -970,6 +1035,68 @@ export class PropuestaService {
       estado: EstadoPedido.EN_ASESORIA,
       propuestaId: propuesta.id,
     };
+  }
+
+  /**
+   * Crea el mensaje de chat con el que el CLIENTE pide un ajuste.
+   *
+   * Existe porque hay DOS caminos que llevan al mismo sitio: `contactarAsesor`
+   * (el cliente pide un asesor desde una propuesta de bodega) y
+   * `rechazarPropuestaVentas` (el cliente pide otro ajuste sobre una propuesta
+   * del asesor). El segundo no lo hacía, y el texto del cliente se perdía a
+   * partir de la segunda vuelta. Dos copias del mismo `create` + el mismo
+   * payload de realtime era la garantía de que una se quedara atrás.
+   *
+   * Corre DENTRO de la transacción del caller: el mensaje y la transición de
+   * estado tienen que ser atómicos, o un rollback deja al asesor con un mensaje
+   * de un pedido que no se movió.
+   */
+  private async crearMensajeDeCliente(
+    tx: Prisma.TransactionClient,
+    pedido: { id: number },
+    usuario: UserContext,
+    texto: string,
+  ): Promise<MensajeSistemaCreado> {
+    return tx.pedidoMensaje.create({
+      data: {
+        pedidoId: pedido.id,
+        itemId: null,
+        autorId: usuario.userId,
+        autorRol: RolUsuario.CLIENTE,
+        contenido: texto,
+        visibleParaCliente: true,
+      },
+      include: { autor: { select: { id: true, nombre: true, rol: true } } },
+    });
+  }
+
+  /**
+   * Emite `mensaje.creado` por el mismo canal que cualquier otro mensaje.
+   *
+   * Sin esto, el asesor con la pantalla abierta no veía aparecer el mensaje del
+   * cliente hasta que el polling de 15s lo trajera. Va DESPUÉS del commit, como
+   * todos los efectos externos.
+   */
+  private emitirMensajeDeCliente(
+    pedido: { id: number; usuarioId: number },
+    mensaje: MensajeSistemaCreado | null,
+  ): void {
+    if (!mensaje) return;
+
+    const payloadMensaje = {
+      id: mensaje.id,
+      pedidoId: pedido.id,
+      itemId: null,
+      autorId: mensaje.autorId,
+      autorNombre: mensaje.autor.nombre,
+      autorRol: mensaje.autorRol,
+      contenido: mensaje.contenido,
+      visibleParaCliente: true,
+      createdAt: mensaje.createdAt.toISOString(),
+      adjunto: null,
+    };
+    this.realtime.emitToPedido(pedido.id, 'mensaje.creado', payloadMensaje);
+    this.realtime.emitToUser(pedido.usuarioId, 'mensaje.creado', payloadMensaje);
   }
 
   /**
@@ -1068,17 +1195,12 @@ export class PropuestaService {
             },
           });
 
-          capturado.mensajeCliente = await tx.pedidoMensaje.create({
-            data: {
-              pedidoId: pedido.id,
-              itemId: null,
-              autorId: usuario.userId,
-              autorRol: RolUsuario.CLIENTE,
-              contenido: textoCliente,
-              visibleParaCliente: true,
-            },
-            include: { autor: { select: { id: true, nombre: true, rol: true } } },
-          });
+          capturado.mensajeCliente = await this.crearMensajeDeCliente(
+            tx,
+            pedido,
+            usuario,
+            textoCliente,
+          );
         },
       },
     );
@@ -1099,23 +1221,7 @@ export class PropuestaService {
     //
     // Va DESPUÉS del commit, como todos los efectos externos: emitirlo dentro de
     // la transacción anunciaría un mensaje que un rollback podría deshacer.
-    const mensajeCliente = capturado.mensajeCliente;
-    if (mensajeCliente) {
-      const payloadMensaje = {
-        id: mensajeCliente.id,
-        pedidoId: pedido.id,
-        itemId: null,
-        autorId: mensajeCliente.autorId,
-        autorNombre: mensajeCliente.autor.nombre,
-        autorRol: mensajeCliente.autorRol,
-        contenido: mensajeCliente.contenido,
-        visibleParaCliente: true,
-        createdAt: mensajeCliente.createdAt.toISOString(),
-        adjunto: null,
-      };
-      this.realtime.emitToPedido(pedido.id, 'mensaje.creado', payloadMensaje);
-      this.realtime.emitToUser(pedido.usuarioId, 'mensaje.creado', payloadMensaje);
-    }
+    this.emitirMensajeDeCliente(pedido, capturado.mensajeCliente);
 
     // Oct 2026: el correo de confirmación al cliente.
     //
