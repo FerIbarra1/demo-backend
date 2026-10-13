@@ -205,8 +205,8 @@ describe('ClienteService.crearPedido — precio por lista (Fase 0)', () => {
     expect(pedidoCreado.data.estado).toBe(EstadoPedido.SOLICITADO);
     expect(pedidoCreado.data.canalOrigen).toBe(CanalOrigen.WEB);
     expect(pedidoCreado.data.modoEntrega).toBe(ModoEntrega.RECOGER_TIENDA);
-    // El precio de lista no debe alterar el snapshot de cantidad original.
-    expect(pedidoCreado.data.items.create[0].cantidadOriginal).toBe(3);
+    // El precio de lista no debe alterar el snapshot de cantidad pedida.
+    expect(pedidoCreado.data.items.create[0].cantidadPedida).toBe(3);
   });
 });
 

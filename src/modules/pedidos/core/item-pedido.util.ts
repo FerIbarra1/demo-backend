@@ -97,10 +97,12 @@ export function construirItemPedido(
     productoId: pco.productoId,
     precioCOId: pco.id,
     cantidad,
-    // Snapshot de la cantidad original. El handler de MOVPED compara contra
-    // este valor para distinguir surtido COMPLETO de PARCIAL cuando el
-    // bodeguero ajusta cantidades en VFP.
-    cantidadOriginal: cantidad,
+    // F19 (oct 2026): snapshot INMUTABLE de la cantidad pedida. Es lo único que
+    // conserva "lo que el cliente pidió" después de que bodega cierre el
+    // surtido: `cantidad` se sobrescribe con lo surtido (ver
+    // `aplicarCambiosFisicos`), que es lo correcto para el dinero pero destruye
+    // la referencia. Ningún camino la muta.
+    cantidadPedida: cantidad,
     precioUnitario,
     precioUnitarioBase,
     precioUnitarioMayoreo,

@@ -767,6 +767,7 @@ export class PropuestaService {
     const columnaLista = await this.precios.columnaParaPedido(pedidoCompleto);
 
     let quedanPendientes = false;
+    let huboRetiro = false;
     let cambios: string[] = [];
 
     await this.state.cambiarEstado(
@@ -803,15 +804,28 @@ export class PropuestaService {
           );
           cambios = r.cambios;
           quedanPendientes = r.quedanPendientes;
+          huboRetiro = r.huboRetiro;
         },
       },
     );
 
-    // Si no quedó nada por surtir, no hay razón para que bodega lo revise:
-    // pasa a mostrador (o directo a pago si es a domicilio). Se hace en una
-    // segunda transición porque el encolado a Firebird solo aplica al llegar
-    // a PENDIENTE_PAGO.
-    if (!quedanPendientes) {
+    /**
+     * F19 (oct 2026): si hubo que SACAR mercancía de la bolsa, el pedido vuelve
+     * a bodega aunque no quede nada por surtir.
+     *
+     * El caso que lo motiva: el asesor quita un producto que bodega había
+     * surtido completo. `quedanPendientes` da false — no hay nada que surtir —
+     * así que el pedido iba directo a mostrador con la prenda de más todavía
+     * dentro de la bolsa. Bodega nunca se enteraba, porque el checklist de
+     * retiro vive en su tarjeta de ajustes de la plancha y esa tarjeta se
+     * alimenta de `obtenerAjustesPlancha`, que sólo lista pedidos en
+     * `EN_REVISION`.
+     *
+     * Mandarlo a bodega es lo que dispara ese checklist (`items: { some: {
+     * cancelada: true } }` ya lo levanta solo). Es el mismo criterio que el
+     * ajuste de mostrador: la bolsa y el sistema tienen que decir lo mismo.
+     */
+    if (!quedanPendientes && !huboRetiro) {
       // F16: mismo helper que los otros dos caminos — no puede divergir.
       const destino = destinoTrasSurtido(pedidoCompleto.modoEntrega);
       await this.state.cambiarEstado(
@@ -846,11 +860,19 @@ export class PropuestaService {
     }
 
     this.logger.log(
-      `Pedido ${pedido.id}: cliente aprobó propuesta #${propuesta.id} de ventas → EN_REVISION (bodega surte)`,
+      `Pedido ${pedido.id}: cliente aprobó propuesta #${propuesta.id} de ventas → EN_REVISION (` +
+        (quedanPendientes ? 'bodega surte' : 'bodega retira de la bolsa') +
+        ')',
     );
 
     return {
-      mensaje: 'Propuesta aprobada. Bodega surtirá los productos nuevos.',
+      // F19: el mensaje tiene que decir QUÉ va a hacer bodega. Decir "surtirá
+      // los productos nuevos" cuando no queda nada por surtir y lo que toca es
+      // SACAR mercancía de la bolsa deja al bodeguero buscando trabajo que no
+      // existe.
+      mensaje: quedanPendientes
+        ? 'Propuesta aprobada. Bodega surtirá los productos nuevos.'
+        : 'Propuesta aprobada. Bodega retirará de la bolsa lo que ya no va.',
       estado: EstadoPedido.EN_REVISION,
       propuestaId: propuesta.id,
       cambiosAplicados: cambios.length,

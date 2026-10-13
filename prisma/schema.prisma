@@ -742,10 +742,26 @@ model ItemPedido {
   precioUnitarioBase    Decimal? @map("precio_unitario_base") @db.Decimal(10, 2)
   precioUnitarioMayoreo Decimal? @map("precio_unitario_mayoreo") @db.Decimal(10, 2)
 
-  // Sincronización bidireccional (F9+): snapshot de la cantidad que tenía el
-  // item al crear el pedido. Se compara contra la nueva cantidad que reporta
-  // MOVPED para distinguir COMPLETO (igual), PARCIAL (menor) o NO_DISPONIBLE (0).
-  cantidadOriginal Int     @default(0) @map("cantidad_original")
+  // F19 (oct 2026): LA CANTIDAD QUE EL CLIENTE PIDIÓ, inmutable.
+  //
+  // Es la única columna que conserva "lo que se pidió" después de que bodega
+  // cierra el surtido. `cantidad` NO sirve para eso: `aplicarCambiosFisicos` la
+  // SOBRESCRIBE con lo surtido (10 de 20 → `cantidad: 10`), que es lo correcto
+  // para el dinero (es lo que se cobra) pero destruye la referencia.
+  //
+  // Sin esta columna, cada pantalla que quiere mostrar "Solicitados 20 ·
+  // Disponibles 10" tiene que RECONSTRUIR el 20 desde el snapshot de una
+  // propuesta viva, y en cuanto la propuesta se resuelve el snapshot se apaga y
+  // la pantalla miente ("Sin cambios", 10 piezas). Por eso el detalle de ventas,
+  // el editor del asesor y el resumen de bodega mostraban un pedido incompleto
+  // como si estuviera completo.
+  //
+  // Se escribe UNA sola vez, en `construirItemPedido`, y ningún camino la muta.
+  // El nombre anterior (`cantidad_original`) describía un consumidor que ya no
+  // existe: el handler de MOVPED que la comparaba contra lo reportado por
+  // Firebird se eliminó (ver `pedido-pago.handler.ts`), así que su comentario
+  // hablaba de un lector muerto.
+  cantidadPedida Int     @default(0) @map("cantidad_pedida")
 
   // Snapshot de los datos (no cambia aunque el producto/variante cambien)
   productoNombre String @map("producto_nombre") @db.VarChar(150)

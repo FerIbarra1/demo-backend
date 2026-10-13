@@ -85,6 +85,15 @@ export async function aplicarCambiosFisicos(
       const itemActual = await tx.itemPedido.findUnique({ where: { id: item.id } });
       if (!itemActual) throw new Error(`Item ${item.id} no existe`);
       const nuevoSubtotal = new Prisma.Decimal(itemActual.precioUnitario).mul(nuevaCantidad);
+      // F19 (oct 2026): aquí se SOBRESCRIBE `cantidad` con lo surtido, y es
+      // deliberado: `cantidad` es la cantidad VIGENTE — la que se cobra, la que
+      // viaja al ERP y la que leen los totales. Lo que el cliente pidió NO se
+      // pierde: vive en `cantidadPedida`, que es inmutable y es de donde las
+      // pantallas sacan "Solicitados 20 · Disponibles 10".
+      //
+      // Reescribir `estadoSurtido` a COMPLETO también es a propósito: si se
+      // quedara en PARCIAL, el filtro de faltantes lo levantaría otra vez en la
+      // siguiente ronda y el pedido nunca cerraría.
       await tx.itemPedido.update({
         where: { id: item.id },
         data: {

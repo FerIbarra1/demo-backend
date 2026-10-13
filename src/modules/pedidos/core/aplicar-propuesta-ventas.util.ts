@@ -26,6 +26,8 @@ import type { ItemPropuestaJson } from '../propuesta/dto/propuesta.dto';
  *
  * Devuelve `quedanPendientes`: true si algún item quedó por surtir, lo que
  * determina si el pedido vuelve a bodega o va directo a pago.
+ *
+ * F19 (oct 2026): devuelve también `huboRetiro`, que es OTRA cosa. Ver abajo.
  */
 export async function aplicarPropuestaDeVentas(
   tx: Prisma.TransactionClient,
@@ -40,9 +42,24 @@ export async function aplicarPropuestaDeVentas(
    * lista del asesor (que no tiene una).
    */
   columnaLista: ColumnaLista,
-): Promise<{ cambios: string[]; quedanPendientes: boolean }> {
+): Promise<{ cambios: string[]; quedanPendientes: boolean; huboRetiro: boolean }> {
   const cambios: string[] = [];
   const idsActuales = new Set(itemsActuales.map((i) => i.id));
+
+  /**
+   * F19 (oct 2026): ¿se quitó de la bolsa mercancía que YA estaba apartada?
+   *
+   * Es distinto de `quedanPendientes`. `quedanPendientes` mira el estado FINAL
+   * (¿hay algo por surtir?); esto mira si hubo que SACAR algo que ya estaba
+   * físicamente en la bolsa de la plancha.
+   *
+   * El caso: el asesor quita un producto que bodega había surtido completo. Si
+   * además no queda nada pendiente, el pedido iba directo a mostrador —
+   * `quedanPendientes` daba false — y la prenda de más se quedaba dentro de la
+   * bolsa viajando al área de entrega. El checklist de retiro de bodega, que es
+   * justo el mecanismo para sacarla, nunca se disparaba.
+   */
+  let huboRetiro = false;
 
   for (const it of items) {
     // 'completo' significa "el asesor no tocó este item". Normalmente no hay
@@ -71,6 +88,8 @@ export async function aplicarPropuestaDeVentas(
         item.estadoSurtido === 'NO_DISPONIBLE' ||
         (item.estadoSurtido === 'PARCIAL' && item.cantidadSurtida === 0);
       if (seCancela) {
+        // Si bodega había apartado piezas, hay que sacarlas de la bolsa.
+        if (item.cantidadSurtida > 0) huboRetiro = true;
         await tx.itemPedido.update({
           where: { id: it.itemId },
           data: {
@@ -84,6 +103,8 @@ export async function aplicarPropuestaDeVentas(
       }
 
       if (item.estadoSurtido === 'PARCIAL') {
+        // Se ajusta a la baja: el sobrante de la bolsa tiene que volver al anaquel.
+        if (item.cantidadSurtida > 0) huboRetiro = true;
         await tx.itemPedido.update({
           where: { id: it.itemId },
           data: {
@@ -123,6 +144,12 @@ export async function aplicarPropuestaDeVentas(
       // siguiente confirmación de bodega y bloquea el pedido para siempre
       // (mismo tratamiento que la rama `no-disponible` de más abajo).
       if (it.tipo === 'cambio' && idsActuales.has(it.itemId)) {
+        // El original pudo estar ya apartado en la bolsa: hay que retirarlo.
+        const original = await tx.itemPedido.findUnique({
+          where: { id: it.itemId },
+          select: { cantidadSurtida: true },
+        });
+        if ((original?.cantidadSurtida ?? 0) > 0) huboRetiro = true;
         await tx.itemPedido.update({
           where: { id: it.itemId },
           data: {
@@ -162,6 +189,13 @@ export async function aplicarPropuestaDeVentas(
     if (!idsActuales.has(it.itemId)) continue;
 
     if (it.tipo === 'no-disponible') {
+      // El asesor quitó un item que bodega pudo haber surtido completo: si hay
+      // piezas apartadas, hay que sacarlas de la bolsa.
+      const previo = await tx.itemPedido.findUnique({
+        where: { id: it.itemId },
+        select: { cantidadSurtida: true },
+      });
+      if ((previo?.cantidadSurtida ?? 0) > 0) huboRetiro = true;
       await tx.itemPedido.update({
         where: { id: it.itemId },
         data: { cancelada: true, estadoSurtido: 'NO_DISPONIBLE', cantidadSurtida: 0 },
@@ -181,6 +215,7 @@ export async function aplicarPropuestaDeVentas(
       });
       if (!actual) continue;
       if (nuevaCantidad === 0) {
+        if (actual.cantidadSurtida > 0) huboRetiro = true;
         await tx.itemPedido.update({
           where: { id: it.itemId },
           data: { cancelada: true, estadoSurtido: 'NO_DISPONIBLE', cantidadSurtida: 0 },
@@ -198,6 +233,8 @@ export async function aplicarPropuestaDeVentas(
       // incoherencia de `confirmarSurtido` ("lo que se cobra es lo que se
       // surtió").
       const subeLaCantidad = nuevaCantidad > actual.cantidadSurtida;
+      // Si baja por debajo de lo apartado, el sobrante vuelve al anaquel.
+      if (!subeLaCantidad && actual.cantidadSurtida > nuevaCantidad) huboRetiro = true;
       await tx.itemPedido.update({
         where: { id: it.itemId },
         data: {
@@ -252,5 +289,5 @@ export async function aplicarPropuestaDeVentas(
     },
   });
 
-  return { cambios, quedanPendientes: pendientesRestantes > 0 };
+  return { cambios, quedanPendientes: pendientesRestantes > 0, huboRetiro };
 }

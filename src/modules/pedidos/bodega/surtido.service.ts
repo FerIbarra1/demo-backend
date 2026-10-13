@@ -256,7 +256,24 @@ export class SurtidoService {
   async confirmarSurtido(pedidoId: number, usuario: UserContext, esAdmin: boolean) {
     const pedido = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      include: { items: true },
+      include: {
+        items: {
+          // F19 (oct 2026): se trae `producto` para poder resolver la imagen de
+          // la propuesta. Antes el include era `items: true` y la propuesta de
+          // bodega salía SIN fotos (sólo el placeholder de iniciales), mientras
+          // la de ventas sí las traía porque el frontend se las metía al armar
+          // su borrador. Mismo criterio de imagen que `obtenerDetalle`.
+          include: {
+            producto: {
+              select: {
+                imagenPrincipal: true,
+                imagenesProducto: { select: { url: true, colorId: true } },
+              },
+            },
+            precioCO: { select: { colorId: true } },
+          },
+        },
+      },
     });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
     if (!esAdmin && pedido.asignadoAId !== usuario.userId) {
@@ -446,11 +463,24 @@ export class SurtidoService {
           // pedido donde todavía no hay nadie del otro lado.
           if (propuestaAutomatica) {
             const { items: itemsPropuesta, total } = construirPropuestaDeBodega(
-              pedido.items.map((i) => ({
-                ...i,
-                precioUnitario: i.precioUnitario,
-                subtotal: i.subtotal,
-              })),
+              pedido.items.map((i) => {
+                // F19: la imagen del color de la variante, con fallback a la
+                // principal — el mismo criterio que `obtenerDetalle`. Se resuelve
+                // AQUÍ y no en el util porque `construirPropuestaDeBodega` es
+                // dominio puro (no toca storage).
+                const imagenColor = (i as any).producto?.imagenesProducto?.find(
+                  (img: any) => img.colorId === (i as any).precioCO?.colorId,
+                )?.url;
+                return {
+                  ...i,
+                  productoId: i.productoId,
+                  productoImagen: this.storage.resolverImagen(
+                    imagenColor ?? (i as any).producto?.imagenPrincipal ?? null,
+                  ),
+                  precioUnitario: i.precioUnitario,
+                  subtotal: i.subtotal,
+                };
+              }),
             );
             // El índice único parcial `pedidos_propuestas_pendiente_unica_idx`
             // permite UNA sola propuesta PENDIENTE por pedido. Si llega a haber
