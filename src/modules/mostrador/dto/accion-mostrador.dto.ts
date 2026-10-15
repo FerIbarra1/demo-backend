@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsIn,
   IsInt,
@@ -113,4 +115,27 @@ export class EnviarAPagarDto {
   @IsString()
   @MaxLength(500)
   nota?: string;
+}
+
+/**
+ * F22 (oct 2026): cancelar en lote los pedidos vencidos (la bolsa lleva días
+ * apartada y el cliente no respondió). El servidor revalida cada uno.
+ */
+export class CancelarVencidosDto {
+  @ApiProperty({ type: [Number], description: 'IDs de los pedidos vencidos a cancelar.' })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @IsInt({ each: true })
+  ids!: number[];
+
+  @ApiPropertyOptional({
+    description:
+      'Motivo que verá el cliente en el correo de cancelación. Si no se manda, se ' +
+      'usa el texto estándar ("pasaron más de N días sin que se recogiera…").',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  motivo?: string;
 }

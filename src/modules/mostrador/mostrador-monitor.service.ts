@@ -3,6 +3,14 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { EstadoPedido, CanalOrigen, Prisma } from '@prisma/client';
 import { minutosEntre } from '../pedidos/core/urgencia.util';
 import {
+  ESTADOS_ESPERA_CLIENTE,
+  ORDEN_COLA,
+  clientePresenteEnTienda,
+  minutosEsperando,
+  whereAusente,
+  wherePresente,
+} from '../pedidos/core/presencia.util';
+import {
   MonitorMostradorResponseDto,
   MonitorMostradorPedidoDto,
 } from './dto/monitor-mostrador.dto';
@@ -57,14 +65,9 @@ export class MostradorMonitorService {
     const whereCola: Prisma.PedidoWhereInput = {
       tiendaId,
       estado: EstadoPedido.REVISADO,
-      OR: [
-        { canalOrigen: CanalOrigen.KIOSKO },
-        {
-          canalOrigen: CanalOrigen.WEB,
-          llegadaAnunciadaAt: { not: null },
-          llegadaDescartadaAt: null,
-        },
-      ],
+      // F22: la regla única de presencia (`presencia.util.ts`): kiosko salvo que se
+      // haya descartado, web con aviso vigente.
+      ...wherePresente(),
     };
 
     // F16/F17: el panel "Atendiendo" son los pedidos que el operador ya mandó a
@@ -75,19 +78,12 @@ export class MostradorMonitorService {
     // F17: el discriminador es el ESTADO (`EN_ATENCION`), no `llamadoAt`. Antes
     // el panel era `llamadoAt IS NOT NULL` sobre REVISADO, lo que obligaba a
     // recordar el filtro en cada query y hacía indistinguibles "llamado" y "en
-    // la plancha". El gate de llegada (kiosko siempre / web con aviso) se
-    // conserva: un pedido web sin aviso no debe aparecer ni en "Atendiendo".
+    // el área de entrega". El gate de presencia se conserva: un pedido sin cliente
+    // no debe aparecer ni en "Atendiendo".
     const whereAtendiendo: Prisma.PedidoWhereInput = {
       tiendaId,
       estado: EstadoPedido.EN_ATENCION,
-      OR: [
-        { canalOrigen: CanalOrigen.KIOSKO },
-        {
-          canalOrigen: CanalOrigen.WEB,
-          llegadaAnunciadaAt: { not: null },
-          llegadaDescartadaAt: null,
-        },
-      ],
+      ...wherePresente(),
     };
 
     const [colaRaw, atendiendoRaw, listosParaEntregar, sinClienteRaw] = await Promise.all([
@@ -104,15 +100,12 @@ export class MostradorMonitorService {
           fechaPedido: true,
           llegadaAnunciadaAt: true,
           llegadaDescartadaAt: true,
+          presenteDesdeAt: true,
           _count: { select: { items: true } },
         },
-        // Avisados primero (FIFO por el momento del aviso), luego el resto por
-        // antigüedad. Es el orden de llamada.
-        orderBy: [
-          { llegadaAnunciadaAt: { sort: 'asc', nulls: 'last' } },
-          { fechaPedido: 'asc' },
-          { id: 'asc' },
-        ],
+        // F22: "primero llegado, primero atendido" — el orden de llamada es el de
+        // `ORDEN_COLA`, el MISMO de la consola y de `llamarSiguiente`.
+        orderBy: ORDEN_COLA,
       }),
       // F16: panel "Atendiendo" — los llamados, del más reciente al más viejo
       // (el último llamado es el que está enfrente del mostrador ahora mismo).
@@ -127,7 +120,11 @@ export class MostradorMonitorService {
           fechaPedido: true,
           llegadaAnunciadaAt: true,
           llegadaDescartadaAt: true,
+          presenteDesdeAt: true,
           llamadoAt: true,
+          // F22: a qué mostrador pasa el cliente, y quién lo atiende.
+          llamadoMostrador: { select: { numero: true } },
+          llamadoPor: { select: { nombre: true, apellido: true } },
           _count: { select: { items: true } },
         },
         orderBy: [{ llamadoAt: 'desc' }, { id: 'desc' }],
@@ -148,11 +145,13 @@ export class MostradorMonitorService {
       //
       // Se cuentan con antigüedad para poder priorizar: los más viejos primero.
       this.prisma.pedido.findMany({
+        // F22: incluye `ESPERANDO_APROBACION` (la bolsa también está apartada) y los
+        // de kiosko cuyo cliente se fue. Es el mismo predicado que la lista "Sin
+        // aviso" de la consola (`obtenerSinAviso`).
         where: {
           tiendaId,
-          estado: EstadoPedido.REVISADO,
-          canalOrigen: CanalOrigen.WEB,
-          OR: [{ llegadaAnunciadaAt: null }, { llegadaDescartadaAt: { not: null } }],
+          estado: { in: ESTADOS_ESPERA_CLIENTE },
+          ...whereAusente(),
         },
         select: { id: true, numeroPedido: true, clienteNombre: true, fechaPedido: true },
         orderBy: { fechaPedido: 'asc' },
@@ -204,11 +203,13 @@ export class MostradorMonitorService {
       fechaPedido: Date;
       llegadaAnunciadaAt: Date | null;
       llegadaDescartadaAt: Date | null;
+      presenteDesdeAt: Date | null;
+      llamadoMostrador?: { numero: number } | null;
+      llamadoPor?: { nombre: string; apellido: string | null } | null;
       _count: { items: number };
     },
     ahora: Date,
   ): MonitorMostradorPedidoDto {
-    const clienteEnTienda = Boolean(p.llegadaAnunciadaAt && !p.llegadaDescartadaAt);
     return {
       id: p.id,
       numeroPedido: p.numeroPedido,
@@ -219,10 +220,15 @@ export class MostradorMonitorService {
       fechaPedido: p.fechaPedido.toISOString(),
       minutosEnCola: minutosEntre(p.fechaPedido, ahora),
       llegadaAnunciadaAt: p.llegadaAnunciadaAt ? p.llegadaAnunciadaAt.toISOString() : null,
-      esperandoDesdeMin: clienteEnTienda
-        ? Math.max(0, Math.floor((ahora.getTime() - p.llegadaAnunciadaAt!.getTime()) / 60_000))
+      // F22: minutos desde que el cliente está esperando EN la tienda (hora del
+      // pedido para kiosko, del aviso para web), no desde que el pedido existe.
+      esperandoDesdeMin: minutosEsperando(p, ahora.getTime()),
+      clienteEnTienda: clientePresenteEnTienda(p),
+      // F22: solo en el panel "Atendiendo". La TV dice "Pasa al mostrador N".
+      mostradorNumero: p.llamadoMostrador?.numero ?? null,
+      operadorNombre: p.llamadoPor
+        ? `${p.llamadoPor.nombre}${p.llamadoPor.apellido ? ' ' + p.llamadoPor.apellido : ''}`
         : null,
-      clienteEnTienda,
     };
   }
 }

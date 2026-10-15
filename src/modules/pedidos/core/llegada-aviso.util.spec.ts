@@ -2,12 +2,17 @@ import { EstadoPedido, ModoEntrega } from '@prisma/client';
 import { motivoNoAvisable, evaluarAviso } from './llegada-aviso.util';
 
 /**
- * Oct 2026: la regla de "¿este pedido ya se puede avisar en tienda?" vivía
- * duplicada en `kiosko-llegada.service.ts` y en `cliente.service.ts`, con mapas
- * de mensajes que ya habían divergido. Con un tercer camino (mostrador) se
- * centralizó aquí. Estos tests fijan la regla en un solo lugar.
+ * La regla de "¿se puede registrar el aviso de llegada de este pedido?" vive en
+ * UN solo lugar (antes estaba duplicada en kiosko y cliente, con mapas de
+ * mensajes que ya habían divergido).
+ *
+ * F22 (oct 2026): el cliente puede avisar su llegada en CUALQUIER estado no
+ * terminal — también antes de que bodega termine. Antes solo en `REVISADO`: el
+ * cliente que llegaba temprano no tenía cómo decirlo (la app le ocultaba el botón
+ * y el kiosko respondía 409), aunque bodega ya priorizaba a los clientes
+ * presentes y `destinoTrasSurtidoIncompleto` decidía mirando ese mismo dato.
  */
-describe('motivoNoAvisable', () => {
+describe('motivoNoAvisable (la regla vista desde el CLIENTE)', () => {
   const base = {
     estado: EstadoPedido.REVISADO,
     modoEntrega: ModoEntrega.RECOGER_TIENDA,
@@ -35,13 +40,13 @@ describe('motivoNoAvisable', () => {
     ['EN_REVISION', EstadoPedido.EN_REVISION],
     ['ESPERANDO_APROBACION', EstadoPedido.ESPERANDO_APROBACION],
     ['EN_ASESORIA', EstadoPedido.EN_ASESORIA],
+    ['REVISADO', EstadoPedido.REVISADO],
+    ['EN_ATENCION', EstadoPedido.EN_ATENCION],
     ['PENDIENTE_PAGO', EstadoPedido.PENDIENTE_PAGO],
     ['PAGADO', EstadoPedido.PAGADO],
     ['ENVIADO', EstadoPedido.ENVIADO],
-  ])('rechaza el aviso en %s con AUN_NO_ESTA_LISTO', (_n, estado) => {
-    const motivo = motivoNoAvisable({ ...base, estado });
-    expect(motivo?.codigo).toBe('AUN_NO_ESTA_LISTO');
-    expect(motivo?.message.length).toBeGreaterThan(0);
+  ])('el CLIENTE SÍ puede avisar en %s (aviso anticipado)', (_n, estado) => {
+    expect(motivoNoAvisable({ ...base, estado })).toBeNull();
   });
 
   it('distingue un pedido ya entregado de uno cancelado', () => {
@@ -53,14 +58,15 @@ describe('motivoNoAvisable', () => {
     expect(motivoNoAvisable({ ...base, estado: EstadoPedido.CANCELADO })?.codigo).toBe('CANCELADO');
   });
 
-  it('da un mensaje para TODOS los estados no avisables', () => {
-    // Un estado sin mensaje cae al genérico; lo que no puede pasar es que el
-    // cliente vea un texto vacío.
+  it('da un mensaje no vacío para TODO lo que rechaza', () => {
+    // Lo que no puede pasar es que el cliente vea un texto vacío.
     for (const estado of Object.values(EstadoPedido)) {
-      if (estado === EstadoPedido.REVISADO) continue;
       const motivo = motivoNoAvisable({ ...base, estado });
-      expect(motivo?.message.trim().length).toBeGreaterThan(0);
+      if (motivo) expect(motivo.message.trim().length).toBeGreaterThan(0);
     }
+    expect(
+      motivoNoAvisable({ ...base, modoEntrega: ModoEntrega.DOMICILIO })?.message.trim().length,
+    ).toBeGreaterThan(0);
   });
 });
 
@@ -69,10 +75,8 @@ describe('motivoNoAvisable', () => {
  *
  * El bug que estos tests previenen: el cliente llega a tienda SIN ticket y SIN
  * folio, y su pedido todavía está en bodega (o esperando que apruebe una
- * propuesta, o en caja). Con la regla del CLIENTE, `marcar-llegada` devolvía 409
- * y el operador se quedaba sin salida. Ahora puede registrar la presencia en
- * cualquier estado no terminal — pero eso NO debe meter el pedido a la cola del
- * mostrador antes de tiempo.
+ * propuesta, o en caja). Con la regla vieja del CLIENTE, `marcar-llegada`
+ * devolvía 409 y el operador se quedaba sin salida.
  */
 describe('evaluarAviso — el operador marca la presencia del cliente', () => {
   const base = {
@@ -96,38 +100,44 @@ describe('evaluarAviso — el operador marca la presencia del cliente', () => {
   it.each([
     ['ENTREGADO', EstadoPedido.ENTREGADO],
     ['CANCELADO', EstadoPedido.CANCELADO],
-  ])('el operador NO puede avisar en %s (terminal)', (_n, estado) => {
-    const r = evaluarAviso({ ...base, estado }, 'OPERADOR');
-    expect(r.puede).toBe(false);
-    expect(r.codigo).toBe(
-      estado === EstadoPedido.ENTREGADO ? 'YA_ENTREGADO' : 'CANCELADO',
+  ])('NADIE puede avisar en %s (terminal)', (_n, estado) => {
+    for (const origen of ['OPERADOR', 'CLIENTE'] as const) {
+      const r = evaluarAviso({ ...base, estado }, origen);
+      expect(r.puede).toBe(false);
+      expect(r.codigo).toBe(estado === EstadoPedido.ENTREGADO ? 'YA_ENTREGADO' : 'CANCELADO');
+    }
+  });
+
+  it('nadie puede avisar un pedido a domicilio', () => {
+    for (const origen of ['OPERADOR', 'CLIENTE'] as const) {
+      const r = evaluarAviso({ ...base, modoEntrega: ModoEntrega.DOMICILIO }, origen);
+      expect(r.puede).toBe(false);
+      expect(r.codigo).toBe('ES_A_DOMICILIO');
+    }
+  });
+
+  it('entraACola es true en REVISADO, EN_ATENCION y ESPERANDO_APROBACION', () => {
+    // REVISADO / EN_ATENCION: ya están en la cola. ESPERANDO_APROBACION: el aviso
+    // lo mueve al área de entrega (PresenciaService.alLlegarCliente).
+    // En EN_REVISION NO: el pedido sigue en bodega y entrará a la cola, con su
+    // badge EN TIENDA, cuando bodega termine.
+    const enCola = new Set<EstadoPedido>([
+      EstadoPedido.REVISADO,
+      EstadoPedido.EN_ATENCION,
+      EstadoPedido.ESPERANDO_APROBACION,
+    ]);
+    for (const estado of Object.values(EstadoPedido)) {
+      const esperado = enCola.has(estado);
+      expect(evaluarAviso({ ...base, estado }, 'OPERADOR').entraACola).toBe(
+        esperado && estado !== EstadoPedido.ENTREGADO && estado !== EstadoPedido.CANCELADO,
+      );
+    }
+    expect(evaluarAviso({ ...base, estado: EstadoPedido.EN_REVISION }, 'CLIENTE').entraACola).toBe(
+      false,
     );
-  });
-
-  it('el operador no puede avisar un pedido a domicilio', () => {
-    const r = evaluarAviso({ ...base, modoEntrega: ModoEntrega.DOMICILIO }, 'OPERADOR');
-    expect(r.puede).toBe(false);
-    expect(r.codigo).toBe('ES_A_DOMICILIO');
-  });
-
-  it('entraACola es true SOLO en REVISADO, para los dos orígenes', () => {
-    // Es el invariante que sostiene todo: marcar la llegada en EN_REVISION deja
-    // constancia de que el cliente está ahí, pero NO mete el pedido a la cola
-    // del mostrador. El gate de visibilidad sigue exigiendo REVISADO.
-    for (const estado of Object.values(EstadoPedido)) {
-      const esperado = estado === EstadoPedido.REVISADO;
-      expect(evaluarAviso({ ...base, estado }, 'OPERADOR').entraACola).toBe(esperado);
-      expect(evaluarAviso({ ...base, estado }, 'CLIENTE').entraACola).toBe(esperado);
-    }
-  });
-
-  it('la regla del CLIENTE no cambió: sigue rechazando lo que no está listo', () => {
-    // El cliente avisando desde su casa, con el pedido en bodega, es ruido en la
-    // consola. Solo el operador —que tiene al cliente enfrente— puede hacerlo.
-    for (const estado of Object.values(EstadoPedido)) {
-      if (estado === EstadoPedido.REVISADO) continue;
-      expect(evaluarAviso({ ...base, estado }, 'CLIENTE').puede).toBe(false);
-    }
+    expect(
+      evaluarAviso({ ...base, estado: EstadoPedido.ESPERANDO_APROBACION }, 'CLIENTE').entraACola,
+    ).toBe(true);
   });
 
   it('motivoNoAvisable sigue siendo equivalente a la regla del CLIENTE', () => {
@@ -140,10 +150,7 @@ describe('evaluarAviso — el operador marca la presencia del cliente', () => {
 
   it('el mensaje del operador distingue si el pedido ya entró a la cola', () => {
     const enCola = evaluarAviso({ ...base }, 'OPERADOR');
-    const enBodega = evaluarAviso(
-      { ...base, estado: EstadoPedido.EN_REVISION },
-      'OPERADOR',
-    );
+    const enBodega = evaluarAviso({ ...base, estado: EstadoPedido.EN_REVISION }, 'OPERADOR');
     expect(enCola.message).toMatch(/cola/i);
     expect(enBodega.message).toMatch(/equipo/i);
     expect(enCola.message).not.toBe(enBodega.message);

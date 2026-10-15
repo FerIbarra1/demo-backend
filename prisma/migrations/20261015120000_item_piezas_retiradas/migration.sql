@@ -1,0 +1,28 @@
+-- F21 (oct 2026): `items_pedido.piezas_retiradas` — cuántas piezas de una línea
+-- YA se sacaron de la bolsa del área de entrega.
+--
+-- El problema que arregla: el predicado que decide "qué hay que sacar de la
+-- bolsa" (`piezasFueraDeLaBolsa`) es POSICIONAL — compara `cantidad_surtida`
+-- contra `cantidad`. Una vez que el bodeguero saca las prendas físicamente,
+-- NADA en la base de datos cambia: el checklist del sheet de surtido vive en
+-- estado local del componente y se pierde al cerrarlo. Así que si el pedido
+-- vuelve a bodega por un segundo ajuste, el sistema le pide otra vez sacar
+-- prendas que ya sacó.
+--
+-- Es un CONTEO, no un flag booleano. Con un `retirado_at` timestamp:
+--
+--   ajuste 1 → quita 2 prendas, se marcan, `retirado_at` queda puesto
+--   ajuste 2 → quita 1 prenda MÁS; el total fuera de la bolsa es 3
+--              pero el flag ya está puesto → el sistema reporta 0
+--              y la tercera prenda se queda dentro de la bolsa
+--
+-- Con el conteo acumulado, `piezasFueraDeLaBolsa(item) - piezas_retiradas` da el
+-- pendiente exacto en los dos casos: 0 cuando el segundo ajuste no toca la
+-- línea, y el incremento cuando quita más.
+--
+-- ADITIVA y con DEFAULT 0: el valor es correcto para todas las filas existentes
+-- porque ningún pedido ha pasado por el checklist de retiro todavía — el
+-- mecanismo se está cableando en este mismo cambio. No reinterpreta ni pierde
+-- un solo dato.
+ALTER TABLE "items_pedido"
+    ADD COLUMN "piezas_retiradas" INTEGER NOT NULL DEFAULT 0;

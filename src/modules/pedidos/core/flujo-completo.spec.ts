@@ -49,7 +49,12 @@ function crearServicio(estadoInicial: EstadoPedido, modoEntrega: ModoEntrega) {
         return { count: 1 };
       }),
     },
-    historialPedido: { create: jest.fn().mockResolvedValue({}) },
+    historialPedido: {
+      create: jest.fn().mockResolvedValue({}),
+      // F22: el correo "listo en tienda" es del PRIMER paso a REVISADO; la máquina
+      // cuenta cuántas veces ya estuvo ahí.
+      count: jest.fn().mockResolvedValue(0),
+    },
     pedidoPendienteEnvio: {
       create: jest.fn(async (args: any) => {
         encolados.push(args.data.pedidoId);
@@ -223,9 +228,9 @@ describe('Camino completo del flujo (F16)', () => {
       }
     });
 
-    it('un pedido en REVISADO (la plancha) nunca tiene fila en la cola del ERP', () => {
+    it('un pedido en REVISADO (el área de entrega) nunca tiene fila en la cola del ERP', () => {
       // Consecuencia del helper: como REVISADO siempre va con
-      // encolarFirebird=false, un pedido en la plancha no puede estar en el ERP.
+      // encolarFirebird=false, un pedido en el área de entrega no puede estar en el ERP.
       for (const modo of Object.values(ModoEntrega)) {
         const d = destinoTrasSurtido(modo);
         if (d.estado === EstadoPedido.REVISADO) {
@@ -238,13 +243,13 @@ describe('Camino completo del flujo (F16)', () => {
   /**
    * F17 (oct 2026): el recorrido con el estado EN_ATENCION.
    *
-   * La plancha (REVISADO) y la atención (EN_ATENCION) son dos puntos del mismo
+   * El área de entrega (REVISADO) y la atención (EN_ATENCION) son dos puntos del mismo
    * paso por mostrador. Antes "llamado" era la columna `llamadoAt` y el estado
    * no cambiaba; ahora es una transición real, y estos tests fijan que el
    * camino de ida y vuelta sea alcanzable.
    */
-  describe('F17: la plancha y la atención', () => {
-    it('el operador llama al cliente y lo puede devolver a la plancha', async () => {
+  describe('F17: el área de entrega y la atención', () => {
+    it('el operador llama al cliente y lo puede devolver al área de entrega', async () => {
       const { svc, transiciones } = crearServicio(EstadoPedido.REVISADO, ModoEntrega.KIOSKO);
 
       // Llamar: REVISADO → EN_ATENCION.

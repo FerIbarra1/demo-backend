@@ -37,6 +37,41 @@ export interface PedidoParaMotivo {
 }
 
 /**
+ * F21 (oct 2026): de dónde volvió el pedido, a partir del estado anterior.
+ *
+ * Es la fuente única de la procedencia. La usan los dos consumidores:
+ *   - `derivarMotivoReingreso` (el monitor y la cola de bodega), que además
+ *     exige que el pedido esté en la cola y sin asignar.
+ *   - `obtenerAjustesEntrega` (la tarjeta de ajustes), que ya sabe qué hay que
+ *     mover y solo necesita la procedencia para redactar la línea.
+ *
+ * El caso que arregla: un pedido que vuelve de `ESPERANDO_APROBACION` porque el
+ * asesor quitó mercancía de la bolsa caía a `null`, y la tarjeta le decía al
+ * bodeguero "El cliente aprobó una propuesta del asesor" — que describe una
+ * aprobación, no un retiro. Decirle lo que de verdad tiene que hacer es la
+ * diferencia entre que mire la bolsa o no.
+ *
+ * Devuelve `null` cuando no se puede saber de dónde vino (un pedido que nunca
+ * salió de bodega). El caller decide qué copy usar en ese caso.
+ */
+export function motivoDeReingreso(
+  estadoAnterior: EstadoPedido | null,
+): MotivoReingreso | null {
+  switch (estadoAnterior) {
+    case EstadoPedido.REVISADO:
+      return 'AJUSTE_MOSTRADOR';
+    case EstadoPedido.ESPERANDO_APROBACION:
+      return 'PROPUESTA_VENTAS';
+    case EstadoPedido.EN_ASESORIA:
+      return 'ASESORIA';
+    case EstadoPedido.EN_REVISION:
+      return 'LIBERADO';
+    default:
+      return null;
+  }
+}
+
+/**
  * Deriva por qué un pedido está de vuelta en la cola de bodega.
  *
  * F17 (oct 2026): se extrajo del monitor (`monitor.service.ts`) porque ahora la
@@ -54,24 +89,22 @@ export function derivarMotivoReingreso(pedido: PedidoParaMotivo): MotivoReingres
     return null;
   }
 
-  const itemsNuevos = pedido.items.filter((i) => !i.original).length;
-  const estadoAnterior = pedido.historial[0]?.estadoAnterior ?? null;
-
-  if (itemsNuevos > 0 && estadoAnterior === EstadoPedido.REVISADO) {
-    return 'AJUSTE_MOSTRADOR';
-  }
-  if (itemsNuevos > 0 && estadoAnterior === EstadoPedido.ESPERANDO_APROBACION) {
-    return 'PROPUESTA_VENTAS';
-  }
-  // Oct 2026: el asesor devolvió el pedido a bodega. Sin este caso el bodeguero
-  // recibía el pedido SIN saber por qué le llegó — y el badge del monitor caía
-  // al genérico. No lleva `itemsNuevos` porque el asesor no agregó nada: revisó
-  // con el cliente y el pedido original estaba bien.
-  if (estadoAnterior === EstadoPedido.EN_ASESORIA) {
-    return 'ASESORIA';
-  }
-  if (estadoAnterior === EstadoPedido.EN_REVISION) {
-    return 'LIBERADO';
-  }
-  return null;
+  /**
+   * F21 (oct 2026): la procedencia la resuelve `motivoDeReingreso`, la MISMA
+   * función que usa la tarjeta de ajustes del área de entrega.
+   *
+   * Antes esta función tenía su propia copia de la cadena de `if`, y exigía
+   * `itemsNuevos > 0` para `AJUSTE_MOSTRADOR` y `PROPUESTA_VENTAS`. Eso dejaba
+   * fuera un caso que el negocio SÍ produce: **un ajuste que solo quita
+   * productos o baja cantidades no crea ninguna línea nueva**, así que
+   * `itemsNuevos` daba 0 y el badge caía a `null` — el bodeguero recibía el
+   * pedido sin saber por qué le llegó.
+   *
+   * `items` ya no participa en la derivación. Se conserva en la interfaz porque
+   * el monitor lo necesita para otras cosas (marcar el pedido como "vino con
+   * cambios"), pero la procedencia sale solo del estado anterior — que es el
+   * dato que de verdad la determina.
+   */
+  return motivoDeReingreso(pedido.historial[0]?.estadoAnterior ?? null);
 }
+

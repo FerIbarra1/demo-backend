@@ -67,6 +67,9 @@ function crearServicio(opts: {
     { emitToTienda } as never,
     {} as never, // precios
     { confirmarDesdeMostrador } as never, // llegada
+    {} as never, // presencia (F22)
+    { resolverParaLlamar: jest.fn().mockResolvedValue(null) } as never, // mostradores (F22)
+    { get: jest.fn() } as never, // config
   );
 
   return {
@@ -81,7 +84,7 @@ function crearServicio(opts: {
 }
 
 describe('MostradorService.devolverACola', () => {
-  it('devuelve el pedido a la plancha y avisa a la TV', async () => {
+  it('devuelve el pedido al área de entrega y avisa a la TV', async () => {
     const { svc, update, cambiarEstado, emitToTienda } = crearServicio({
       completo: { numeroPedido: 'PD-2026-000123', tiendaId: 5 },
     });
@@ -95,15 +98,15 @@ describe('MostradorService.devolverACola', () => {
       usuario,
       expect.objectContaining({ invalidarMonitor: true }),
     );
-    // `llamadoAt` se limpia aparte: es auditoría de la llamada vigente.
-    expect(update).toHaveBeenCalledWith({
-      where: { id: 1 },
-      data: { llamadoAt: null },
-    });
+    // F22: `llamadoAt` (y quién llamó / desde qué mostrador) ya NO se limpian con
+    // un `update` aparte: la máquina de estados los limpia al salir de EN_ATENCION
+    // en la misma transacción. Un `update` suelto después del commit podía fallar
+    // y dejar el pedido regresado a la cola pero todavía "anunciado".
+    expect(update).not.toHaveBeenCalled();
     expect(r).toEqual({ ok: true, pedidoId: 1 });
   });
 
-  it('rechaza un pedido que nunca se llamó (sigue en la plancha)', async () => {
+  it('rechaza un pedido que nunca se llamó (sigue en el área de entrega)', async () => {
     // Sin esta guarda, "devolver a la cola" sería un no-op silencioso: el
     // operador creería que deshizo algo que nunca pasó.
     const { svc, cambiarEstado } = crearServicio({
@@ -162,7 +165,13 @@ describe('MostradorService.ajustar — la propuesta huérfana', () => {
           // El item que el ajuste va a tocar: `validarAjuste` exige que
           // pertenezca al pedido.
           items: [
-            { id: 10, cantidad: 5, cantidadSurtida: 5, estadoSurtido: 'COMPLETO', cancelada: false },
+            {
+              id: 10,
+              cantidad: 5,
+              cantidadSurtida: 5,
+              estadoSurtido: 'COMPLETO',
+              cancelada: false,
+            },
           ],
         }),
         update: jest.fn().mockResolvedValue({}),
@@ -192,11 +201,16 @@ describe('MostradorService.ajustar — la propuesta huérfana', () => {
     const svc = new MostradorService(
       prisma as never,
       { cambiarEstado } as never,
-      { cargarYValidar: jest.fn().mockResolvedValue({ id: 1, estado: EstadoPedido.REVISADO }) } as never,
-      { crearDesdeAjuste: jest.fn() } as never,
+      {
+        cargarYValidar: jest.fn().mockResolvedValue({ id: 1, estado: EstadoPedido.REVISADO }),
+      } as never,
+      { crearDesdePedido: jest.fn() } as never,
       { emitToTienda: jest.fn() } as never,
       { columnaParaPedido: jest.fn(async () => 'lista1') } as never,
       {} as never,
+      {} as never, // presencia (F22)
+      { resolverParaLlamar: jest.fn().mockResolvedValue(null) } as never, // mostradores (F22)
+      { get: jest.fn() } as never, // config
     );
 
     return { svc, updateMany };

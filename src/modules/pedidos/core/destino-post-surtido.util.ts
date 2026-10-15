@@ -79,17 +79,9 @@ export function destinoTrasSurtidoIncompleto(
 /**
  * ¿Este pedido tiene al cliente esperando en tienda?
  *
- * Es el MISMO predicado que usa el gate de visibilidad de la cola de mostrador
- * (`MostradorQueryService.obtenerCola`): KIOSKO siempre, WEB solo con aviso
- * vigente. Vive aquí para que bodega y mostrador no puedan divergir — si
- * divergieran, un pedido podría quedar esperando aprobación con el cliente
+ * F22 (oct 2026): la regla vive en `presencia.util.ts` (una sola para la cola, la
+ * TV y bodega) y aquí solo se re-exporta, para no tocar a quien ya la importa.
+ * Si divergieran, un pedido podría quedar esperando aprobación con el cliente
  * enfrente, o al revés.
  */
-export function clientePresenteEnTienda(pedido: {
-  canalOrigen: string;
-  llegadaAnunciadaAt: Date | null;
-  llegadaDescartadaAt: Date | null;
-}): boolean {
-  if (pedido.canalOrigen === 'KIOSKO') return true;
-  return Boolean(pedido.llegadaAnunciadaAt && !pedido.llegadaDescartadaAt);
-}
+export { clientePresenteEnTienda } from './presencia.util';

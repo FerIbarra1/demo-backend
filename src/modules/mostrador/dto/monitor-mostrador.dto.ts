@@ -36,13 +36,31 @@ export class MonitorMostradorPedidoDto {
   @ApiProperty({
     nullable: true,
     type: Number,
-    description: 'Minutos que el cliente lleva esperando en tienda',
+    description:
+      'Minutos que el cliente lleva esperando en tienda (kiosko: desde la hora del pedido; ' +
+      'web: desde su aviso de llegada)',
   })
   esperandoDesdeMin: number | null;
   @ApiProperty({
-    description: 'true si hay un cliente identificado esperando en tienda (avisó llegada)',
+    description:
+      'true si el cliente está esperando en tienda (kiosko, o web que avisó llegada y ' +
+      'no fue descartado)',
   })
   clienteEnTienda: boolean;
+  @ApiProperty({
+    nullable: true,
+    type: Number,
+    description:
+      'F22: número del mostrador al que pasa el cliente. Solo en el panel "Atendiendo"; ' +
+      'null si la tienda no tiene mostradores configurados.',
+  })
+  mostradorNumero: number | null;
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'F22: operador que lo llamó. Solo en el panel "Atendiendo".',
+  })
+  operadorNombre: string | null;
 }
 
 export class MonitorMostradorContadoresDto {

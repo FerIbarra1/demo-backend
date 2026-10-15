@@ -33,12 +33,18 @@ const admin: UserContext = {
   // Sin tienda: es el caso del ADMIN y el del usuario mal configurado.
 };
 
-function crearServicio() {
+/**
+ * F22: los IDs que coinciden se calculan en SQL (`$queryRaw`) y Prisma pagina y
+ * ordena sobre ellos. `ids` es lo que devuelve esa consulta.
+ */
+function crearServicio(ids: number[] = [1, 2, 3]) {
   const findMany = jest.fn().mockResolvedValue([]);
   const count = jest.fn().mockResolvedValue(0);
+  const queryRaw = jest.fn().mockResolvedValue(ids.map((id) => ({ id })));
 
   const prisma = {
     pedido: { findMany, count },
+    $queryRaw: queryRaw,
   };
 
   const svc = new MostradorQueryService(
@@ -46,12 +52,18 @@ function crearServicio() {
     {} as never, // pedidoState
   );
 
-  return { svc, findMany, count };
+  return { svc, findMany, count, queryRaw };
 }
 
 /** El `where` que el servicio construyó en la primera llamada a findMany. */
 function whereDe(findMany: jest.Mock) {
   return findMany.mock.calls[0][0].where;
+}
+
+/** El SQL (con marcadores) y los parámetros de la consulta cruda. */
+function sqlDe(queryRaw: jest.Mock): { sql: string; values: unknown[] } {
+  const q = queryRaw.mock.calls[0][0];
+  return { sql: q.sql as string, values: q.values as unknown[] };
 }
 
 describe('buscarPedidos — el operador siempre encuentra al cliente', () => {
@@ -77,34 +89,109 @@ describe('buscarPedidos — el operador siempre encuentra al cliente', () => {
     ['ENTREGADO', EstadoPedido.ENTREGADO],
     ['CANCELADO', EstadoPedido.CANCELADO],
   ])('cubre el estado %s', async (_nombre, _estado) => {
-    const { svc, findMany } = crearServicio();
+    const { svc, findMany, queryRaw } = crearServicio();
     await svc.buscarPedidos('Juan', operador, 5);
-    // No hay lista blanca de estados: la cobertura es total por construcción.
+    // No hay lista blanca de estados: la cobertura es total por construcción,
+    // ni en el SQL ni en el where de Prisma.
     expect(whereDe(findMany).estado).toBeUndefined();
+    expect(sqlDe(queryRaw).sql).not.toMatch(/\bestado\b/);
     expect(findMany).toHaveBeenCalled();
   });
 
-  it('busca por el folio de VFP, que es el que el cliente trae en el ticket', async () => {
-    const { svc, findMany } = crearServicio();
-    await svc.buscarPedidos('12345', operador, 5);
-
-    const or = whereDe(findMany).OR;
-    const buscaFolioVfp = or.some(
-      (c: Record<string, unknown>) =>
-        JSON.stringify(c).includes('pendienteEnvio') &&
-        JSON.stringify(c).includes('externalFolio'),
-    );
-    expect(buscaFolioVfp).toBe(true);
+  it('Prisma solo pagina y ordena sobre los IDs que el SQL devolvió', async () => {
+    const { svc, findMany } = crearServicio([7, 9]);
+    await svc.buscarPedidos('Juan', operador, 5);
+    expect(whereDe(findMany).id).toEqual({ in: [7, 9] });
   });
 
-  it('busca por nombre y por correo, además del folio interno', async () => {
-    const { svc, findMany } = crearServicio();
+  it('sin coincidencias devuelve vacío sin consultar pedidos', async () => {
+    const { svc, findMany, count } = crearServicio([]);
+    const r = await svc.buscarPedidos('Nadie', operador, 5, 1, 20);
+
+    expect(r).toEqual({ data: [], meta: { total: 0, pagina: 1, limite: 20, totalPaginas: 0 } });
+    expect(findMany).not.toHaveBeenCalled();
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it('busca por el folio de VFP, que es el que el cliente trae en el ticket', async () => {
+    const { svc, queryRaw } = crearServicio();
+    await svc.buscarPedidos('12345', operador, 5);
+
+    const { sql } = sqlDe(queryRaw);
+    expect(sql).toContain('pedidos_pendientes_envio');
+    expect(sql).toContain('external_folio');
+  });
+
+  it('busca por folio interno, nombre y correo', async () => {
+    const { svc, queryRaw } = crearServicio();
     await svc.buscarPedidos('juan@correo.com', operador, 5);
 
-    const serializado = JSON.stringify(whereDe(findMany).OR);
-    expect(serializado).toContain('numeroPedido');
-    expect(serializado).toContain('clienteNombre');
-    expect(serializado).toContain('clienteEmail');
+    const { sql } = sqlDe(queryRaw);
+    expect(sql).toContain('numero_pedido');
+    expect(sql).toContain('cliente_nombre');
+    expect(sql).toContain('cliente_email');
+  });
+
+  describe('F22 — lo que el cliente sin papeles sabe de memoria', () => {
+    it('busca por TELÉFONO, solo contra dígitos: "55 1234-5678" encuentra "5512345678"', async () => {
+      // La pantalla decía "busca por teléfono" y el backend no lo buscaba.
+      const { svc, queryRaw } = crearServicio();
+      await svc.buscarPedidos('55 1234-5678', operador, 5);
+
+      const { sql, values } = sqlDe(queryRaw);
+      expect(sql).toContain('cliente_telefono');
+      expect(sql).toMatch(/regexp_replace\(coalesce\(p\.cliente_telefono/);
+      // Un teléfono NO se parte por espacios: sus pedazos cortos no matchearían
+      // nada y el AND entre palabras fallaría.
+      expect(values).toContain('%5512345678%');
+      expect(sql.match(/ AND /g)?.length ?? 0).toBeLessThanOrEqual(1);
+    });
+
+    it('ignora los acentos: "Jose" encuentra a "José"', async () => {
+      const { svc, queryRaw } = crearServicio();
+      await svc.buscarPedidos('José', operador, 5);
+
+      const { sql, values } = sqlDe(queryRaw);
+      // `insensitive` solo ignora mayúsculas; el nombre se normaliza en SQL y el
+      // texto del operador en JS, así "José" y "jose" caen en la misma cadena.
+      expect(sql).toContain('translate(p.cliente_nombre');
+      expect(values).toContain('%jose%');
+    });
+
+    it('palabras sueltas: cada una tiene que aparecer (AND), en cualquier campo (OR)', async () => {
+      // "perez juan" no encontraba a "Juan Pérez" porque se buscaba la cadena
+      // entera.
+      const { svc, queryRaw } = crearServicio();
+      await svc.buscarPedidos('perez juan', operador, 5);
+
+      const { sql, values } = sqlDe(queryRaw);
+      expect(values).toEqual(expect.arrayContaining(['%perez%', '%juan%']));
+      expect(sql).toMatch(/\) AND \(/);
+    });
+
+    it('el texto del operador va como PARÁMETRO, nunca interpolado en el SQL', async () => {
+      const { svc, queryRaw } = crearServicio();
+      const hostil = "x'; DROP TABLE pedidos; --";
+      await svc.buscarPedidos(hostil, operador, 5);
+
+      const { sql } = sqlDe(queryRaw);
+      expect(sql).not.toContain('DROP TABLE');
+      expect(sql).not.toContain(hostil);
+    });
+
+    it('escapa los comodines de LIKE: "100%" se busca literal', async () => {
+      const { svc, queryRaw } = crearServicio();
+      await svc.buscarPedidos('100%', operador, 5);
+
+      const { values } = sqlDe(queryRaw);
+      expect(values).toContain('%100\\%%');
+    });
+
+    it('limita las coincidencias: es un buscador de mostrador, no un reporte', async () => {
+      const { svc, queryRaw } = crearServicio();
+      await svc.buscarPedidos('Juan', operador, 5);
+      expect(sqlDe(queryRaw).sql).toMatch(/LIMIT 200/);
+    });
   });
 
   it('incluye pendienteEnvio, o el frontend muestra "Pedido #id" en vez del folio', async () => {
@@ -131,20 +218,27 @@ describe('buscarPedidos — el operador siempre encuentra al cliente', () => {
   it('anota esperandoDesdeMin, o el badge "EN TIENDA" no se pinta', async () => {
     const { svc, findMany } = crearServicio();
     const hace5min = new Date(Date.now() - 5 * 60_000);
+    const fila = (id: number, extra: Record<string, unknown>) => ({
+      id,
+      canalOrigen: 'WEB',
+      fechaPedido: new Date(Date.now() - 3_600_000),
+      llegadaAnunciadaAt: null,
+      llegadaDescartadaAt: null,
+      presenteDesdeAt: null,
+      llamadoPor: null,
+      llamadoMostrador: null,
+      ...extra,
+    });
     findMany.mockResolvedValue([
-      {
-        id: 1,
-        llegadaAnunciadaAt: hace5min,
-        llegadaDescartadaAt: null,
-      },
+      fila(1, { llegadaAnunciadaAt: hace5min, presenteDesdeAt: hace5min }),
       // Aviso descartado: el cliente no estaba, así que no cuenta como espera.
-      {
-        id: 2,
+      fila(2, {
         llegadaAnunciadaAt: hace5min,
+        presenteDesdeAt: hace5min,
         llegadaDescartadaAt: new Date(),
-      },
+      }),
       // Sin aviso: nunca avisó.
-      { id: 3, llegadaAnunciadaAt: null, llegadaDescartadaAt: null },
+      fila(3, {}),
     ]);
 
     const r = await svc.buscarPedidos('Juan', operador, 5);
@@ -170,14 +264,19 @@ describe('buscarPedidos — el operador siempre encuentra al cliente', () => {
 });
 
 describe('buscarPedidos — aislamiento por tienda', () => {
-  it('acota a la tienda del usuario', async () => {
-    const { svc, findMany } = crearServicio();
+  it('acota a la tienda del usuario EN LAS DOS CAPAS: el SQL y el where de Prisma', async () => {
+    // La tienda no puede depender de una sola de las dos capas.
+    const { svc, findMany, queryRaw } = crearServicio();
     await svc.buscarPedidos('Juan', operador, 5);
+
     expect(whereDe(findMany).tiendaId).toBe(5);
+    const { sql, values } = sqlDe(queryRaw);
+    expect(sql).toContain('p.tienda_id =');
+    expect(values).toContain(5);
   });
 
   it('falla cerrado si el usuario no tiene tienda', async () => {
-    const { svc, findMany } = crearServicio();
+    const { svc, findMany, queryRaw } = crearServicio();
     const sinTienda: UserContext = { ...operador, tiendaId: undefined };
 
     // Antes el filtro era `if (rol !== ADMIN && tiendaId)`: sin tienda, el
@@ -186,12 +285,15 @@ describe('buscarPedidos — aislamiento por tienda', () => {
     await expect(svc.buscarPedidos('Juan', sinTienda, undefined)).rejects.toThrow(
       ForbiddenException,
     );
+    expect(queryRaw).not.toHaveBeenCalled();
     expect(findMany).not.toHaveBeenCalled();
   });
 
   it('ADMIN no queda acotado a una tienda', async () => {
-    const { svc, findMany } = crearServicio();
+    const { svc, findMany, queryRaw } = crearServicio();
     await svc.buscarPedidos('Juan', admin, undefined);
+
     expect(whereDe(findMany).tiendaId).toBeUndefined();
+    expect(sqlDe(queryRaw).sql).not.toContain('p.tienda_id');
   });
 });

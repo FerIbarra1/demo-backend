@@ -1,13 +1,14 @@
+import { ConflictException } from '@nestjs/common';
 import { KioskoLlegadaService } from './kiosko-llegada.service';
 
 /**
- * F16 (sep 2026): tests de los bugs B2 y B3 del plan.
+ * Tests de los bugs B2 y B3 del plan F16, y de la regla de re-aviso de F22.
  *
- * B2 — el anti-spam de llegada era un tope DE POR VIDA: `llegadaAnunciadaCount`
- * se incrementaba y nunca se reiniciaba, así que tras 5 avisos el pedido dejaba
- * de emitir realtime para siempre. Era un adorno cuando la llegada solo pintaba
- * un badge; con el gate de D5 (un pedido web no aparece en mostrador hasta que
- * el cliente avisa) el bug deja el pedido sin alerta en la TV para siempre.
+ * B2 (F16) — el anti-spam de llegada era un tope DE POR VIDA y el pedido dejaba de
+ * emitir realtime para siempre. F22 lo resolvió de raíz: ya no hay tope ni ventana
+ * porque el re-aviso simplemente no ocurre. Mientras el cliente esté presente,
+ * avisar de nuevo no hace nada; solo se puede volver a avisar después de que el
+ * mostrador descartó el aviso.
  *
  * B3 — el guard del QR era evadible: si `user.userId` llegaba `undefined`, la
  * condición `rol === CLIENTE && userId !== undefined` era `false` y se saltaba
@@ -15,14 +16,15 @@ import { KioskoLlegadaService } from './kiosko-llegada.service';
  */
 
 /** Prisma mockeado con un pedido configurable. */
-function crearServicio(pedido: Record<string, unknown> | null) {
-  const update = jest.fn(async (args: any) => ({ ...pedido, ...args.data }));
+function crearServicio(pedido: Record<string, unknown> | null, updateManyCount = 1) {
+  const updateMany = jest.fn(async (_args: unknown) => ({ count: updateManyCount }));
 
   const prisma = {
     pedido: {
       findUnique: jest.fn().mockResolvedValue(pedido),
-      update,
+      updateMany,
     },
+    historialPedido: { create: jest.fn().mockResolvedValue({}) },
   };
 
   const realtime = { emitToTienda: jest.fn(), emitToPedido: jest.fn() };
@@ -34,10 +36,11 @@ function crearServicio(pedido: Record<string, unknown> | null) {
     { get: jest.fn().mockReturnValue('secreto') } as never,
   );
 
-  return { svc, update, realtime, prisma };
+  return { svc, updateMany, realtime, prisma };
 }
 
-describe('B2 — el anti-spam de llegada es un límite de tasa, no un tope de por vida', () => {
+describe('F22 — avisar de nuevo: solo cuando el mostrador descartó el aviso', () => {
+  const hace1h = new Date(Date.now() - 60 * 60_000);
   const pedidoBase = {
     id: 1,
     numeroPedido: 'PD-2026-000001',
@@ -45,132 +48,144 @@ describe('B2 — el anti-spam de llegada es un límite de tasa, no un tope de po
     usuarioId: 7,
     estado: 'REVISADO',
     modoEntrega: 'RECOGER_TIENDA',
+    canalOrigen: 'WEB',
     clienteNombre: 'Cliente Test',
-    llegadaAnunciadaAt: new Date(Date.now() - 60 * 60_000),
-    llegadaUltimoAvisoAt: new Date(Date.now() - 60 * 60_000),
-    // El ancla del límite de tasa es la última EMISIÓN, no el último aviso.
-    llegadaUltimaEmisionAt: new Date(Date.now() - 60 * 60_000),
-    llegadaAnunciadaCount: 5, // ya agotó el tope
+    fechaPedido: new Date(Date.now() - 5 * 60 * 60_000),
+    llegadaAnunciadaAt: hace1h,
+    presenteDesdeAt: hace1h,
     llegadaAnunciadaCanal: 'WEB',
     llegadaAnunciadaKioskoId: null,
     llegadaDescartadaAt: null,
+    llegadaDescartes: 0,
     tienda: { nombre: 'Tienda' },
     items: [],
   };
 
-  it('reinicia el contador tras la ventana de reintento (el bug B2)', async () => {
-    // Última EMISIÓN hace 1 hora > REINTENTO_WINDOW_MS (10 min), y el contador
-    // está en el tope. Antes esto dejaba `debeEmitir` en false PARA SIEMPRE.
-    const { svc, update, realtime } = crearServicio({ ...pedidoBase });
+  it('con el cliente YA presente no escribe ni suena: "Avisar de nuevo" ya no hace ruido', async () => {
+    // El bug: el botón "Avisar de nuevo" de la app re-emitía el chime del mostrador
+    // cada 60 s (hasta 5 veces por 10 min). Todo el límite de tasa existía para
+    // contener algo que ya no ocurre.
+    const { svc, updateMany, realtime } = crearServicio({ ...pedidoBase });
 
-    await svc.confirmarDesdeCliente(1);
+    const r = await svc.confirmarDesdeCliente(1);
 
-    // El contador se reinicia a 1, así que vuelve a emitir.
-    const data = update.mock.calls[0][0].data;
-    expect(data.llegadaAnunciadaCount).toBe(1);
-    expect(realtime.emitToTienda).toHaveBeenCalled();
-  });
-
-  it('NO reinicia si la ventana aún no pasó (el tope sigue vigente)', async () => {
-    // Última emisión hace 2 minutos < 10 min: el tope sigue aplicando.
-    const { svc, update, realtime } = crearServicio({
-      ...pedidoBase,
-      llegadaUltimaEmisionAt: new Date(Date.now() - 2 * 60_000),
-    });
-
-    await svc.confirmarDesdeCliente(1);
-
-    const data = update.mock.calls[0][0].data;
-    expect(data.llegadaAnunciadaCount).toBe(6); // sigue subiendo
-    // Pero no re-emite: el mostrador ya sabe que está ahí.
+    expect(r.reanudado).toBe(false);
+    expect(r.mensaje).toMatch(/ya avisamos/i);
+    expect(updateMany).not.toHaveBeenCalled();
     expect(realtime.emitToTienda).not.toHaveBeenCalled();
-    // Y el ancla NO se mueve: la ventana corre desde la última emisión real.
-    expect(data.llegadaUltimaEmisionAt).toBeUndefined();
+    expect(realtime.emitToPedido).not.toHaveBeenCalled();
   });
 
-  it('un pedido por debajo del tope emite normalmente', async () => {
-    const { svc, realtime } = crearServicio({
+  it('un aviso nuevo REINICIA la espera (no hereda la hora del aviso descartado)', async () => {
+    // El bug: `llegadaAnunciadaAt: pedido.llegadaAnunciadaAt ?? now` conservaba la
+    // hora del primer aviso. El cliente que avisó por error a las 10:00, fue
+    // descartado y volvió de verdad a las 12:00 se colaba delante de todos y la
+    // consola le pintaba "EN TIENDA · 120 min".
+    const { svc, updateMany, realtime } = crearServicio({
       ...pedidoBase,
-      llegadaAnunciadaCount: 1,
-      llegadaUltimaEmisionAt: new Date(Date.now() - 5 * 60_000),
+      llegadaDescartadaAt: new Date(),
+      llegadaDescartes: 1,
+    });
+
+    const antes = Date.now();
+    const r = await svc.confirmarDesdeCliente(1);
+
+    expect(r.reanudado).toBe(true);
+    const { data } = updateMany.mock.calls[0][0] as any;
+    expect(data.llegadaAnunciadaAt.getTime()).toBeGreaterThanOrEqual(antes);
+    expect(data.presenteDesdeAt.getTime()).toBeGreaterThanOrEqual(antes);
+    // Y el descarte se limpia, para que el gate lo vuelva a mostrar.
+    expect(data.llegadaDescartadaAt).toBeNull();
+    expect(data.llegadaDescartadaPorId).toBeNull();
+    expect(realtime.emitToTienda).toHaveBeenCalledWith(
+      5,
+      'pedido.llegada-anunciada',
+      expect.anything(),
+    );
+  });
+
+  it('el descarte NO se pierde: llegadaDescartes no se toca al re-avisar', async () => {
+    // El contador de descartes es lo que cierra el botón web a la segunda. Si
+    // re-avisar lo reiniciara, el cliente nunca llegaría al límite.
+    const { svc, updateMany } = crearServicio({
+      ...pedidoBase,
+      llegadaDescartadaAt: new Date(),
+      llegadaDescartes: 1,
     });
 
     await svc.confirmarDesdeCliente(1);
 
-    expect(realtime.emitToTienda).toHaveBeenCalled();
+    const { data } = updateMany.mock.calls[0][0] as any;
+    expect(data.llegadaDescartes).toBeUndefined();
   });
 
-  it('el cliente que insiste más seguido que la ventana eventualmente re-emite', async () => {
-    // El bug que quedaba: `llegadaUltimoAvisoAt` se reescribía en CADA aviso,
-    // así que un cliente que insistía cada minuto nunca cumplía la ventana y su
-    // pedido quedaba sin alerta indefinidamente. Con el ancla en la última
-    // EMISIÓN, la ventana sí se cumple.
-    const { svc, update, realtime } = crearServicio({
+  it('tras DOS descartes el botón web se cierra (AVISO_BLOQUEADO)', async () => {
+    const { svc, updateMany, realtime } = crearServicio({
       ...pedidoBase,
-      // Avisó hace 1 min (fresco), pero la última EMISIÓN fue hace 11 min.
-      llegadaUltimoAvisoAt: new Date(Date.now() - 60_000),
-      llegadaUltimaEmisionAt: new Date(Date.now() - 11 * 60_000),
+      llegadaDescartadaAt: new Date(),
+      llegadaDescartes: 2,
     });
 
-    await svc.confirmarDesdeCliente(1);
-
-    const data = update.mock.calls[0][0].data;
-    expect(data.llegadaAnunciadaCount).toBe(1); // se reinició
-    expect(realtime.emitToTienda).toHaveBeenCalled();
+    await expect(svc.confirmarDesdeCliente(1)).rejects.toBeInstanceOf(ConflictException);
+    await expect(svc.confirmarDesdeCliente(1)).rejects.toMatchObject({
+      response: expect.objectContaining({ codigo: 'AVISO_BLOQUEADO' }),
+    });
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(realtime.emitToTienda).not.toHaveBeenCalled();
   });
 
-  it('la idempotencia de 60s sigue funcionando', async () => {
-    const { svc, update, realtime } = crearServicio({
+  it('con UN solo descarte el cliente todavía puede re-avisar', async () => {
+    const { svc } = crearServicio({
       ...pedidoBase,
-      llegadaAnunciadaCount: 1,
-      llegadaUltimoAvisoAt: new Date(Date.now() - 10_000), // hace 10s
+      llegadaDescartadaAt: new Date(),
+      llegadaDescartes: 1,
+    });
+
+    await expect(svc.confirmarDesdeCliente(1)).resolves.toMatchObject({ reanudado: true });
+  });
+
+  it('la guarda es atómica: si otro aviso ganó la carrera, no emite dos veces', async () => {
+    // Dos avisos simultáneos (la app y el kiosko, o un doble toque) leen
+    // "ausente" a la vez. Solo uno escribe; el otro ve count = 0.
+    const { svc, realtime } = crearServicio(
+      { ...pedidoBase, llegadaAnunciadaAt: null, presenteDesdeAt: null },
+      0,
+    );
+
+    const r = await svc.confirmarDesdeCliente(1);
+
+    expect(r.reanudado).toBe(false);
+    expect(realtime.emitToTienda).not.toHaveBeenCalled();
+  });
+
+  it('un pedido de KIOSKO ya está presente: avisar no hace nada', async () => {
+    // El pedido se hizo con el cliente en la tienda; no tiene `llegadaAnunciadaAt`
+    // ni lo necesita.
+    const { svc, updateMany } = crearServicio({
+      ...pedidoBase,
+      canalOrigen: 'KIOSKO',
+      llegadaAnunciadaAt: null,
     });
 
     const r = await svc.confirmarDesdeCliente(1);
 
     expect(r.reanudado).toBe(false);
-    // No escribe ni emite: es el mismo aviso.
-    expect(update).not.toHaveBeenCalled();
-    expect(realtime.emitToTienda).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
-  it('un aviso DESCARTADO se puede volver a mandar de inmediato', async () => {
-    // El caso real: el cliente avisa por error (o el operador no lo ve) y
-    // mostrador descarta el aviso. Si el cliente intenta avisar otra vez dentro
-    // de los 60s, el guard de idempotencia lo trataba como "ya avisamos" y el
-    // pedido NO volvía a la cola — el cliente se quedaba sin forma de re-avisar.
-    const { svc, update, realtime } = crearServicio({
+  it('un pedido de KIOSKO descartado SÍ puede volver a avisar', async () => {
+    const { svc, updateMany } = crearServicio({
       ...pedidoBase,
-      llegadaAnunciadaCount: 1,
-      // Avisó hace 10s (dentro de la ventana) PERO fue descartado.
-      llegadaUltimoAvisoAt: new Date(Date.now() - 10_000),
+      canalOrigen: 'KIOSKO',
+      llegadaAnunciadaAt: null,
       llegadaDescartadaAt: new Date(),
-      llegadaDescartadaPorId: 3,
+      llegadaDescartes: 1,
     });
 
     const r = await svc.confirmarDesdeCliente(1);
 
-    // Se re-emite y el pedido vuelve a la cola de mostrador.
     expect(r.reanudado).toBe(true);
-    expect(realtime.emitToTienda).toHaveBeenCalled();
-    // Y el descarte se limpia, para que el gate de D5 lo vuelva a mostrar.
-    const data = update.mock.calls[0][0].data;
-    expect(data.llegadaDescartadaAt).toBeNull();
-    expect(data.llegadaDescartadaPorId).toBeNull();
-  });
-
-  it('sin descarte, la ventana de 60s sigue aplicando', async () => {
-    const { svc, update } = crearServicio({
-      ...pedidoBase,
-      llegadaAnunciadaCount: 1,
-      llegadaUltimoAvisoAt: new Date(Date.now() - 10_000),
-      llegadaDescartadaAt: null,
-    });
-
-    await svc.confirmarDesdeCliente(1);
-
-    // Sin descarte, es el mismo aviso: no se re-escribe.
-    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).toHaveBeenCalled();
   });
 });
 

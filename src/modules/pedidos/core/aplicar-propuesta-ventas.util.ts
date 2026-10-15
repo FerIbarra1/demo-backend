@@ -2,6 +2,8 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma, EstadoSurtido } from '@prisma/client';
 import { recalcularTotalesPedido } from './totales.util';
 import { construirItemPedido } from './item-pedido.util';
+import { datosDeRetiroPorDecision, datosDeFaltaDeBodega } from './cancelacion-linea.util';
+import { calcularAjusteDeCantidad, piezasEnLaBolsa } from './ajuste-cantidad.util';
 import type { ColumnaLista } from '../../precios/precio-lista.util';
 import type { ItemPropuestaJson } from '../propuesta/dto/propuesta.dto';
 
@@ -42,7 +44,11 @@ export async function aplicarPropuestaDeVentas(
    * lista del asesor (que no tiene una).
    */
   columnaLista: ColumnaLista,
-): Promise<{ cambios: string[]; quedanPendientes: boolean; huboRetiro: boolean }> {
+): Promise<{
+  cambios: string[];
+  quedanPendientes: boolean;
+  huboRetiro: boolean;
+}> {
   const cambios: string[] = [];
   const idsActuales = new Set(itemsActuales.map((i) => i.id));
 
@@ -51,15 +57,24 @@ export async function aplicarPropuestaDeVentas(
    *
    * Es distinto de `quedanPendientes`. `quedanPendientes` mira el estado FINAL
    * (¿hay algo por surtir?); esto mira si hubo que SACAR algo que ya estaba
-   * físicamente en la bolsa de la plancha.
+   * físicamente en la bolsa del área de entrega.
    *
    * El caso: el asesor quita un producto que bodega había surtido completo. Si
    * además no queda nada pendiente, el pedido iba directo a mostrador —
    * `quedanPendientes` daba false — y la prenda de más se quedaba dentro de la
    * bolsa viajando al área de entrega. El checklist de retiro de bodega, que es
    * justo el mecanismo para sacarla, nunca se disparaba.
+   *
+   * Es solo la señal de ruteo. NO genera lista de reposición: las piezas las
+   * saca el bodeguero y las regresa al anaquel él mismo en el checklist; la
+   * reposición es solo de pedidos cancelados o rechazados.
    */
   let huboRetiro = false;
+
+  /** Marca que hay piezas que sacar de la bolsa. */
+  const registrarRetiro = (piezas: number) => {
+    if (piezas > 0) huboRetiro = true;
+  };
 
   for (const it of items) {
     // 'completo' significa "el asesor no tocó este item". Normalmente no hay
@@ -77,6 +92,7 @@ export async function aplicarPropuestaDeVentas(
         select: {
           precioUnitario: true,
           cantidadSurtida: true,
+          piezasRetiradas: true,
           estadoSurtido: true,
           cancelada: true,
         },
@@ -89,22 +105,27 @@ export async function aplicarPropuestaDeVentas(
         (item.estadoSurtido === 'PARCIAL' && item.cantidadSurtida === 0);
       if (seCancela) {
         // Si bodega había apartado piezas, hay que sacarlas de la bolsa.
-        if (item.cantidadSurtida > 0) huboRetiro = true;
+        registrarRetiro(piezasEnLaBolsa(item));
+        // F20: esta rama SÍ es falta de bodega — el cliente aprobó "lo que hay"
+        // y lo que hay es nada. Limpiar el estado físico es correcto aquí: es
+        // el único de los caminos de cancelación donde `NO_DISPONIBLE` +
+        // `cantidadSurtida: 0` describe literalmente lo que pasó.
         await tx.itemPedido.update({
           where: { id: it.itemId },
-          data: {
-            cancelada: true,
-            estadoSurtido: 'NO_DISPONIBLE',
-            cantidadSurtida: 0,
-          },
+          data: datosDeFaltaDeBodega(),
         });
         cambios.push(`Item #${it.itemId} quitado del pedido (no disponible)`);
         continue;
       }
 
       if (item.estadoSurtido === 'PARCIAL') {
-        // Se ajusta a la baja: el sobrante de la bolsa tiene que volver al anaquel.
-        if (item.cantidadSurtida > 0) huboRetiro = true;
+        // Se ajusta la cantidad A LO QUE HAY: `cantidad` baja hasta igualar
+        // `cantidadSurtida`, así que en la bolsa no sobra nada. Antes esta rama
+        // llamaba a `registrarRetiro(cantidadSurtida)` ("el sobrante vuelve al
+        // anaquel"), pero no hay sobrante — las piezas que bodega encontró SON
+        // las que se lleva el cliente. El resultado era un retiro fantasma: el
+        // pedido regresaba a bodega "a retirar de la bolsa" sin nada que retirar
+        // y el mensaje al cliente prometía un trabajo que no existe.
         await tx.itemPedido.update({
           where: { id: it.itemId },
           data: {
@@ -139,24 +160,27 @@ export async function aplicarPropuestaDeVentas(
 
       // Si es un cambio, cancelar el item original.
       //
-      // Se limpia también su estado de surtido: un item cancelado que
-      // conserva `PARCIAL`/`NO_DISPONIBLE` reaparece como "faltante" en la
-      // siguiente confirmación de bodega y bloquea el pedido para siempre
-      // (mismo tratamiento que la rama `no-disponible` de más abajo).
+      // F20 (oct 2026): se CONSERVA su estado físico. Antes se limpiaba
+      // (`NO_DISPONIBLE` + `cantidadSurtida: 0`) para que un item cancelado no
+      // reapareciera como "faltante" en la siguiente confirmación de bodega —
+      // pero eso ya no puede pasar: los guards de `confirmarSurtido` filtran
+      // `cancelada` primero (ver `cancelacion-linea.util.ts`). Limpiarlo
+      // borraba el hecho de que el producto SÍ estaba en la bolsa, y la
+      // pantalla lo mostraba como "No disponible" cuando la verdad era "se
+      // cambió por otro".
       if (it.tipo === 'cambio' && idsActuales.has(it.itemId)) {
         // El original pudo estar ya apartado en la bolsa: hay que retirarlo.
         const original = await tx.itemPedido.findUnique({
           where: { id: it.itemId },
-          select: { cantidadSurtida: true },
+          select: { cantidadSurtida: true, piezasRetiradas: true, estadoSurtido: true },
         });
-        if ((original?.cantidadSurtida ?? 0) > 0) huboRetiro = true;
+        registrarRetiro(original ? piezasEnLaBolsa(original) : 0);
         await tx.itemPedido.update({
           where: { id: it.itemId },
-          data: {
-            cancelada: true,
-            estadoSurtido: 'NO_DISPONIBLE',
-            cantidadSurtida: 0,
-          },
+          data: datosDeRetiroPorDecision({
+            estadoSurtido: original?.estadoSurtido ?? 'NO_DISPONIBLE',
+            cantidadSurtida: original?.cantidadSurtida ?? 0,
+          }),
         });
       }
 
@@ -191,14 +215,22 @@ export async function aplicarPropuestaDeVentas(
     if (it.tipo === 'no-disponible') {
       // El asesor quitó un item que bodega pudo haber surtido completo: si hay
       // piezas apartadas, hay que sacarlas de la bolsa.
+      //
+      // F20 (oct 2026): el nombre del tipo (`no-disponible`) es herencia del
+      // modelo viejo y hoy MIENTE — significa "esta línea ya no va", no "no hay
+      // mercancía". Por eso se conserva el estado físico: si bodega había
+      // apartado 10, la bolsa tiene 10 y el sistema tiene que poder decirlo.
       const previo = await tx.itemPedido.findUnique({
         where: { id: it.itemId },
-        select: { cantidadSurtida: true },
+        select: { cantidadSurtida: true, piezasRetiradas: true, estadoSurtido: true },
       });
-      if ((previo?.cantidadSurtida ?? 0) > 0) huboRetiro = true;
+      registrarRetiro(previo ? piezasEnLaBolsa(previo) : 0);
       await tx.itemPedido.update({
         where: { id: it.itemId },
-        data: { cancelada: true, estadoSurtido: 'NO_DISPONIBLE', cantidadSurtida: 0 },
+        data: datosDeRetiroPorDecision({
+          estadoSurtido: previo?.estadoSurtido ?? 'NO_DISPONIBLE',
+          cantidadSurtida: previo?.cantidadSurtida ?? 0,
+        }),
       });
       cambios.push(`Item #${it.itemId} quitado del pedido`);
       continue;
@@ -211,14 +243,26 @@ export async function aplicarPropuestaDeVentas(
       // transacción el valor es el fresco.
       const actual = await tx.itemPedido.findUnique({
         where: { id: it.itemId },
-        select: { precioUnitario: true, cantidadSurtida: true },
+        select: {
+          precioUnitario: true,
+          cantidad: true,
+          cantidadSurtida: true,
+          piezasRetiradas: true,
+          estadoSurtido: true,
+        },
       });
       if (!actual) continue;
       if (nuevaCantidad === 0) {
-        if (actual.cantidadSurtida > 0) huboRetiro = true;
+        // F20: reducir a 0 es una DECISIÓN (el cliente ya no lo quiere), no un
+        // faltante. Se conserva el estado físico para poder decir "había 5 y se
+        // quitó" en vez de "no había".
+        registrarRetiro(piezasEnLaBolsa(actual));
         await tx.itemPedido.update({
           where: { id: it.itemId },
-          data: { cancelada: true, estadoSurtido: 'NO_DISPONIBLE', cantidadSurtida: 0 },
+          data: datosDeRetiroPorDecision({
+            estadoSurtido: actual.estadoSurtido,
+            cantidadSurtida: actual.cantidadSurtida,
+          }),
         });
         cambios.push(`Item #${it.itemId} quitado del pedido`);
         continue;
@@ -229,33 +273,32 @@ export async function aplicarPropuestaDeVentas(
       // el item vuelve a bodega en PENDIENTE. Si BAJA, lo apartado se ajusta
       // y el sobrante regresa al anaquel.
       //
+      // F21 (oct 2026): el helper conserva `cantidadSurtida` — el hallazgo
+      // físico — y reporta el sobrante. Antes esta rama escribía
+      // `cantidadSurtida: nuevaCantidad` al bajar, así que un pedido de 5 del
+      // que había 3 y el asesor dejó en 1 quedaba con `cantidadSurtida: 1`: la
+      // pantalla decía "Disponibles 1" cuando la verdad era "había 3".
+      //
       // Espejo de `MostradorService.aplicarAjuste` y del guard de
       // incoherencia de `confirmarSurtido` ("lo que se cobra es lo que se
-      // surtió").
-      const subeLaCantidad = nuevaCantidad > actual.cantidadSurtida;
-      // Si baja por debajo de lo apartado, el sobrante vuelve al anaquel.
-      if (!subeLaCantidad && actual.cantidadSurtida > nuevaCantidad) huboRetiro = true;
+      // surtió"). Ver `core/ajuste-cantidad.util.ts`.
+      //
+      // `actual.piezasRetiradas` entra a propósito: si un ajuste anterior ya
+      // sacó piezas de la bolsa, subir ahora hasta lo que antes se encontró
+      // tampoco está cubierto — esas piezas ya están en el anaquel.
+      const ajuste = calcularAjusteDeCantidad(actual, nuevaCantidad);
+      // Si baja por debajo de lo que hay en la bolsa, el sobrante lo saca bodega.
+      registrarRetiro(ajuste.piezasSobrantes);
       await tx.itemPedido.update({
         where: { id: it.itemId },
         data: {
-          cantidad: nuevaCantidad,
+          ...ajuste.data,
           subtotal: new Prisma.Decimal(actual.precioUnitario).mul(nuevaCantidad),
-          ...(subeLaCantidad
-            ? {
-                // Hay piezas nuevas que nadie verificó: bodega re-surte.
-                estadoSurtido: 'PENDIENTE',
-                cantidadSurtida: 0,
-              }
-            : {
-                // Todo lo pedido ya estaba apartado; el sobrante vuelve.
-                estadoSurtido: 'COMPLETO',
-                cantidadSurtida: nuevaCantidad,
-              }),
         },
       });
       cambios.push(
         `Item #${it.itemId} ajustado a ${nuevaCantidad} piezas` +
-          (subeLaCantidad ? ' (vuelve a bodega a surtir)' : ''),
+          (ajuste.subeLaCantidad ? ' (vuelve a bodega a surtir)' : ''),
       );
     }
   }
@@ -289,5 +332,9 @@ export async function aplicarPropuestaDeVentas(
     },
   });
 
-  return { cambios, quedanPendientes: pendientesRestantes > 0, huboRetiro };
+  return {
+    cambios,
+    quedanPendientes: pendientesRestantes > 0,
+    huboRetiro,
+  };
 }

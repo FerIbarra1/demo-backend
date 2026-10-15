@@ -3,16 +3,18 @@ import { ClienteService } from './cliente.service';
 import { EstadoPedido, ModoEntrega } from '@prisma/client';
 
 /**
- * F16 (sep 2026): el aviso de llegada solo se acepta cuando el pedido YA ESTÁ
- * LISTO para revisarse en tienda (`REVISADO`).
+ * F22 (oct 2026): el cliente puede avisar su llegada en CUALQUIER estado no
+ * terminal de un pedido que se recoge en tienda.
  *
- * Ese estado es exactamente el punto en que bodega terminó de verificar (aprobó
- * el pedido tal cual), o el cliente aprobó las modificaciones que bodega o
- * ventas propusieron.
+ * F16 lo limitaba a `REVISADO`, con el argumento de que "no hay nada que
+ * mostrarle". Pero el cliente que llega temprano no tenía cómo decirlo (la app le
+ * ocultaba el botón y el kiosko respondía 409), y el sistema YA dependía de ese
+ * dato: bodega prioriza a los clientes presentes, y el destino de un surtido
+ * incompleto (`destinoTrasSurtidoIncompleto`) decide si lo resuelve el mostrador o
+ * el cliente en su app según haya o no aviso. Sin aviso anticipado esas dos
+ * decisiones se tomaban a ciegas.
  *
- * Antes solo se rechazaban COMPLETED y CANCELLED, así que el cliente podía
- * avisar desde SOLICITADO: el pedido quedaba marcado "EN TIENDA" antes de
- * que nadie lo hubiera surtido, y el mostrador no tenía nada que mostrarle.
+ * Qué NO cambió: terminales y pedidos a domicilio siguen rechazándose.
  */
 
 function crearServicio(pedido: Record<string, unknown> | null) {
@@ -31,6 +33,9 @@ function crearServicio(pedido: Record<string, unknown> | null) {
     {} as never, // kioskoService
     { confirmarDesdeCliente } as never, // kioskoLlegada
     {} as never, // precios
+    {} as never, // reposicion (F20),
+    {} as never, // presencia (F22)
+    {} as never, // sinRecoger (F22)
   );
 
   return { svc, confirmarDesdeCliente };
@@ -44,8 +49,8 @@ const pedidoBase = {
   tiendaId: 5,
 };
 
-describe('anunciarLlegada — solo cuando el pedido está listo (F16)', () => {
-  it('acepta el aviso en REVISADO (bodega aprobó, o el cliente aprobó cambios)', async () => {
+describe('anunciarLlegada — aviso anticipado (F22)', () => {
+  it('acepta el aviso en REVISADO', async () => {
     const { svc, confirmarDesdeCliente } = crearServicio({ ...pedidoBase });
     await svc.anunciarLlegada(1, 7);
     expect(confirmarDesdeCliente).toHaveBeenCalledWith(1);
@@ -59,9 +64,19 @@ describe('anunciarLlegada — solo cuando el pedido está listo (F16)', () => {
     ['PENDIENTE_PAGO', EstadoPedido.PENDIENTE_PAGO],
     ['PAGADO', EstadoPedido.PAGADO],
     ['ENVIADO', EstadoPedido.ENVIADO],
+  ])('acepta el aviso ANTICIPADO en %s', async (_nombre, estado) => {
+    const { svc, confirmarDesdeCliente } = crearServicio({
+      ...pedidoBase,
+      estado,
+    });
+    await svc.anunciarLlegada(1, 7);
+    expect(confirmarDesdeCliente).toHaveBeenCalledWith(1);
+  });
+
+  it.each([
     ['ENTREGADO', EstadoPedido.ENTREGADO],
     ['CANCELADO', EstadoPedido.CANCELADO],
-  ])('rechaza el aviso en %s', async (_nombre, estado) => {
+  ])('rechaza el aviso en %s (terminal)', async (_nombre, estado) => {
     const { svc, confirmarDesdeCliente } = crearServicio({
       ...pedidoBase,
       estado,
@@ -69,14 +84,6 @@ describe('anunciarLlegada — solo cuando el pedido está listo (F16)', () => {
     await expect(svc.anunciarLlegada(1, 7)).rejects.toThrow(BadRequestException);
     // Lo importante: NO se llegó a escribir el aviso.
     expect(confirmarDesdeCliente).not.toHaveBeenCalled();
-  });
-
-  it('el mensaje explica por qué no se puede todavía', async () => {
-    const { svc } = crearServicio({
-      ...pedidoBase,
-      estado: EstadoPedido.EN_REVISION,
-    });
-    await expect(svc.anunciarLlegada(1, 7)).rejects.toThrow(/preparando tu pedido/i);
   });
 
   it('sigue rechazando un pedido que no es del usuario', async () => {

@@ -81,6 +81,28 @@ export class ClienteController {
     return this.clienteService.anunciarLlegada(pedidoId, userId);
   }
 
+  // F22: el cliente se equivocó de botón o ya se fue.
+  @Post(':id/retirar-llegada')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Cliente retira su aviso de llegada (ya no está en la tienda)' })
+  async retirarLlegada(
+    @Param('id', ParseIntPipe) pedidoId: number,
+    @CurrentUser('userId') userId: number,
+  ) {
+    return this.clienteService.retirarLlegada(pedidoId, userId);
+  }
+
+  // F22: respuesta al correo "¿aún quieres tu pedido?".
+  @Post(':id/confirmar-interes')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Cliente confirma que sigue interesado en su pedido apartado' })
+  async confirmarInteres(
+    @Param('id', ParseIntPipe) pedidoId: number,
+    @CurrentUser('userId') userId: number,
+  ) {
+    return this.clienteService.confirmarInteres(pedidoId, userId);
+  }
+
   @Get('mis-pedidos')
   @ApiOperation({ summary: 'Obtener mis pedidos' })
   @ApiQuery({ name: 'pagina', required: false, type: Number })

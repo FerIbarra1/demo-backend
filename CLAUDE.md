@@ -11,7 +11,7 @@ El frontend vive en `../demo-frontend` y tiene su propio `CLAUDE.md`.
 ```bash
 npm run start:dev        # Desarrollo con watch
 npm run build            # prisma generate + nest build
-npm run test             # Jest (39 suites, 411 tests)
+npm run test             # Jest (57 suites, 656 tests)
 npm run lint             # ESLint con --fix
 
 npm run prisma:migrate   # Migraciones
@@ -259,18 +259,58 @@ bodeguero lo toma     → ve el CHECKLIST DE RETIRO en el sheet
 bodeguero cierra      → REVISADO otra vez
 ```
 
-Tres piezas que hacen esto posible:
+Dos piezas que hacen esto posible:
 
 - **`GET /bodega/pedidos/ajustes-plancha`** — los pedidos que volvieron con
-  cambios, con `porQuitar[]` (prendas a sacar de la bolsa) y `porAgregar[]`
-  (prendas a traer del anaquel). Alimenta la tarjeta de aviso de `/bodega`.
-  Solo lista los que **necesitan** ajuste: un pedido liberado no aparece.
+  cambios. Alimenta la tarjeta de aviso de `/bodega`. Solo lista los que
+  **necesitan** ajuste: un pedido liberado no aparece.
 - **El checklist de retiro** (`BodegaSurtidoSheet`) — obligatorio. Hasta que el
-  bodeguero marca cada prenda que sacó, "Terminar surtido" queda bloqueado.
-- **`ReposicionService.crearDesdeAjuste`** — las prendas retiradas entran a la
-  lista de reposición (a diferencia de `crearDesdePedido`, que corre al
-  CANCELAR y snapshotea todos los items activos). La UI vive en
-  `/bodega/reposicion`.
+  bodeguero marca cada prenda que sacó, "Terminar surtido" queda bloqueado. Al
+  confirmar se suma a `ItemPedido.piezasRetiradas` lo que sacó.
+
+**Un ajuste NO genera reposición (oct 2026).** Las prendas que el ajuste quita
+las saca el bodeguero de la bolsa y las regresa al anaquel **él mismo, durante el
+ajuste** (el checklist). No queda trabajo posterior. La lista de reposición
+(`/bodega/reposicion`) es **solo de pedidos cancelados o rechazados**.
+
+F17 hacía lo contrario (`ReposicionService.crearDesdeAjuste`): además de sacarlas,
+las listaba en reposición, así que el bodeguero acomodaba una prenda y la lista se
+la pedía acomodar otra vez. El método se eliminó; un spec
+(`cancelacion-reposicion.spec.ts`) falla si alguien lo recrea.
+
+**Tampoco hay reposición si cancelan el pedido mientras bodega lo tiene (oct 2026).**
+Sin surtir o a medias, el bodeguero lo trae en las manos y lo regresa al anaquel él
+mismo. La reposición es solo de lo que **ya salió de sus manos** (la bolsa quedó en
+el área de entrega). Quien cancela lo decide ANTES de cancelar con
+`bolsaEnManosDeBodega` (`core/bolsa-en-bodega.util.ts`) y se lo pasa a
+`crearDesdePedido(..., { bolsaEnManosDeBodega })`: la máquina de estados corre los
+`efectos` *después* de escribir el estado y limpiar la asignación, así que desde
+adentro ya no se puede saber. Hoy solo `ClienteService.cancelarPedido` puede
+cancelar en SOLICITADO/EN_REVISION; mostrador y las propuestas cancelan siempre
+desde un estado posterior al surtido.
+
+En su lugar el bodeguero **recibe un aviso**: `PedidoStateService` emite
+`pedido.cancelado-en-bodega` a `user-{id}` del bodeguero asignado en
+`EN_REVISION → CANCELADO` (el frontend lo muestra como toast que se quita solo y
+cierra el sheet). Se captura la asignación de la lectura *previa* al update, porque
+`'limpiar'` ya la puso en null.
+
+Lo que sí hay que cuidar para que la regla se sostenga:
+
+- **`crearDesdePedido` descuenta `piezasRetiradas`.** Si un pedido ajustado se
+  cancela después, solo lista lo que sigue en la bolsa
+  (`piezasEnLaBolsa = cantidadSurtida − piezasRetiradas`). Una línea que un
+  ajuste quitó y cuyas piezas ya salieron no entra a la lista.
+- **`PedidoReposicion.motivo` también es el motivo del correo de cancelación**
+  (`NotificationsService` lo lee como `motivoCancelacion`). Por eso la fila se
+  crea siempre al cancelar; cuando no hay nada que devolver nace `REPUESTO` con
+  `items: []` (no aparece en la lista pendiente ni en el contador).
+- **`crearDesdePedido` ya no cae a la cantidad PEDIDA** cuando `cantidadSurtida`
+  es 0: un item que nadie surtió no tiene nada que volver al anaquel.
+- **Subir la cantidad cuenta contra lo que HAY en la bolsa**, no contra lo que se
+  encontró (`calcularAjusteDeCantidad`). Con 5 encontradas y 2 ya sacadas, subir a
+  4 manda el item a `PENDIENTE` (bodega re-verifica) y reinicia `piezasRetiradas`
+  junto con `cantidadSurtida`: el conteo pertenece al hallazgo al que se refiere.
 
 **Los pedidos ajustados se EXCLUYEN del surtido por lote** (`obtenerLoteSurtirJuntos`):
 el lote es picking por zona y no tiene checklist de retiro; meterlos ahí dejaría
@@ -342,7 +382,7 @@ la regla: el gateway de realtime ya lo hizo una vez y le quedó más permisiva.
 
 ## Tests
 
-39 suites, 411 tests, todos verdes. Cubren las invariantes del flujo completo
+57 suites, 656 tests, todos verdes. Cubren las invariantes del flujo completo
 (`flujo-completo.spec.ts`), la máquina de estados
 (`pedido-state.service.spec.ts`), el dinero (`invariantes-dinero.spec.ts`) y la
 idempotencia de llegada.

@@ -42,7 +42,7 @@ describe('derivarMotivoReingreso', () => {
     ).toBe('LIBERADO');
   });
 
-  it('AJUSTE_MOSTRADOR cuando hay items nuevos y viene de la plancha', () => {
+  it('AJUSTE_MOSTRADOR cuando hay items nuevos y viene del área de entrega', () => {
     expect(
       derivarMotivoReingreso(
         pedido({

@@ -36,7 +36,7 @@ describe('MostradorMonitorService — gate de llegada (D5)', () => {
     expect(where.tiendaId).toBe(5);
   });
 
-  it('el OR incluye kiosko sin condición de llegada', async () => {
+  it('el OR incluye kiosko sin condición de aviso', async () => {
     const { svc, findMany } = crearServicio();
     await svc.obtenerMonitor(5);
     const or = findMany.mock.calls[0][0].where.OR;
@@ -47,21 +47,31 @@ describe('MostradorMonitorService — gate de llegada (D5)', () => {
     expect(kiosko.llegadaAnunciadaAt).toBeUndefined();
   });
 
-  it('el OR exige llegada activa para los pedidos web', async () => {
+  it('el OR exige aviso para los pedidos web', async () => {
     const { svc, findMany } = crearServicio();
     await svc.obtenerMonitor(5);
     const or = findMany.mock.calls[0][0].where.OR;
     const web = or.find((c: any) => c.canalOrigen === CanalOrigen.WEB);
     expect(web.llegadaAnunciadaAt).toEqual({ not: null });
-    // Un aviso DESCARTADO (cliente se fue) no debe reabrir el pedido.
-    expect(web.llegadaDescartadaAt).toBeNull();
   });
 
-  it('ordena avisados primero, luego por antigüedad', async () => {
+  it('un aviso DESCARTADO saca al pedido de la cola, sea web O kiosko', async () => {
+    // F22: antes `llegadaDescartadaAt: null` solo estaba en la rama web, así que
+    // un pedido de kiosko cuyo cliente se fue no tenía forma de salir de la TV.
+    const { svc, findMany } = crearServicio();
+    await svc.obtenerMonitor(5);
+    const where = findMany.mock.calls[0][0].where;
+    expect(where.llegadaDescartadaAt).toBeNull();
+  });
+
+  it('ordena "primero llegado, primero atendido": presenteDesdeAt, no el aviso', async () => {
+    // F22: se ordenaba por `llegadaAnunciadaAt nulls last`, y un pedido de kiosko
+    // no tiene aviso — TODO web con aviso pasaba delante de cualquier kiosko aunque
+    // el kiosko llevara media hora esperando.
     const { svc, findMany } = crearServicio();
     await svc.obtenerMonitor(5);
     const orderBy = findMany.mock.calls[0][0].orderBy;
-    expect(orderBy[0]).toEqual({ llegadaAnunciadaAt: { sort: 'asc', nulls: 'last' } });
+    expect(orderBy[0]).toEqual({ presenteDesdeAt: { sort: 'asc', nulls: 'last' } });
     expect(orderBy[1]).toEqual({ fechaPedido: 'asc' });
   });
 
@@ -109,8 +119,9 @@ describe('MostradorMonitorService — panel Atendiendo', () => {
     const whereAtendiendo = findMany.mock.calls[1][0].where;
     expect(whereAtendiendo.estado).toBe(EstadoPedido.EN_ATENCION);
     expect(whereAtendiendo.llamadoAt).toBeUndefined();
-    // Conserva el gate de llegada: no se cuela un web que nunca avisó.
+    // Conserva el gate de presencia: no se cuela un web que nunca avisó.
     expect(whereAtendiendo.OR).toBeDefined();
+    expect(whereAtendiendo.llegadaDescartadaAt).toBeNull();
   });
 
   it('ordena el panel por llamado más reciente primero', async () => {
@@ -125,5 +136,102 @@ describe('MostradorMonitorService — panel Atendiendo', () => {
     const res = await svc.obtenerMonitor(5);
     expect(res.atendiendo).toEqual([]);
     expect(res.contadores.atendiendo).toBe(0);
+  });
+});
+
+/**
+ * F22: la TV dice A QUÉ MOSTRADOR pasar. Con varios operadores, un "pasa a
+ * mostrador" a secas deja al cliente sin saber a quién acercarse.
+ */
+describe('MostradorMonitorService — mostrador que llama (F22)', () => {
+  const fila = (extra: Record<string, unknown> = {}) => ({
+    id: 1,
+    numeroPedido: 'PD-2026-000001',
+    clienteNombre: 'Juan',
+    canalOrigen: CanalOrigen.WEB,
+    total: 100,
+    fechaPedido: new Date(Date.now() - 3_600_000),
+    llegadaAnunciadaAt: new Date(Date.now() - 600_000),
+    llegadaDescartadaAt: null,
+    presenteDesdeAt: new Date(Date.now() - 600_000),
+    llamadoAt: new Date(),
+    llamadoMostrador: { numero: 2 },
+    llamadoPor: { nombre: 'Ana', apellido: 'Ruiz' },
+    _count: { items: 3 },
+    ...extra,
+  });
+
+  it('el panel Atendiendo lleva el número de mostrador y el operador', async () => {
+    const { svc, findMany } = crearServicio();
+    findMany.mockImplementation(async (args: any) =>
+      args.where.estado === EstadoPedido.EN_ATENCION ? [fila()] : [],
+    );
+
+    const res = await svc.obtenerMonitor(5);
+
+    expect(res.atendiendo[0].mostradorNumero).toBe(2);
+    expect(res.atendiendo[0].operadorNombre).toBe('Ana Ruiz');
+  });
+
+  it('sin mostradores configurados el número es null (la TV dice solo "Pasa a mostrador")', async () => {
+    const { svc, findMany } = crearServicio();
+    findMany.mockImplementation(async (args: any) =>
+      args.where.estado === EstadoPedido.EN_ATENCION
+        ? [fila({ llamadoMostrador: null, llamadoPor: null })]
+        : [],
+    );
+
+    const res = await svc.obtenerMonitor(5);
+
+    expect(res.atendiendo[0].mostradorNumero).toBeNull();
+    expect(res.atendiendo[0].operadorNombre).toBeNull();
+  });
+
+  it('un pedido de KIOSKO en la cola cuenta como cliente en tienda, con su espera real', async () => {
+    // Antes `clienteEnTienda` miraba solo el aviso, y un kiosko (que nunca lo
+    // tiene) aparecía como "sin cliente" en los contadores.
+    const { svc, findMany } = crearServicio();
+    const hace30 = new Date(Date.now() - 30 * 60_000);
+    findMany.mockImplementation(async (args: any) =>
+      args.where.estado === EstadoPedido.REVISADO && args.where.llegadaDescartadaAt === null
+        ? [
+            fila({
+              canalOrigen: CanalOrigen.KIOSKO,
+              llegadaAnunciadaAt: null,
+              presenteDesdeAt: hace30,
+              llamadoMostrador: undefined,
+              llamadoPor: undefined,
+            }),
+          ]
+        : [],
+    );
+
+    const res = await svc.obtenerMonitor(5);
+
+    expect(res.cola[0].clienteEnTienda).toBe(true);
+    expect(res.cola[0].esperandoDesdeMin).toBe(30);
+    expect(res.contadores.enTienda).toBe(1);
+  });
+});
+
+/**
+ * F22: el contador `sinCliente` ahora es el mismo predicado que la lista "Sin
+ * aviso" de la consola. Antes solo contaba web en REVISADO.
+ */
+describe('MostradorMonitorService — sinCliente (F22)', () => {
+  it('cuenta también los que esperan aprobación y los de kiosko descartados', async () => {
+    const { svc, findMany } = crearServicio();
+    await svc.obtenerMonitor(5);
+    // La 4ª consulta de `findMany` es la de sinCliente.
+    const where = findMany.mock.calls[2][0].where;
+    expect(where.estado).toEqual({
+      in: [EstadoPedido.REVISADO, EstadoPedido.ESPERANDO_APROBACION],
+    });
+    expect(where.OR).toEqual(
+      expect.arrayContaining([
+        { llegadaDescartadaAt: { not: null } },
+        { canalOrigen: CanalOrigen.WEB, llegadaAnunciadaAt: null },
+      ]),
+    );
   });
 });

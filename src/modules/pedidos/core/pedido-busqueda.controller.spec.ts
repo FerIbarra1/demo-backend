@@ -82,7 +82,7 @@ describe('PedidoBusquedaController.resolverEscaneo', () => {
   });
 
   it('a un rol ajeno le dice quién lo tiene, sin 403 seco', async () => {
-    // Un pedido en la plancha visto por bodega: no le toca, y el panel tiene
+    // Un pedido en el área de entrega visto por bodega: no le toca, y el panel tiene
     // que poder decirle a quién mandar al cliente.
     const { svc } = crearController(pedido({ estado: 'REVISADO' }));
     const r = (await svc.resolverEscaneo('PD-2026-000042', usuario)) as any;

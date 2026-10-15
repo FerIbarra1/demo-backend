@@ -3,7 +3,12 @@ import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger'
 import { MostradorService } from './mostrador.service';
 import { MostradorQueryService } from './mostrador-query.service';
 import { BuscarPedidoDto } from './dto/buscar-pedido.dto';
-import { AjustarPedidoDto, CancelarPedidoDto, EnviarAPagarDto } from './dto/accion-mostrador.dto';
+import {
+  AjustarPedidoDto,
+  CancelarPedidoDto,
+  CancelarVencidosDto,
+  EnviarAPagarDto,
+} from './dto/accion-mostrador.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -111,17 +116,25 @@ export class MostradorController {
   @Get('sin-aviso')
   @ApiOperation({
     summary:
-      'Oct 2026: pedidos web listos que nadie ha avisado que llegaron. ' +
-      'El operador los identifica y marca la llegada con POST :id/marcar-llegada.',
+      'Pedidos apartados cuyo cliente NO está en la tienda (web que nadie ha avisado, o ' +
+      'aviso descartado). Con antigüedad y marca de vencido. El operador los identifica ' +
+      'y marca la llegada con POST :id/marcar-llegada, o cancela los vencidos.',
   })
   @ApiQuery({ name: 'tiendaId', required: false, type: Number })
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
+  @ApiQuery({
+    name: 'filtro',
+    required: false,
+    enum: ['todos', 'vencidos'],
+    description: 'vencidos: solo los que ya pasaron el plazo de espera.',
+  })
   async listarSinAviso(
     @CurrentUser() user: any,
     @Query('tiendaId') tiendaId?: string,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
+    @Query('filtro') filtro?: string,
   ) {
     const tienda =
       user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
@@ -129,7 +142,22 @@ export class MostradorController {
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
+      filtro === 'vencidos' ? 'vencidos' : 'todos',
     );
+  }
+
+  /**
+   * F22 (oct 2026): cancela en lote los pedidos vencidos. Ruta fija de DOS
+   * segmentos distintos a `:id/...`, así que no choca con las rutas de pedido.
+   */
+  @Post('cancelar-vencidos')
+  @ApiOperation({
+    summary:
+      'F22: cancela pedidos vencidos (días sin recoger y sin respuesta). Revalida cada ' +
+      'uno; el cliente recibe el correo de cancelación con el motivo.',
+  })
+  async cancelarVencidos(@Body() dto: CancelarVencidosDto, @CurrentUser() user: any) {
+    return this.mostradorService.cancelarVencidos(user, dto.ids, dto.motivo);
   }
 
   /**
@@ -214,11 +242,22 @@ export class MostradorController {
     return this.mostradorService.llamarSiguiente(user);
   }
 
+  @Post(':id/no-se-presento')
+  @ApiOperation({
+    summary:
+      'F22: el cliente llamado no se presentó. Pasa al FINAL de la cola (a la 2ª vez se ' +
+      'descarta su aviso). Para un error del operador usa devolver-a-cola, que conserva el lugar.',
+  })
+  async noSePresento(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
+    return this.mostradorService.noSePresento(id, user);
+  }
+
   @Post(':id/descartar-llegada')
   @ApiOperation({
     summary:
-      'F16: descarta un aviso de llegada falso (el cliente no estaba). ' +
-      'No cambia el estado — solo quita el badge "EN TIENDA".',
+      'F16: descarta un aviso de llegada falso (el cliente no estaba). Funciona con ' +
+      'kiosko y web. Si el pedido ya estaba llamado, regresa a REVISADO. El cliente ' +
+      'recibe `pedido.llegada-descartada`.',
   })
   async descartarLlegada(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.mostradorService.descartarLlegada(id, user);

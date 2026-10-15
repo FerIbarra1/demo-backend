@@ -15,6 +15,8 @@ import { destinoTrasSurtido } from '../core/destino-post-surtido.util';
 import { recalcularTotalesPedido } from '../core/totales.util';
 import { aplicarPropuestaDeVentas } from '../core/aplicar-propuesta-ventas.util';
 import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
+import { datosDeFaltaDeBodega } from '../core/cancelacion-linea.util';
+import { totalDePropuesta, lineaSobrevive } from '../core/total-propuesta.util';
 import { PreciosService } from '../../precios/precios.service';
 import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../../precios/precio-lista.util';
 import { UserContext } from '../../../types/pedido.types';
@@ -159,6 +161,13 @@ export class PropuestaService {
   ): Promise<{
     propuesta: PedidoPropuesta;
     efectos: Parameters<PedidoStateService['dispararEfectosDeTransicion']>[1];
+    /**
+     * F21: el aviso `propuesta.enviada` que el caller debe emitir DESPUÉS de su
+     * commit. Con transacción externa el service no puede emitirlo: la
+     * transacción todavía no confirmó y un rollback dejaría al cliente con un
+     * aviso de una propuesta que nunca existió.
+     */
+    propuestaEnviada: { pedidoId: number; propuestaId: number; origen: RolUsuario };
   }>;
   async enviarPropuesta(
     pedidoId: number,
@@ -179,7 +188,14 @@ export class PropuestaService {
      * del segundo dejaba al cliente con una propuesta viva que no podía ver.
      */
     txExterna?: Prisma.TransactionClient,
-  ): Promise<PedidoPropuesta | { propuesta: PedidoPropuesta; efectos: unknown }> {
+  ): Promise<
+    | PedidoPropuesta
+    | {
+        propuesta: PedidoPropuesta;
+        efectos: unknown;
+        propuestaEnviada: { pedidoId: number; propuestaId: number; origen: RolUsuario };
+      }
+  > {
     const esVentas = usuario.rol === RolUsuario.VENTAS;
     const esBodega = usuario.rol === RolUsuario.BODEGA;
 
@@ -227,9 +243,58 @@ export class PropuestaService {
     // propone productos con precios, un vendedor podría mandar `total: 0` y el
     // cliente aprobaría un número distinto al que se le cobra. Se recalcula
     // desde los items.
-    const totalCalculado = dto.items.reduce(
-      (acc, it) => acc + (it.subtotalNuevo ?? it.subtotal),
-      0,
+    //
+    // F20 (oct 2026): el recálculo pasa por `totalDePropuesta`, que es la misma
+    // regla que el cobro. Antes era un `reduce` crudo sobre
+    // `subtotalNuevo ?? subtotal`, y tenía dos bugs de dinero:
+    //
+    //   1. Sumaba los `no-disponible`, que se cancelan y no se cobran. Un item
+    //      agotado trae el subtotal de la cantidad PEDIDA, así que inflaba el
+    //      total: en un pedido de $1000 con un producto agotado de $300, la
+    //      propuesta decía $1300 y se cobraban $1000.
+    //
+    //   2. Usaba el precio CONGELADO en el item, pero el cobro lo re-evalúa
+    //      (`aplicarPromoVolumen`). Un pedido de 12 piezas que la propuesta deja
+    //      en 10 mostraba $800 y se cobraban $1000: la promo se revoca al bajar
+    //      del umbral.
+    //
+    // Las líneas se arman con el par de precios CONGELADO del item, que es lo
+    // que permite re-evaluar la promo sin releer `PrecioCO`.
+    const itemsActualesParaTotal = await this.prisma.itemPedido.findMany({
+      where: { pedidoId, cancelada: false },
+      select: {
+        id: true,
+        precioUnitario: true,
+        precioUnitarioBase: true,
+        precioUnitarioMayoreo: true,
+      },
+    });
+    const porItemId = new Map(itemsActualesParaTotal.map((i) => [i.id, i]));
+
+    const totalCalculado = totalDePropuesta(
+      dto.items.map((it) => {
+        const actual = porItemId.get(it.itemId);
+        // Una línea que sale del pedido no se cobra. `no-disponible` es el
+        // único tipo que la saca sin reemplazo (`cambio` crea su propia línea).
+        if (!lineaSobrevive(it.tipo)) {
+          return {
+            cantidad: 0,
+            base: actual?.precioUnitarioBase ?? null,
+            mayoreo: actual?.precioUnitarioMayoreo ?? null,
+            precioUnitario: actual?.precioUnitario ?? it.precioUnitario,
+          };
+        }
+        return {
+          cantidad: Math.max(0, it.cantidadNueva ?? it.cantidad),
+          // Un item AGREGADO no existe en el pedido: no tiene par congelado, y
+          // su precio ya viene resuelto por el frontend desde la lista del
+          // cliente. Se usa tal cual (sin promo) — mismo criterio que
+          // `construirItemPedido` cuando no conoce el total final.
+          base: actual?.precioUnitarioBase ?? null,
+          mayoreo: actual?.precioUnitarioMayoreo ?? null,
+          precioUnitario: actual?.precioUnitario ?? it.precioUnitarioNuevo ?? it.precioUnitario,
+        };
+      }),
     );
 
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
@@ -323,22 +388,49 @@ export class PropuestaService {
       this.state.dispararEfectosDeTransicion(pedidoId, efectosTransicion);
     }
 
-    // Aviso al cliente por realtime (el email lo manda la máquina de estados
-    // al entrar a ESPERANDO_APROBACION).
-    this.realtime.emitToUser(pedido.usuarioId, 'propuesta.enviada', {
-      pedidoId,
-      propuestaId: propuesta.id,
-      origen: usuario.rol,
-    });
+    /**
+     * F21 (oct 2026): el aviso al cliente SOLO se emite cuando la propuesta ya
+     * está confirmada.
+     *
+     * Con `txExterna`, este `emit` corría DENTRO de la transacción del caller
+     * (`MessagesService.crearConAdjunto`) — antes de que su `$transaction`
+     * confirmara. Si el `pedidoMensaje.create` posterior fallaba, la transacción
+     * hacía rollback y la propuesta nunca existía, pero el cliente ya había
+     * recibido `propuesta.enviada` con un `propuestaId` inexistente: su pantalla
+     * mostraba una propuesta fantasma hasta el siguiente refetch.
+     *
+     * Es el mismo principio que ya documenta `cambiarEstado` para los efectos
+     * externos: emitir dentro del callback anuncia algo que un rollback puede
+     * deshacer. Con tx externa el caller es quien sabe cuándo confirmó, así que
+     * el aviso viaja en el objeto de retorno y lo emite él.
+     */
+    if (!txExterna) {
+      this.realtime.emitToUser(pedido.usuarioId, 'propuesta.enviada', {
+        pedidoId,
+        propuestaId: propuesta.id,
+        origen: usuario.rol,
+      });
+    }
 
     this.logger.log(
       `Pedido ${pedidoId}: propuesta #${propuesta.id} de ${usuario.rol} enviada → ESPERANDO_APROBACION`,
     );
 
-    // Con tx externa se devuelven los efectos para que el caller los dispare
-    // tras su commit (ver `MessagesService.crearConAdjunto`). Sin tx ya se
-    // dispararon arriba.
-    return txExterna ? { propuesta, efectos: efectosTransicion } : propuesta;
+    // Con tx externa se devuelven la propuesta y los efectos para que el caller
+    // los dispare tras su commit (ver `MessagesService.crearConAdjunto`). Sin tx
+    // ya se dispararon arriba.
+    return txExterna
+      ? {
+          propuesta,
+          efectos: efectosTransicion,
+          // El aviso de realtime, diferido al caller por la razón de arriba.
+          propuestaEnviada: {
+            pedidoId,
+            propuestaId: propuesta.id,
+            origen: usuario.rol,
+          },
+        }
+      : propuesta;
   }
 
   /**
@@ -590,16 +682,14 @@ export class PropuestaService {
     if (itemsPendientesResidual.length > 0) {
       // Cancelar los items PENDIENTE para que no queden como "fantasma" en
       // el ERP. Es el mismo tratamiento que `aplicarCambiosFisicos` da a
-      // NO_DISPONIBLE.
+      // NO_DISPONIBLE — y es correcto que limpie el estado físico: un item
+      // PENDIENTE es uno que bodega NUNCA marcó, así que no hay hallazgo que
+      // conservar (no hay piezas apartadas que declarar).
       await this.prisma.$transaction(async (tx) => {
         for (const it of itemsPendientesResidual) {
           await tx.itemPedido.update({
             where: { id: it.id },
-            data: {
-              cancelada: true,
-              estadoSurtido: 'NO_DISPONIBLE',
-              cantidadSurtida: 0,
-            },
+            data: datosDeFaltaDeBodega(),
           });
         }
         // Si tras cancelar no queda ningún item activo, fallar como hacen
@@ -816,6 +906,13 @@ export class PropuestaService {
           cambios = r.cambios;
           quedanPendientes = r.quedanPendientes;
           huboRetiro = r.huboRetiro;
+
+          // Oct 2026: aquí NO se crea lista de reposición. Si el asesor quitó
+          // mercancía de la bolsa, `huboRetiro` manda el pedido a bodega y el
+          // bodeguero la saca con el checklist de retiro y la regresa al anaquel
+          // él mismo. La reposición es solo de pedidos cancelados o rechazados
+          // (F20 creaba una entrada aquí y el bodeguero acomodaba la misma
+          // mercancía dos veces).
         },
       },
     );
@@ -828,8 +925,8 @@ export class PropuestaService {
      * surtido completo. `quedanPendientes` da false — no hay nada que surtir —
      * así que el pedido iba directo a mostrador con la prenda de más todavía
      * dentro de la bolsa. Bodega nunca se enteraba, porque el checklist de
-     * retiro vive en su tarjeta de ajustes de la plancha y esa tarjeta se
-     * alimenta de `obtenerAjustesPlancha`, que sólo lista pedidos en
+     * retiro vive en su tarjeta de ajustes del área de entrega y esa tarjeta se
+     * alimenta de `obtenerAjustesEntrega`, que sólo lista pedidos en
      * `EN_REVISION`.
      *
      * Mandarlo a bodega es lo que dispara ese checklist (`items: { some: {

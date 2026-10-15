@@ -22,6 +22,11 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { rankearSimilares } from '../core/similitud.util';
 import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/pedido-limits';
 import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
+import {
+  piezasEnLaBolsa,
+  piezasFueraDeLaBolsa,
+  piezasPendientesDeRetiro,
+} from '../core/ajuste-cantidad.util';
 import { recalcularTotalesPedido } from '../core/totales.util';
 import { construirPropuestaDeBodega } from '../core/propuesta-bodega.util';
 
@@ -191,7 +196,13 @@ export class SurtidoService {
 
     const item = await this.prisma.itemPedido.findUnique({
       where: { id: itemId },
-      select: { id: true, pedidoId: true, cantidad: true, cancelada: true },
+      select: {
+        id: true,
+        pedidoId: true,
+        cantidad: true,
+        cantidadSurtida: true,
+        cancelada: true,
+      },
     });
     if (!item || item.pedidoId !== pedidoId) {
       throw new NotFoundException(`Item ${itemId} no pertenece al pedido ${pedidoId}`);
@@ -214,6 +225,32 @@ export class SurtidoService {
     if (dto.cantidadSurtida > item.cantidad) {
       throw new BadRequestException(
         `La cantidad surtida (${dto.cantidadSurtida}) no puede exceder la cantidad pedida (${item.cantidad}).`,
+      );
+    }
+
+    /**
+     * F21 (oct 2026): con sobrante en la bolsa, `cantidadSurtida` no se puede
+     * tocar.
+     *
+     * `cantidadSurtida` es el hallazgo físico ("lo que hay"); un ajuste a la baja
+     * ya no lo pisa, a propósito, para que el sobrante quede a la vista y el
+     * bodeguero lo saque de la bolsa. Pero el guard de arriba NO alcanza a
+     * protegerlo: con sobrante se cumple `cantidad < cantidadSurtida`, y el
+     * valor `dto = cantidad` pasa el guard (no lo excede) **y** reduce el
+     * hallazgo. Es exactamente lo que manda la fila del sheet: se pinta con
+     * `cantidadSurtida` (3) y clampa el input a `cantidad` (1), así que tocarla
+     * —"Hay todo" o teclear— persiste `cantidadSurtida: 1`. El sobrante
+     * desaparece del dato y la mercancía de más viaja al área de entrega dentro
+     * de la bolsa, que es justo lo que la tarjeta existe para evitar.
+     *
+     * Por eso el guard mira el sobrante y no solo el tope: si hay piezas de más,
+     * la única salida válida es el checklist de retiro.
+     */
+    if (piezasFueraDeLaBolsa(item) > 0 && dto.cantidadSurtida < item.cantidadSurtida) {
+      throw new BadRequestException(
+        `Esta línea tiene ${piezasFueraDeLaBolsa(item)} pieza(s) de más en la bolsa. ` +
+          'Sácalas con el checklist de retiro: la cantidad surtida es lo que bodega ' +
+          'encontró en el anaquel y no se puede reducir.',
       );
     }
 
@@ -253,7 +290,21 @@ export class SurtidoService {
    * Antes este método escribía el estado a mano, lo que duplicaba historial/
    * realtime/notificación y dejaba el camino fuera de la máquina de estados.
    */
-  async confirmarSurtido(pedidoId: number, usuario: UserContext, esAdmin: boolean) {
+  async confirmarSurtido(
+    pedidoId: number,
+    usuario: UserContext,
+    esAdmin: boolean,
+    /**
+     * F21 (oct 2026): IDs de los items cuya mercancía el bodeguero YA sacó de la
+     * bolsa del área de entrega (el checklist de retiro del sheet).
+     *
+     * Opcional con default `[]` para no romper a los callers que no tienen
+     * checklist: el lote (`BodegaLoteSheet`) confirma sin uno porque los pedidos
+     * con ajuste están excluidos de `obtenerLoteSurtirJuntos`, y los tests
+     * existentes llaman con tres argumentos.
+     */
+    itemsRetirados: number[] = [],
+  ) {
     const pedido = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
       include: {
@@ -309,15 +360,19 @@ export class SurtidoService {
     //
     // Esta validación es la que atrapa CUALQUIER camino futuro que deje el item
     // incoherente, no solo el que conocemos hoy.
+    //
+    // Lo que cuenta es lo que HAY en la bolsa (`piezasEnLaBolsa`), no lo que se
+    // encontró alguna vez: las piezas que un ajuste anterior ya sacó están en el
+    // anaquel y no cubren lo que se cobra.
     const incoherentes = pedido.items.filter(
       (i) =>
         !i.cancelada &&
         i.estadoSurtido === EstadoSurtido.COMPLETO &&
-        i.cantidadSurtida < i.cantidad,
+        piezasEnLaBolsa(i) < i.cantidad,
     );
     if (incoherentes.length > 0) {
       const detalle = incoherentes
-        .map((i) => `#${i.id} (${i.cantidadSurtida}/${i.cantidad})`)
+        .map((i) => `#${i.id} (${piezasEnLaBolsa(i)}/${i.cantidad})`)
         .join(', ');
       throw new BadRequestException(
         `Hay ${incoherentes.length} item(s) marcados como COMPLETO con menos ` +
@@ -415,6 +470,43 @@ export class SurtidoService {
     let cambios: string[] = [];
     let propuestaId: number | null = null;
 
+    /**
+     * F21 (oct 2026): cuántas piezas se retiraron de la bolsa, por item.
+     *
+     * Se calcula AQUÍ, antes de la transacción, y no dentro de los `efectos`.
+     * Razón: el paso 1 de los efectos (`aplicarCambiosSurtido`) corre primero y,
+     * vía `aplicarCambiosFisicos`, escribe `datosDeFaltaDeBodega()` sobre los
+     * NO_DISPONIBLE y los PARCIAL con 0 piezas — o sea `cantidadSurtida: 0`. Si
+     * se calculara adentro, el incremento saldría 0 justo en el caso más común:
+     * una línea cancelada por falta de bodega que SÍ tenía piezas apartadas.
+     *
+     * El incremento es el PENDIENTE (`piezasPendientesDeRetiro`), NO el total de
+     * `piezasFueraDeLaBolsa`. Es la diferencia entre un contador correcto y uno
+     * que se pasa:
+     *
+     *   ronda 1: el ajuste baja de 5 a 3 → fuera 2, pendiente 2 → retiradas 2
+     *   ronda 2: el ajuste baja de 3 a 1 → fuera 4, pendiente 2 → retiradas 4
+     *
+     * Con el TOTAL, la ronda 2 sumaría 4 sobre las 2 ya retiradas y dejaría el
+     * contador en 6 sobre un sobrante real de 4. El daño aparece en la ronda 3:
+     * al cancelar la línea, `piezasPendientesDeRetiro` clampea a 0 y la ÚLTIMA
+     * prenda —la que sigue físicamente en la bolsa— nunca se pide sacar. Es
+     * exactamente el fallo que esta columna existe para prevenir.
+     *
+     * El checklist del sheet es todo-o-nada, así que si el bodeguero pudo
+     * confirmar es porque retiró todo lo pendiente: el incremento es el
+     * pendiente completo, no lo que marcó.
+     */
+    const piezasRetiradasPorItem = new Map<number, number>();
+    if (itemsRetirados.length > 0) {
+      const ids = new Set(itemsRetirados);
+      for (const item of pedido.items) {
+        if (!ids.has(item.id)) continue;
+        const piezas = piezasPendientesDeRetiro(item);
+        if (piezas > 0) piezasRetiradasPorItem.set(item.id, piezas);
+      }
+    }
+
     const pedidoActualizado = await this.state.cambiarEstado(
       pedidoId,
       {
@@ -443,6 +535,23 @@ export class SurtidoService {
         // cajeros + cola de mostrador).
         invalidarMonitor: true,
         efectos: async (tx) => {
+          /**
+           * F21 (oct 2026): registrar que la mercancía YA salió de la bolsa.
+           *
+           * Va ANTES de `aplicarCambiosSurtido` por claridad (los valores ya
+           * vienen precalculados de afuera, así que el orden no afecta el
+           * resultado), pero el motivo de que exista es el de arriba: sin esto,
+           * `piezasFueraDeLaBolsa` —que es posicional— vuelve a reportar las
+           * mismas prendas en el siguiente ajuste y el bodeguero va a buscar
+           * mercancía que ya sacó.
+           */
+          for (const [itemId, piezas] of piezasRetiradasPorItem) {
+            await tx.itemPedido.update({
+              where: { id: itemId },
+              data: { piezasRetiradas: { increment: piezas } },
+            });
+          }
+
           // 1. Liquidar el surtido físico: cancelar los NO_DISPONIBLE y ajustar
           //    los PARCIAL a lo que realmente hay.
           if (hayFaltantes) {

@@ -13,32 +13,41 @@ import { KioskoService } from './kiosko.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import { firmarLlegoQr, verificarLlegoQr, tokenEsDeTienda } from '../pedidos/core/qr-llegada.util';
 import { motivoNoAvisable, evaluarAviso } from '../pedidos/core/llegada-aviso.util';
+import { clientePresenteEnTienda, whereAusente } from '../pedidos/core/presencia.util';
 import { estadoPedidoLabel } from '../mail/estado-labels';
 import { CanalLlegada, EstadoPedido, ModoEntrega, Prisma } from '@prisma/client';
 import type { UserContext } from '../../types/pedido.types';
 
-const THROTTLE_WINDOW_MS = 60_000;
 /**
- * F16 (sep 2026): tope de avisos que emiten realtime SIN esperar la ventana de
- * reintento. Pasado el tope, el aviso sigue funcionando pero solo re-emite cada
- * `REINTENTO_WINDOW_MS`.
+ * F22 (oct 2026): cuántas veces el mostrador puede descartar el aviso de UN
+ * pedido antes de que el botón web deje de funcionar para él. A la segunda, un
+ * cliente que avisa desde su teléfono sin estar en la tienda ya no se cree: solo
+ * el kiosko (QR o folio, que exigen estar frente a la tablet) o el operador
+ * pueden volver a marcar la llegada.
  */
-const MAX_AVISOS_POR_PEDIDO = 5;
+export const MAX_DESCARTES_WEB = 2;
+
 /**
- * F16: ventana tras la cual un pedido que agotó el tope puede volver a emitir.
+ * F22: reacción que se corre cuando un aviso NUEVO queda registrado.
  *
- * Antes el tope era de POR VIDA: `llegadaAnunciadaCount` se incrementaba y
- * nunca se reiniciaba, así que tras 5 avisos el pedido dejaba de emitir
- * realtime PARA SIEMPRE. Era un adorno cuando la llegada solo pintaba un badge;
- * con el gate de D5 (un pedido web NO aparece en mostrador hasta que el cliente
- * avisa) el bug se vuelve real: si el operador descarta el aviso y el cliente
- * vuelve a avisar, el pedido reaparece en la cola por el polling pero SIN la
- * alerta en la TV — el operador no se entera de que hay alguien esperando.
- *
- * Convertirlo en límite de tasa (en vez de tope de por vida) arregla el caso
- * sin necesidad de una columna nueva: `llegadaUltimoAvisoAt` ya existe.
+ * Existe porque `KioskoModule` no puede importar `PedidosModule` (sería un ciclo:
+ * `PedidosModule` ya importa `KioskoModule`) y la reacción necesita la máquina de
+ * estados — p. ej. mover un pedido que esperaba aprobación al área de entrega
+ * cuando el cliente llega. En vez de escribir el estado a mano aquí (la regla de
+ * `CLAUDE.md` es "nunca escribas `estado` directo"), el módulo dueño de la máquina
+ * se registra como oyente (`PresenciaService.onModuleInit`).
  */
-const REINTENTO_WINDOW_MS = 10 * 60_000;
+export interface ReaccionLlegada {
+  pedidoId: number;
+  tiendaId: number;
+  /** Estado en el que estaba el pedido cuando llegó el cliente. */
+  estado: EstadoPedido;
+  canal: CanalLlegada;
+  /** Quién avisó: nombre del kiosko, del operador, o "App del cliente". */
+  por: string;
+  /** Solo cuando avisó un operador: para que la transición quede a su nombre. */
+  usuario?: UserContext;
+}
 
 /**
  * PR7 (kiosko-profesional): flujo "avisar llegada a tienda".
@@ -65,8 +74,10 @@ const REINTENTO_WINDOW_MS = 10 * 60_000;
  *  - NO se agrega `un estado al enum. La llegada es ortogonal al
  *    ciclo de vida del pedido (puede ocurrir en EN_REVISION,
  *    PENDIENTE_PAGO, PAID, SHIPPED). En su lugar, columnas.
- *  - Idempotencia: avisar 2 veces en <60s devuelve el mismo payload
- *    sin re-emit realtime (no spam en mostrador).
+ *  - Idempotencia (F22): mientras el cliente YA esté presente, avisar de nuevo
+ *    no hace nada (ni escribe ni suena el chime). Antes se re-emitía cada 60 s
+ *    y el cliente podía hacer sonar la TV a voluntad. Solo se puede volver a
+ *    avisar después de que el mostrador descartó el aviso.
  *  - Validar que el kiosko tiene deviceToken (PR2) — sin él, no se
  *    acepta el aviso.
  */
@@ -119,9 +130,9 @@ export class KioskoLlegadaService {
    * emite realtime `pedido.llegada-anunciada` al room tienda-{id} +
    * pedido-{id} (este último para que el cliente lo vea en su app).
    *
-   * Idempotente: si el último aviso fue hace <60s, devuelve el mismo
-   * payload con `reanudado: false`. Si pasaron >60s, actualiza
-   * ultimoAvisoAt + count + emite realtime.
+   * Idempotente (F22): si el cliente YA está presente, devuelve el mismo
+   * payload con `reanudado: false` y NO escribe ni emite nada. Solo un aviso
+   * nuevo (el primero, o el primero tras un descarte) emite realtime.
    */
   async confirmar(input: {
     kioskoId: number;
@@ -210,44 +221,43 @@ export class KioskoLlegadaService {
       canal: CanalLlegada.MOSTRADOR,
       por: usuario.nombre,
       kioskoId: null,
+      usuario,
     });
 
-    // Mismo patrón que `MostradorService.llamar` y `.descartarLlegada`:
-    // historial sin cambio de estado, para que la acción quede auditable. Se
-    // anota el estado en que se marcó: con la regla nueva se puede marcar antes
-    // de que el pedido esté listo, y hace falta poder auditar cuántas llegadas
-    // se registran por adelantado.
-    await this.prisma.historialPedido.create({
-      data: {
-        pedidoId,
-        estadoAnterior: completo.estado,
-        estadoNuevo: completo.estado,
-        observacion: `Llegada marcada por ${usuario.nombre} desde mostrador (pedido en ${completo.estado})`,
-        usuarioId: usuario.userId,
-        usuarioNombre: usuario.nombre,
-      },
-    });
-
-    // La consola y la TV tienen que recomputar: el pedido acaba de entrar a la
-    // cola visible (si venía de "sin aviso") o de refrescar su badge EN TIENDA.
-    //
-    // Solo cuando el aviso se re-emitió. Si el guard de idempotencia lo
-    // suprimió, el estado no cambió y no hay nada que recomputar — invalidar
-    // sería un refetch gratis en cada toque repetido del botón.
+    // F22: el historial y el realtime solo cuando el aviso es NUEVO. Con el
+    // cliente ya presente (un pedido de kiosko, o un web con aviso vigente)
+    // marcar la llegada no cambia nada, y escribir una fila por cada toque del
+    // botón llenaba la auditoría de avisos que no avisaban de nada.
     if (resultado.reanudado) {
+      // Mismo patrón que `MostradorService.llamar` y `.descartarLlegada`:
+      // historial sin cambio de estado, para que la acción quede auditable. Se
+      // anota el estado en que se marcó: se puede marcar antes de que el pedido
+      // esté listo, y hace falta poder auditar cuántas llegadas se registran por
+      // adelantado.
+      await this.prisma.historialPedido.create({
+        data: {
+          pedidoId,
+          estadoAnterior: completo.estado,
+          estadoNuevo: completo.estado,
+          observacion: `Llegada marcada por ${usuario.nombre} desde mostrador (pedido en ${completo.estado})`,
+          usuarioId: usuario.userId,
+          usuarioNombre: usuario.nombre,
+        },
+      });
+
+      // La consola y la TV tienen que recomputar: el pedido acaba de entrar a la
+      // cola visible (si venía de "sin aviso") o de refrescar su badge EN TIENDA.
       this.realtime.emitToTienda(completo.tiendaId, 'monitor.invalidado', {
         pedidoId,
       });
-      // Oct 2026: si el pedido NO est�� en mostrador, las consolas que necesitan
+      // Oct 2026: si el pedido NO está en mostrador, las consolas que necesitan
       // enterarse son las que tienen el pedido en sus manos — bodega (hay que
       // surtirlo ya) o ventas (el asesor tiene que atender al cliente que está
       // esperando de pie). `monitor.invalidado` no lo escuchan.
       //
       // Se emite el MISMO evento de llegada que ya existe, para no inventar un
       // nombre nuevo que un typo podría dejar en silencio. El payload lleva
-      // `canal` y `canalOrigen` para que cada consola distinga el caso: un
-      // pedido de KIOSKO ya estaba en tienda por definición, uno de WEB con
-      // llegada es el evento que importa.
+      // `canal` y `canalOrigen` para que cada consola distinga el caso.
       if (!evaluacion.entraACola) {
         this.realtime.emitToTienda(completo.tiendaId, 'pedido.llegada-anunciada', {
           pedidoId,
@@ -295,13 +305,39 @@ export class KioskoLlegadaService {
   }
 
   /**
-   * Escritura compartida del aviso: idempotencia, límite de tasa, columnas
-   * `llegada*` y emisión de realtime.
+   * Oyentes de "llegó un cliente" (ver `ReaccionLlegada`). Se registran al
+   * arrancar; el aviso ya está guardado cuando corren, así que un fallo NO lo
+   * deshace.
+   */
+  private readonly reacciones: Array<(r: ReaccionLlegada) => Promise<void>> = [];
+
+  registrarReaccion(fn: (r: ReaccionLlegada) => Promise<void>): void {
+    this.reacciones.push(fn);
+  }
+
+  /**
+   * Escritura compartida del aviso: presencia, límite de descartes y realtime.
    *
    * Oct 2026: este bloque estaba copiado en `confirmar` y en
    * `confirmarDesdeCliente` (dos veces ~90 líneas casi idénticas), y el tercer
    * camino —mostrador— habría sido una tercera copia. Se parametrizó el canal,
    * el autor y el kiosko, que era lo único que cambiaba.
+   *
+   * F22 (oct 2026) — reescrita sobre una regla simple: **mientras el cliente
+   * esté presente, avisar de nuevo no hace nada.**
+   *
+   * Antes había una ventana de 60 s, un tope de 5 avisos por 10 min y una columna
+   * de "última emisión" para sostenerlos, y aun así el botón "Avisar de nuevo" de
+   * la app hacía sonar el chime del mostrador cada minuto. Todo eso existía para
+   * contener un re-aviso que ahora simplemente no ocurre. Un aviso nuevo solo es
+   * posible cuando NO hay uno vigente: la primera vez, o después de que el
+   * mostrador lo descartó (porque el cliente no estaba).
+   *
+   * Y un aviso nuevo REINICIA la espera (`llegadaAnunciadaAt` y `presenteDesdeAt`
+   * = ahora). Antes conservaba la hora del primer aviso: el cliente que avisó
+   * por error a las 10:00, fue descartado, y volvió de verdad a las 12:00,
+   * heredaba el lugar de las 10:00 (se colaba delante de todos) y la consola le
+   * pintaba "EN TIENDA · 120 min".
    */
   private async registrarAviso(
     pedido: {
@@ -310,18 +346,24 @@ export class KioskoLlegadaService {
       numeroPedido: string;
       clienteNombre: string;
       estado: EstadoPedido;
+      canalOrigen: string;
+      fechaPedido: Date;
       llegadaAnunciadaAt: Date | null;
-      llegadaUltimoAvisoAt: Date | null;
-      llegadaAnunciadaCount: number;
-      llegadaUltimaEmisionAt: Date | null;
       llegadaDescartadaAt: Date | null;
+      llegadaDescartes: number;
+      presenteDesdeAt: Date | null;
       tienda?: { nombre: string };
     },
-    opts: { canal: CanalLlegada; por: string; kioskoId: number | null },
+    opts: {
+      canal: CanalLlegada;
+      por: string;
+      kioskoId: number | null;
+      usuario?: UserContext;
+    },
   ): Promise<{
     /**
-     * El aviso se RE-EMITIÓ. `false` cuando el guard de idempotencia de 60s lo
-     * suprimió porque era el mismo aviso otra vez (sin descarte de por medio).
+     * El aviso es NUEVO (se escribió y se emitió). `false` cuando el cliente ya
+     * estaba presente: no pasó nada y no se hace ruido.
      *
      * Es el flag que elige el copy: con `false` el cliente ve "Ya avisamos al
      * equipo" en vez del mensaje del estado, porque no pasó nada nuevo. El
@@ -332,46 +374,33 @@ export class KioskoLlegadaService {
   }> {
     const now = new Date();
 
-    // Idempotencia: si avisó hace <60s, no re-emitimos (no spam en mostrador).
-    // F16: un aviso DESCARTADO por el operador se puede volver a mandar de
-    // inmediato — el descarte lo hizo porque el cliente no estaba, así que
-    // hacerlo esperar la ventana lo dejaría sin forma de re-avisar.
-    const ultimo = pedido.llegadaUltimoAvisoAt;
-    const isFresh = ultimo !== null && now.getTime() - ultimo.getTime() < THROTTLE_WINDOW_MS;
-    const descartado = pedido.llegadaDescartadaAt !== null;
-    if (pedido.llegadaAnunciadaAt && isFresh && !descartado) {
-      return {
-        reanudado: false,
-        esperandoDesdeMin: this.minutosDesde(pedido.llegadaAnunciadaAt, now),
-      };
+    if (clientePresenteEnTienda(pedido)) {
+      const desde = pedido.presenteDesdeAt ?? pedido.llegadaAnunciadaAt ?? pedido.fechaPedido;
+      return { reanudado: false, esperandoDesdeMin: this.minutosDesde(desde, now) };
     }
 
-    // F16: el tope es un LÍMITE DE TASA, no un tope de por vida. Pasado
-    // `REINTENTO_WINDOW_MS` desde la última EMISIÓN, el contador se reinicia y
-    // el pedido vuelve a emitir. Sin esto, un cliente que avisa 6 veces deja su
-    // pedido sin alerta en la TV para siempre (bug B2 del plan).
-    //
-    // El ancla es `llegadaUltimaEmisionAt`, NO `llegadaUltimoAvisoAt`: este
-    // último se reescribe en cada request, así que un cliente que insistía más
-    // seguido que la ventana nunca la cumplía y su pedido quedaba sin alerta
-    // indefinidamente.
-    const agotoTope = pedido.llegadaAnunciadaCount >= MAX_AVISOS_POR_PEDIDO;
-    const ultimaEmision = pedido.llegadaUltimaEmisionAt;
-    const pasoLaVentana =
-      ultimaEmision === null || now.getTime() - ultimaEmision.getTime() >= REINTENTO_WINDOW_MS;
-    const nuevoCount = agotoTope && pasoLaVentana ? 1 : pedido.llegadaAnunciadaCount + 1;
-    const debeEmitir = nuevoCount <= MAX_AVISOS_POR_PEDIDO;
+    // El botón web se cierra tras `MAX_DESCARTES_WEB` descartes. El kiosko y el
+    // operador NO: ahí hay alguien (o una tablet) en la tienda que lo avala.
+    if (opts.canal === CanalLlegada.WEB && pedido.llegadaDescartes >= MAX_DESCARTES_WEB) {
+      throw new ConflictException({
+        codigo: 'AVISO_BLOQUEADO',
+        message:
+          'El mostrador no te encontró las veces anteriores. Para avisar tu llegada, ' +
+          'pasa por el kiosko de la tienda o dile al operador de mostrador.',
+      });
+    }
 
-    const actualizado = await this.prisma.pedido.update({
-      where: { id: pedido.id },
+    // Escritura con guarda atómica: solo si el pedido sigue SIN presencia. Dos
+    // avisos simultáneos (la app y el kiosko, o un doble toque) leen "ausente" a
+    // la vez; sin la guarda los dos escribirían y emitirían.
+    const escrito = await this.prisma.pedido.updateMany({
+      where: { id: pedido.id, ...whereAusente() },
       data: {
-        llegadaAnunciadaAt: pedido.llegadaAnunciadaAt ?? now,
+        llegadaAnunciadaAt: now,
+        presenteDesdeAt: now,
         llegadaUltimoAvisoAt: now,
-        llegadaAnunciadaCount: nuevoCount,
-        // Solo se mueve el ancla cuando REALMENTE se emite: si el aviso se
-        // suprime, la ventana tiene que seguir corriendo desde la última
-        // emisión real.
-        ...(debeEmitir ? { llegadaUltimaEmisionAt: now } : {}),
+        llegadaUltimaEmisionAt: now,
+        llegadaAnunciadaCount: { increment: 1 },
         llegadaAnunciadaCanal: opts.canal,
         llegadaAnunciadaKioskoId: opts.kioskoId,
         llegadaAnunciadaPor: opts.por,
@@ -380,35 +409,49 @@ export class KioskoLlegadaService {
         llegadaDescartadaPorId: null,
       },
     });
-
-    const esperandoDesdeMin = this.minutosDesde(actualizado.llegadaAnunciadaAt ?? now, now);
-
-    if (debeEmitir) {
-      this.realtime.emitToTienda(pedido.tiendaId, 'pedido.llegada-anunciada', {
-        pedidoId: pedido.id,
-        numeroPedido: pedido.numeroPedido,
-        folioVisible: pedido.numeroPedido,
-        clienteNombre: pedido.clienteNombre,
-        estado: pedido.estado,
-        kioskoId: opts.kioskoId,
-        kioskoNombre: opts.por,
-        canal: opts.canal,
-        llegadaAnunciadaAt: actualizado.llegadaAnunciadaAt,
-        esperandoDesdeMin,
-        tienda: pedido.tienda?.nombre,
-      });
-      // También al room del pedido (para que el cliente en su app lo vea).
-      this.realtime.emitToPedido(pedido.id, 'pedido.llegada-anunciada', {
-        pedidoId: pedido.id,
-        numeroPedido: pedido.numeroPedido,
-        esperandoDesdeMin,
-      });
+    if (escrito.count !== 1) {
+      return { reanudado: false, esperandoDesdeMin: 0 };
     }
 
-    return {
-      reanudado: true,
-      esperandoDesdeMin,
-    };
+    this.realtime.emitToTienda(pedido.tiendaId, 'pedido.llegada-anunciada', {
+      pedidoId: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      folioVisible: pedido.numeroPedido,
+      clienteNombre: pedido.clienteNombre,
+      estado: pedido.estado,
+      kioskoId: opts.kioskoId,
+      kioskoNombre: opts.por,
+      canal: opts.canal,
+      llegadaAnunciadaAt: now,
+      esperandoDesdeMin: 0,
+      tienda: pedido.tienda?.nombre,
+    });
+    // También al room del pedido (para que el cliente en su app lo vea).
+    this.realtime.emitToPedido(pedido.id, 'pedido.llegada-anunciada', {
+      pedidoId: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      esperandoDesdeMin: 0,
+    });
+
+    for (const reaccion of this.reacciones) {
+      try {
+        await reaccion({
+          pedidoId: pedido.id,
+          tiendaId: pedido.tiendaId,
+          estado: pedido.estado,
+          canal: opts.canal,
+          por: opts.por,
+          usuario: opts.usuario,
+        });
+      } catch (err) {
+        // El aviso ya quedó guardado: un fallo de la reacción no lo deshace.
+        this.logger.warn(
+          `Pedido ${pedido.id}: el aviso se registró pero la reacción falló (${(err as Error).message})`,
+        );
+      }
+    }
+
+    return { reanudado: true, esperandoDesdeMin: 0 };
   }
 
   /** Minutos completos transcurridos desde `desde` hasta `hasta`. */
@@ -576,7 +619,9 @@ export class KioskoLlegadaService {
       total,
       estado: pedido.estado,
       estadoLabel: this.labelParaEstado(pedido.estado),
-      yaAvisado: Boolean(pedido.llegadaAnunciadaAt),
+      // F22: "ya avisó" = el cliente ya está presente (para un kiosko, siempre,
+      // salvo que el mostrador lo haya descartado).
+      yaAvisado: clientePresenteEnTienda(pedido),
     };
   }
 
@@ -609,7 +654,9 @@ export class KioskoLlegadaService {
       return 'Listo, ya avisamos al equipo. Tu pedido sigue en preparación.';
     }
     if (estado === EstadoPedido.ESPERANDO_APROBACION) {
-      return 'Ya avisamos al equipo. Tienes una propuesta pendiente de aprobar.';
+      // F22: avisar llegada con una propuesta pendiente mueve el pedido al área
+      // de entrega: el operador la resuelve con el cliente enfrente.
+      return 'Ya avisamos al equipo. Pasa a mostrador: ahí resolverán contigo la propuesta de tu pedido.';
     }
     if (estado === EstadoPedido.EN_ASESORIA) {
       return 'Ya avisamos al equipo. Un asesor te atenderá.';

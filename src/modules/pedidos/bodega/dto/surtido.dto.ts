@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsArray, IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { EstadoSurtido } from '@prisma/client';
 
 /**
@@ -32,4 +32,36 @@ export class MarcarSurtidoItemDto {
   @IsOptional()
   @IsString()
   motivo?: string;
+}
+
+/**
+ * F21 (oct 2026): el cierre del surtido ahora reporta QUÉ prendas se sacaron de
+ * la bolsa del área de entrega.
+ *
+ * El checklist de retiro del sheet es obligatorio (hasta marcar cada prenda,
+ * "Terminar surtido" queda bloqueado), pero esa marca vivía SOLO en estado local
+ * del componente — al cerrar el sheet se perdía. Consecuencia: el sistema nunca
+ * registraba que el retiro ya se hizo, así que un segundo ajuste sobre el mismo
+ * pedido volvía a pedir sacar prendas que ya estaban fuera de la bolsa.
+ *
+ * El backend no puede inferirlo: `piezasFueraDeLaBolsa` compara `cantidadSurtida`
+ * contra `cantidad`, y sacar mercancía físicamente no cambia ninguna de las dos.
+ * Por eso hay que reportarlo explícitamente.
+ *
+ * Opcional a propósito: el lote (`BodegaLoteSheet`) confirma sin checklist porque
+ * los pedidos con ajuste están excluidos de `obtenerLoteSurtirJuntos`, y los
+ * callers/tests que no lo mandan conservan el comportamiento previo.
+ */
+export class ConfirmarSurtidoDto {
+  @ApiPropertyOptional({
+    description:
+      'IDs de los items cuya mercancía ya se sacó de la bolsa. El backend suma ' +
+      'sus piezas a `ItemPedido.piezasRetiradas` para no volver a pedirlas en un ' +
+      'ajuste posterior.',
+    type: [Number],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsInt({ each: true })
+  itemsRetirados?: number[];
 }

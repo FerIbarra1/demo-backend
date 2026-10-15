@@ -1,5 +1,5 @@
 import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
-import { Prisma, EstadoPedido, EstadoPropuesta, RolUsuario, CanalOrigen } from '@prisma/client';
+import { Prisma, EstadoPedido, EstadoPropuesta, RolUsuario } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PedidoStateService } from '../pedidos/core/pedido-state.service';
 import { PedidoAccessService } from '../pedidos/core/pedido-access.service';
@@ -7,10 +7,23 @@ import { ReposicionService } from '../pedidos/reposicion/reposicion.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import { recalcularTotalesPedido } from '../pedidos/core/totales.util';
 import { construirItemPedido } from '../pedidos/core/item-pedido.util';
+import { datosDeRetiroPorDecision } from '../pedidos/core/cancelacion-linea.util';
+import { calcularAjusteDeCantidad } from '../pedidos/core/ajuste-cantidad.util';
 import { PreciosService } from '../precios/precios.service';
 import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../precios/precio-lista.util';
 import { ItemAjusteDto } from './dto/accion-mostrador.dto';
 import { KioskoLlegadaService } from '../kiosko/kiosko-llegada.service';
+import { PresenciaService } from '../pedidos/core/presencia.service';
+import { MostradoresService } from '../mostradores/mostradores.service';
+import {
+  ESTADOS_ESPERA_CLIENTE,
+  ORDEN_COLA,
+  clientePresenteEnTienda,
+  whereAusente,
+  wherePresente,
+} from '../pedidos/core/presencia.util';
+import { umbralesSinRecoger } from '../pedidos/core/sin-recoger.util';
+import { ConfigService } from '@nestjs/config';
 import { UserContext } from '../../types/pedido.types';
 
 /**
@@ -54,6 +67,11 @@ export class MostradorService {
     private readonly realtime: RealtimeService,
     private readonly precios: PreciosService,
     private readonly llegada: KioskoLlegadaService,
+    /** F22: descartar aviso, "no se presentó". */
+    private readonly presencia: PresenciaService,
+    /** F22: el mostrador desde el que el operador llama. */
+    private readonly mostradores: MostradoresService,
+    private readonly config: ConfigService,
   ) {}
 
   // ==================================================================
@@ -82,7 +100,7 @@ export class MostradorService {
     // auditar cuántas veces se salta el gate.
     const completo = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      select: { llegadaAnunciadaAt: true, llegadaDescartadaAt: true },
+      select: { canalOrigen: true, llegadaAnunciadaAt: true, llegadaDescartadaAt: true },
     });
 
     // F18 (oct 2026): GUARD de propuesta pendiente.
@@ -106,8 +124,11 @@ export class MostradorService {
       );
     }
 
-    const avisoVigente = Boolean(completo?.llegadaAnunciadaAt && !completo.llegadaDescartadaAt);
-    const sufijoAviso = avisoVigente ? '' : ' (sin aviso de llegada del cliente)';
+    // F22: la regla única de presencia. Antes miraba solo el aviso y a TODO pedido
+    // de kiosko le escribía "(sin aviso de llegada del cliente)" en el historial,
+    // aunque el cliente estuviera de pie en la tienda.
+    const clientePresente = completo ? clientePresenteEnTienda(completo) : false;
+    const sufijoAviso = clientePresente ? '' : ' (sin aviso de llegada del cliente)';
     const sufijoNota = nota ? ` — ${nota}` : '';
 
     return this.pedidoState.cambiarEstado(
@@ -154,7 +175,25 @@ export class MostradorService {
    */
   async ajustar(pedidoId: number, usuario: UserContext, nota: string, items?: ItemAjusteDto[]) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
-    this.exigirEstado(pedido.estado, 'ajustar');
+    /**
+     * F21 (oct 2026): también desde `ESPERANDO_APROBACION`.
+     *
+     * El caso del negocio: el cliente no vio la propuesta en su app y llega a
+     * la tienda. El operador lo tiene enfrente y necesita AJUSTAR — no solo
+     * aprobar o rechazar. Antes el pedido estaba en `ESPERANDO_APROBACION`, así
+     * que `ajustar` daba 400 y al operador solo le quedaba "El cliente no
+     * acepta", que CANCELA el pedido completo.
+     *
+     * Es el mismo criterio que ya usa `resolverPropuesta` para el operador
+     * (`[ESPERANDO_APROBACION, REVISADO, EN_ATENCION]`): si el cliente está
+     * físicamente en la tienda, el operador puede resolver en su nombre sin
+     * importar en qué punto del ciclo esté el pedido.
+     */
+    this.exigirEstado(pedido.estado, 'ajustar', [
+      EstadoPedido.ESPERANDO_APROBACION,
+      EstadoPedido.REVISADO,
+      EstadoPedido.EN_ATENCION,
+    ]);
 
     // El pedido completo se necesita ANTES de la transacción: `PreciosService`
     // usa `prisma` (no el `tx`) y la lista de precios del cliente se resuelve
@@ -179,15 +218,50 @@ export class MostradorService {
       ? await this.precios.columnaParaPedido(pedidoCompleto)
       : 'lista1';
 
-    let resumenCambios: string[] = [];
+    /**
+     * La observación del historial se construye DESPUÉS de aplicar los cambios.
+     *
+     * F21 (oct 2026): antes se armaba aquí, con
+     * `resumenCambios.length || items!.length` — pero `resumenCambios` se llena
+     * dentro de los `efectos`, que corren después. En ese punto siempre estaba
+     * vacío, así que el `||` hacía que el historial reportara **siempre**
+     * `items.length` (los cambios PROPUESTOS) y nunca los realmente aplicados.
+     * Un ajuste que pedía 5 cambios y aplicaba 2 quedaba auditado como 5.
+     *
+     * Ahora la observación se calcula dentro de la transacción, donde el
+     * resultado ya se conoce, y se pasa por referencia mutable — el mismo patrón
+     * que `cambios` en `confirmarSurtido`.
+     */
+    let observacion = hayCambios
+      ? `Ajuste en mostrador por ${usuario.nombre}: ${nota}`
+      : `Ajuste solicitado en mostrador por ${usuario.nombre}: ${nota}`;
 
-    return this.pedidoState.cambiarEstado(
+    /**
+     * F21 (oct 2026): el ajuste de mostrador REGISTRA LA LLEGADA del cliente.
+     *
+     * Sin esto, el circuito se rompe por una razón que no se ve: el pedido
+     * vuelve a bodega, bodega cierra el surtido, y `destinoTrasSurtidoIncompleto`
+     * decide a dónde va mirando `clientePresenteEnTienda` — que para un pedido
+     * WEB es "hay aviso de llegada vigente". Si el operador ajustó sin que nadie
+     * hubiera avisado, el pedido aterriza otra vez en `ESPERANDO_APROBACION`
+     * **con el cliente de pie en el mostrador**, esperando una aprobación que
+     * nadie va a dar desde la app.
+     *
+     * El operador que ajusta tiene al cliente enfrente por definición: es la
+     * misma premisa que `enNombreDelCliente` en las propuestas. Así que se
+     * registra con `CanalLlegada.MOSTRADOR`, el mismo camino que el botón
+     * "El cliente está aquí" — idempotente y con su propia auditoría.
+     *
+     * Va DESPUÉS del commit, no dentro de los efectos: `confirmarDesdeMostrador`
+     * usa `prisma` (no el `tx`) y escribe su propio historial y realtime. Dentro
+     * de la transacción no se puede, y si el ajuste falla tampoco debe quedar el
+     * aviso.
+     */
+    const resultado = await this.pedidoState.cambiarEstado(
       pedidoId,
       {
         nuevoEstado: EstadoPedido.EN_REVISION,
-        observacion: hayCambios
-          ? `Ajuste en mostrador por ${usuario.nombre}: ${nota} (${resumenCambios.length || items!.length} cambio(s))`
-          : `Ajuste solicitado en mostrador por ${usuario.nombre}: ${nota}`,
+        observacion,
       },
       usuario,
       {
@@ -223,31 +297,40 @@ export class MostradorService {
           // transicionó a EN_REVISION y bodega lo re-surtirá tal cual.
           if (!hayCambios) return;
 
-          const retirados: Array<{ itemId: number; cantidad: number }> = [];
-          resumenCambios = await this.aplicarAjuste(
-            tx,
-            pedidoCompleto,
-            items!,
-            columnaLista,
-            retirados,
-          );
-          // F17: las prendas que el ajuste quitó están físicamente en la
-          // bolsa de la plancha y tienen que volver al anaquel. Se crea la
-          // lista de reposición en la MISMA transacción: si el ajuste se
-          // aplica pero la lista falla, quedaría mercancía apartada sin
-          // nadie que la devuelva.
-          //
-          // Las cantidades se pasan desde `retirados` porque el ajuste ya
-          // puso `cantidadSurtida: 0` en esos items.
-          await this.reposicion.crearDesdeAjuste(
-            tx,
-            pedidoId,
-            nota,
-            new Map(retirados.map((r) => [r.itemId, r.cantidad])),
-          );
+          const cambios = await this.aplicarAjuste(tx, pedidoCompleto, items!, columnaLista);
+          // F21: el número REAL de cambios aplicados, no los propuestos. Ver el
+          // comentario de `observacion` arriba.
+          observacion = `Ajuste en mostrador por ${usuario.nombre}: ${nota} (${cambios.length} cambio(s))`;
+          // Oct 2026: aquí NO se crea lista de reposición. Las prendas que el
+          // ajuste quitó están en la bolsa del área de entrega y el pedido
+          // vuelve a bodega: el bodeguero las saca con el checklist de retiro y
+          // las regresa al anaquel él mismo. La reposición es solo de pedidos
+          // cancelados o rechazados (F17 la creaba aquí, y el bodeguero
+          // acomodaba la misma mercancía dos veces: una al ajustar y otra al
+          // confirmar la lista).
         },
       },
     );
+
+    // Ver el comentario de arriba: el cliente está enfrente, así que queda
+    // registrado que llegó. Es lo que hace que, cuando bodega cierre el surtido
+    // siguiente, el pedido vuelva al área de entrega en vez de a esperar una
+    // aprobación por la app.
+    //
+    // Best-effort a propósito: si el aviso falla, el ajuste YA se aplicó y no se
+    // puede deshacer. Tumbar la respuesta dejaría al operador creyendo que nada
+    // pasó cuando el pedido ya volvió a bodega — peor que un aviso faltante, que
+    // se puede marcar a mano con "El cliente está aquí".
+    try {
+      await this.llegada.confirmarDesdeMostrador(pedidoId, usuario);
+    } catch (err) {
+      this.logger.warn(
+        `Pedido ${pedidoId}: el ajuste se aplicó pero no se pudo registrar la llegada ` +
+          `(${(err as Error).message}). El pedido podría volver a esperar aprobación.`,
+      );
+    }
+
+    return resultado;
   }
 
   /**
@@ -271,13 +354,6 @@ export class MostradorService {
     pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
     items: ItemAjusteDto[],
     columnaLista: ColumnaLista,
-    /**
-     * F17: se llena con las piezas que había en la bolsa por cada item
-     * retirado. El caller la pasa a `crearDesdeAjuste` para que la lista de
-     * reposición sepa cuánto devolver al anaquel — el ajuste borra
-     * `cantidadSurtida` al cancelar, así que ese dato hay que capturarlo antes.
-     */
-    retiradosParaReposicion: Array<{ itemId: number; cantidad: number }> = [],
   ): Promise<string[]> {
     const cambios: string[] = [];
     const idsActuales = new Set(
@@ -338,32 +414,31 @@ export class MostradorService {
       }
 
       if (it.tipo === 'no-disponible') {
-        // F17 (oct 2026): ANTES de cancelar hay que capturar cuántas piezas
-        // había en la bolsa. `cantidadSurtida` es lo que bodega apartó
-        // físicamente, y el ajuste está a punto de ponerlo en 0 — sin
-        // capturarlo aquí, `crearDesdeAjuste` no encuentra nada que reponer y
-        // la mercancía retirada se queda sin devolver al anaquel (bug
-        // encontrado en la prueba end-to-end).
+        // Se lee el estado físico ANTES de cancelar para conservarlo (F20): el
+        // hallazgo de bodega sigue siendo cierto y es lo que el checklist de
+        // retiro usa para saber cuánto sacar de la bolsa.
         const previo = await tx.itemPedido.findUnique({
           where: { id: it.itemId },
-          select: { cantidadSurtida: true, cantidad: true },
+          select: { cantidadSurtida: true, cantidad: true, estadoSurtido: true },
         });
         const piezasEnBolsa = previo?.cantidadSurtida ?? 0;
-        if (piezasEnBolsa > 0) {
-          retiradosParaReposicion.push({ itemId: it.itemId, cantidad: piezasEnBolsa });
-        }
 
-        // F16: limpieza completa del estado de surtido al cancelar. Sin esto
-        // el item quedaba con `estadoSurtido` viejo (PARCIAL/NO_DISPONIBLE),
-        // que es benigno hoy (todos los guards excluyen cancelados) pero
-        // normaliza el contrato para futuras validaciones.
+        // F20 (oct 2026): se CONSERVA el estado físico.
+        //
+        // Antes se limpiaba (`NO_DISPONIBLE` + `cantidadSurtida: 0`) "para
+        // normalizar el contrato". El efecto real era borrar el hecho de que el
+        // producto SÍ estaba en la bolsa: el cliente que quitó un artículo
+        // disponible lo veía en pantalla como "No disponible", como si fuera un
+        // faltante de inventario.
+        //
+        // Ya no hace falta limpiarlo: todos los guards que leen `estadoSurtido`
+        // filtran `cancelada` primero (ver `cancelacion-linea.util.ts`).
         await tx.itemPedido.update({
           where: { id: it.itemId },
-          data: {
-            cancelada: true,
-            estadoSurtido: 'NO_DISPONIBLE',
-            cantidadSurtida: 0,
-          },
+          data: datosDeRetiroPorDecision({
+            estadoSurtido: previo?.estadoSurtido ?? 'NO_DISPONIBLE',
+            cantidadSurtida: piezasEnBolsa,
+          }),
         });
         cambios.push(`Item #${it.itemId} quitado`);
         continue;
@@ -377,6 +452,7 @@ export class MostradorService {
             precioUnitario: true,
             cantidad: true,
             cantidadSurtida: true,
+            piezasRetiradas: true,
             estadoSurtido: true,
           },
         });
@@ -395,31 +471,24 @@ export class MostradorService {
         // pago y el cliente pagaba 5 piezas de las que bodega solo había
         // apartado 2.
         //
-        // La regla correcta: las piezas que nadie verificó tienen que volver a
-        // bodega. Si la cantidad SUBE, el item pasa a PENDIENTE; si BAJA, lo
-        // apartado se ajusta (el sobrante regresa al anaquel) y sigue COMPLETO.
-        const subeLaCantidad = cantidad > item.cantidadSurtida;
+        // F21 (oct 2026): la decisión de cuánto se lleva y el hallazgo físico
+        // viven en columnas distintas. Antes esta rama escribía
+        // `cantidadSurtida: cantidad` al BAJAR, y eso destruía el hecho de que
+        // había más: con 3 en el anaquel y una decisión de 1, el item quedaba
+        // con `cantidadSurtida: 1` y la pantalla decía "Disponibles 1" — falso.
+        // El helper conserva `cantidadSurtida` intacta y reporta cuánto sobra
+        // para que vuelva al anaquel. Ver `core/ajuste-cantidad.util.ts`.
+        const ajuste = calcularAjusteDeCantidad(item, cantidad);
         await tx.itemPedido.update({
           where: { id: it.itemId },
           data: {
-            cantidad,
+            ...ajuste.data,
             subtotal: new Prisma.Decimal(item.precioUnitario).mul(cantidad),
-            ...(subeLaCantidad
-              ? {
-                  // Hay piezas nuevas que nadie verificó: bodega re-surte.
-                  estadoSurtido: 'PENDIENTE',
-                  cantidadSurtida: 0,
-                }
-              : {
-                  // Todo lo pedido ya estaba apartado; el sobrante vuelve.
-                  estadoSurtido: 'COMPLETO',
-                  cantidadSurtida: cantidad,
-                }),
           },
         });
         cambios.push(
           `Item #${it.itemId}: ${item.cantidad} → ${cantidad} pzas` +
-            (subeLaCantidad ? ' (vuelve a bodega a surtir)' : ''),
+            (ajuste.subeLaCantidad ? ' (vuelve a bodega a surtir)' : ''),
         );
       }
     }
@@ -485,7 +554,13 @@ export class MostradorService {
    */
   async cancelar(pedidoId: number, usuario: UserContext, motivo: string) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
-    this.exigirEstado(pedido.estado, 'cancelar');
+    // F21: mismo criterio que `ajustar` — el cliente está enfrente y el pedido
+    // puede seguir esperando su aprobación en la app.
+    this.exigirEstado(pedido.estado, 'cancelar', [
+      EstadoPedido.ESPERANDO_APROBACION,
+      EstadoPedido.REVISADO,
+      EstadoPedido.EN_ATENCION,
+    ]);
 
     return this.pedidoState.cambiarEstado(
       pedidoId,
@@ -506,66 +581,93 @@ export class MostradorService {
   }
 
   /**
-   * F16 (sep 2026): descarta un aviso de llegada falso.
+   * F22 (oct 2026): cancela pedidos VENCIDOS — la bolsa lleva días apartada, el
+   * cliente no pasó ni contestó el "¿aún lo quieres?".
    *
-   * El cliente avisó que llegó pero no está (o se fue sin recoger). Sin esta
-   * acción, `llegadaDescartadaAt` nunca se escribía — la columna se leía en
-   * seis lugares pero no había forma de poblarla — así que el badge
-   * "EN TIENDA" quedaba pegado y el operador llamaba a alguien que ya no está.
+   * Es `cancelar` en lote con un motivo que el cliente entiende. El motivo es el
+   * texto del correo de cancelación (`PedidoReposicion.motivo` se lee como
+   * `motivoCancelacion`), así que dice QUÉ pasó, no "vencido".
    *
-   * No cambia el estado del pedido: el aviso es una señal de cola, ortogonal
-   * al ciclo de vida. El pedido sigue operable (enviar a pagar / ajustar / cancelar).
-   *
-   * Se registra en el historial para poder auditar cuántos avisos resultan
-   * falsos — es la señal de que el gate de llegada se está usando mal.
+   * Solo cancela lo que de verdad está vencido y sin cliente. Se revalida CADA
+   * pedido en el servidor: la lista que vio el operador pudo envejecer, y entre
+   * tanto el cliente pudo haber llegado, confirmado que sigue interesado o
+   * cancelado él mismo. Cancelar un pedido cuyo cliente acaba de entrar por la
+   * puerta sería peor que no cancelar. Los que ya no aplican se reportan en
+   * `omitidas`, con la razón, en vez de fallar el lote entero.
    */
-  async descartarLlegada(pedidoId: number, usuario: UserContext) {
-    const pedido = await this.access.cargarYValidar(pedidoId, usuario);
+  async cancelarVencidos(usuario: UserContext, ids: number[], motivo?: string) {
+    const u = umbralesSinRecoger(this.config);
+    const limite = new Date(Date.now() - u.vencidoHoras * 3_600_000);
+    const dias = Math.max(1, Math.round(u.vencidoHoras / 24));
+    const motivoFinal =
+      motivo?.trim() ||
+      `Pasaron más de ${dias} día${dias === 1 ? '' : 's'} sin que se recogiera tu pedido y no ` +
+        'recibimos respuesta a nuestro recordatorio.';
 
-    const completo = await this.prisma.pedido.findUnique({
-      where: { id: pedidoId },
-      select: {
-        numeroPedido: true,
-        tiendaId: true,
-        llegadaAnunciadaAt: true,
-        llegadaDescartadaAt: true,
+    const unicos = [...new Set(ids)];
+    const vigentes = await this.prisma.pedido.findMany({
+      where: {
+        id: { in: unicos },
+        // La tienda sale del JWT, nunca del body. ADMIN opera cualquiera.
+        ...(usuario.rol === RolUsuario.ADMIN ? {} : { tiendaId: usuario.tiendaId ?? -1 }),
+        estado: { in: ESTADOS_ESPERA_CLIENTE },
+        esperaClienteDesdeAt: { lt: limite },
+        ...whereAusente(),
       },
+      select: { id: true },
     });
-    if (!completo) throw new BadRequestException('Pedido no encontrado');
+    const elegibles = new Set(vigentes.map((p) => p.id));
 
-    if (!completo.llegadaAnunciadaAt || completo.llegadaDescartadaAt) {
-      throw new BadRequestException(
-        'Este pedido no tiene un aviso de llegada vigente que descartar.',
-      );
+    const canceladas: number[] = [];
+    const omitidas: Array<{ id: number; razon: string }> = [];
+    for (const id of unicos) {
+      if (!elegibles.has(id)) {
+        omitidas.push({
+          id,
+          razon: 'Ya no está vencido, el cliente ya está en la tienda o no es de tu tienda',
+        });
+        continue;
+      }
+      try {
+        await this.cancelar(id, usuario, motivoFinal);
+        canceladas.push(id);
+      } catch (err) {
+        omitidas.push({ id, razon: (err as Error).message });
+      }
     }
 
-    await this.prisma.pedido.update({
-      where: { id: pedidoId },
-      data: {
-        llegadaDescartadaAt: new Date(),
-        llegadaDescartadaPorId: usuario.userId,
-      },
-    });
-
-    await this.prisma.historialPedido.create({
-      data: {
-        pedidoId,
-        estadoAnterior: pedido.estado,
-        estadoNuevo: pedido.estado,
-        observacion: `Aviso de llegada descartado por ${usuario.nombre} (el cliente no estaba)`,
-        usuarioId: usuario.userId,
-        usuarioNombre: usuario.nombre,
-      },
-    });
-
-    // La TV y la consola dejan de mostrarlo como "EN TIENDA".
-    this.realtime.emitToTienda(completo.tiendaId, 'monitor.invalidado', { pedidoId });
-
     this.logger.log(
-      `Pedido ${pedidoId} (${completo.numeroPedido}): aviso de llegada descartado por ${usuario.nombre}`,
+      `Cancelación de vencidos por ${usuario.nombre}: ${canceladas.length} cancelado(s), ` +
+        `${omitidas.length} omitido(s)`,
     );
+    return { canceladas, omitidas };
+  }
 
-    return { ok: true, pedidoId };
+  /**
+   * F16 (sep 2026): descarta un aviso de llegada falso (el cliente no estaba o ya
+   * se fue).
+   *
+   * F22 (oct 2026): la lógica vive en `PresenciaService.descartar`. Antes estaba
+   * aquí y tenía tres huecos: con el pedido ya llamado lo dejaba atascado en
+   * `EN_ATENCION` (invisible en la consola y en la TV, que exigen cliente
+   * presente), no funcionaba con un pedido de kiosko (exigía `llegadaAnunciadaAt`,
+   * que un kiosko nunca tiene) y el cliente no se enteraba de que lo habían quitado
+   * de la cola. Ahora funciona en los dos canales, regresa un pedido llamado a
+   * `REVISADO` y avisa al cliente.
+   */
+  async descartarLlegada(pedidoId: number, usuario: UserContext) {
+    return this.presencia.descartar(pedidoId, usuario);
+  }
+
+  /**
+   * F22 (oct 2026): el operador llamó al cliente y no se presentó.
+   *
+   * No es `devolverACola`: esa es para un error del OPERADOR y conserva el lugar.
+   * Esta es para un cliente que tenía turno y no lo usó, y pasa al final de la
+   * cola. A la segunda vez se descarta su aviso. Ver `PresenciaService.noSePresento`.
+   */
+  async noSePresento(pedidoId: number, usuario: UserContext) {
+    return this.presencia.noSePresento(pedidoId, usuario);
   }
 
   /**
@@ -603,7 +705,7 @@ export class MostradorService {
    *
    * F17 (oct 2026): ahora es una TRANSICIÓN real (`EN_ATENCION → REVISADO`)
    * en vez de limpiar `llamadoAt` a mano. Antes el estado no cambiaba, así que
-   * "llamado" y "en la plancha" eran indistinguibles y el panel "Atendiendo"
+   * "llamado" y "en el área de entrega" eran indistinguibles y el panel "Atendiendo"
    * dependía de una columna que cada query tenía que recordar filtrar.
    *
    * NO se llama `liberar` a propósito: en mostrador ese nombre ya significa
@@ -635,12 +737,8 @@ export class MostradorService {
       { invalidarMonitor: true },
     );
 
-    // `llamadoAt` vuelve a null: es auditoría de la llamada vigente, y ya no
-    // hay ninguna.
-    await this.prisma.pedido.update({
-      where: { id: pedidoId },
-      data: { llamadoAt: null },
-    });
+    // `llamadoAt` (y quién llamó / desde qué mostrador) los limpia la máquina de
+    // estados al salir de EN_ATENCION. Antes se hacía aquí con un `update` aparte.
 
     this.logger.log(
       `Pedido ${pedidoId} (${completo.numeroPedido}): devuelto a la cola por ${usuario.nombre}`,
@@ -696,8 +794,28 @@ export class MostradorService {
         reloj: 'detener',
         // La TV de mostrador y la de bodega tienen que recomputar.
         invalidarMonitor: true,
+        // F22: el cliente está ENFRENTE. "Tu pedido ya está listo en tienda" por
+        // correo a quien está de pie en el mostrador es ruido.
+        sinNotificar: true,
       },
     );
+
+    // F22: el cliente está enfrente, así que queda registrado que llegó. Es lo que
+    // hace que el pedido APAREZCA en la cola: el gate exige cliente presente, y un
+    // pedido web traído desde asesoría sin aviso quedaba oculto en "Sin aviso" con
+    // el cliente de pie esperando — justo el caso que esta acción debía resolver.
+    // (`ajustar` ya lo hacía; esta acción no.)
+    //
+    // Best-effort, por la misma razón que en `ajustar`: la transición ya se aplicó
+    // y no se puede deshacer; un aviso faltante se marca a mano.
+    try {
+      await this.llegada.confirmarDesdeMostrador(pedidoId, usuario);
+    } catch (err) {
+      this.logger.warn(
+        `Pedido ${pedidoId}: se trajo al área de entrega pero no se pudo registrar la llegada ` +
+          `(${(err as Error).message}). Quedará en "Sin aviso" hasta marcarla a mano.`,
+      );
+    }
 
     this.logger.log(
       `Pedido ${pedidoId} (${completo.numeroPedido}): traído al área de entrega desde asesoría ` +
@@ -736,30 +854,18 @@ export class MostradorService {
         // el estado por sí solo lo excluye — el filtro `llamadoAt: null` que
         // hacía falta antes ya no es necesario.
         estado: EstadoPedido.REVISADO,
-        // F18 (oct 2026): el MISMO gate de canal/llegada que `obtenerCola`.
+        // F18 (oct 2026): el MISMO gate de presencia que `obtenerCola`.
         //
         // Sin esto, "Llamar siguiente" podía elegir un pedido WEB **sin aviso
         // de llegada** — que es invisible en la consola. El operador anunciaba
         // en la TV el folio de un cliente que no está en la tienda, y el pedido
         // que sí estaba esperando no se llamaba.
-        OR: [
-          { canalOrigen: CanalOrigen.KIOSKO },
-          {
-            canalOrigen: CanalOrigen.WEB,
-            llegadaAnunciadaAt: { not: null },
-            llegadaDescartadaAt: null,
-          },
-        ],
+        ...wherePresente(),
       },
-      // F18: el MISMO orden que la cola (`obtenerCola`): los que ya avisaron
-      // llegada primero (FIFO entre ellos), luego el resto por antigüedad.
-      // Antes ordenaba solo por `fechaPedido asc`, así que "el siguiente" no
-      // era la primera fila de la pestaña.
-      orderBy: [
-        { llegadaAnunciadaAt: { sort: 'asc', nulls: 'last' } },
-        { fechaPedido: 'asc' },
-        { id: 'asc' },
-      ],
+      // F22: el MISMO orden que la cola (`ORDEN_COLA`): primero llegado, primero
+      // atendido. Antes ordenaba por `llegadaAnunciadaAt nulls last`, así que
+      // todo web con aviso pasaba delante de cualquier kiosko.
+      orderBy: ORDEN_COLA,
       select: { id: true },
     });
     if (!siguiente) {
@@ -773,8 +879,8 @@ export class MostradorService {
    * Guard de las acciones del operador sobre un pedido que ya está en la mesa.
    *
    * F17 (oct 2026): acepta una LISTA de estados, no uno solo. Antes todas las
-   * acciones exigían el estado de plancha, pero con `EN_ATENCION` el pedido
-   * puede estar en dos puntos de la misma etapa: en la plancha esperando al
+   * acciones exigían el estado de área de entrega, pero con `EN_ATENCION` el pedido
+   * puede estar en dos puntos de la misma etapa: en el área de entrega esperando al
    * cliente, o ya llamado y siendo atendido. Casi todas las acciones aplican
    * en los dos; `llamar` es la excepción (solo desde REVISADO — no se llama
    * dos veces al mismo cliente).
@@ -819,9 +925,37 @@ export class MostradorService {
 
     const completo = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      select: { numeroPedido: true, clienteNombre: true, tiendaId: true },
+      select: {
+        numeroPedido: true,
+        clienteNombre: true,
+        tiendaId: true,
+        canalOrigen: true,
+        llegadaAnunciadaAt: true,
+        llegadaDescartadaAt: true,
+      },
     });
     if (!completo) throw new BadRequestException('Pedido no encontrado');
+
+    // F22: solo se llama a un cliente que está en la tienda.
+    //
+    // Antes `llamar` no lo comprobaba. Llamar a un pedido web sin aviso lo movía a
+    // `EN_ATENCION`, donde la consola y la TV (que exigen cliente presente) ya no
+    // lo mostraban: la TV anunciaba un folio de alguien que no estaba y el pedido
+    // quedaba atascado sin que ninguna pantalla lo listara. La UI no ofrece el
+    // botón, pero la API es frontera de confianza.
+    if (!clientePresenteEnTienda(completo)) {
+      throw new BadRequestException(
+        'Este cliente no ha avisado que está en la tienda. Marca su llegada ' +
+          '("El cliente está aquí") antes de llamarlo, o envíalo a pagar directamente ' +
+          'si lo tienes enfrente.',
+      );
+    }
+
+    // F22: desde QUÉ mostrador se llama. La TV dice "Pasa al mostrador N". Con
+    // varios operadores, un "pasa a mostrador" a secas deja al cliente sin saber a
+    // quién acercarse. Tira 400 si la tienda tiene mostradores y el operador no
+    // eligió el suyo; devuelve null en una tienda sin mostradores configurados.
+    const mostrador = await this.mostradores.resolverParaLlamar(usuario.userId, completo.tiendaId);
 
     // `UserContext` no trae apellido (viene del JWT), así que el nombre del
     // operador es el que ya está disponible.
@@ -837,26 +971,37 @@ export class MostradorService {
     //
     // `llamadoAt` se sigue escribiendo, pero ahora es auditoría (cuándo se
     // llamó), no el discriminador del panel.
-    const actualizado = await this.pedidoState.cambiarEstado(
+    //
+    // F22: `llamadoAt`, quién llamó y desde qué mostrador se escriben DENTRO de la
+    // transición (`efectos`). Antes `llamadoAt` era un `update` aparte después del
+    // commit: si fallaba, el pedido quedaba en `EN_ATENCION` sin fecha de llamada.
+    await this.pedidoState.cambiarEstado(
       pedidoId,
       {
         nuevoEstado: EstadoPedido.EN_ATENCION,
-        observacion: `Llamado a mostrador por ${nombreOperador}`,
+        observacion:
+          `Llamado a ${mostrador ? `mostrador ${mostrador.numero}` : 'mostrador'} ` +
+          `por ${nombreOperador}`,
       },
       usuario,
       {
         // El pedido sigue siendo del mostrador: no se toca la asignación (que
         // ya es null en esta etapa) ni el reloj de bodega (ya está detenido).
         invalidarMonitor: true,
+        efectos: async (tx) => {
+          await tx.pedido.update({
+            where: { id: pedidoId },
+            data: {
+              llamadoAt: new Date(),
+              llamadoPorId: usuario.userId > 0 ? usuario.userId : null,
+              llamadoMostradorId: mostrador?.id ?? null,
+            },
+          });
+        },
       },
     );
 
-    await this.prisma.pedido.update({
-      where: { id: pedidoId },
-      data: { llamadoAt: new Date() },
-    });
-
-    // La TV necesita el payload rico (folio + nombre) para la alerta grande;
+    // La TV necesita el payload rico (folio + mostrador) para la alerta grande;
     // `pedido.estado` ya se emitió desde la máquina, pero no lleva estos datos.
     this.realtime.emitToTienda(completo.tiendaId, 'pedido.llamado-mostrador', {
       id: pedidoId,
@@ -864,18 +1009,22 @@ export class MostradorService {
       clienteNombre: completo.clienteNombre,
       operadorId: usuario.userId,
       operadorNombre: nombreOperador,
+      mostradorId: mostrador?.id ?? null,
+      mostradorNumero: mostrador?.numero ?? null,
     });
 
     this.logger.log(
-      `Pedido ${pedidoId} (${completo.numeroPedido}): llamado a mostrador por ${nombreOperador}`,
+      `Pedido ${pedidoId} (${completo.numeroPedido}): llamado a mostrador` +
+        `${mostrador ? ` ${mostrador.numero}` : ''} por ${nombreOperador}`,
     );
 
-    void actualizado;
     return {
       pedidoId,
       numeroPedido: completo.numeroPedido,
       clienteNombre: completo.clienteNombre,
       operadorNombre: nombreOperador,
+      mostradorId: mostrador?.id ?? null,
+      mostradorNumero: mostrador?.numero ?? null,
     };
   }
 

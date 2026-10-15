@@ -10,7 +10,7 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { UserContext } from '../../../types/pedido.types';
-import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
+import { EstadoPedido, EstadoSurtido, Prisma, RolUsuario } from '@prisma/client';
 import {
   rankearSimilares,
   TOP_LISTA,
@@ -21,7 +21,8 @@ import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/p
 import { zonaKey } from '../core/zona.util';
 import { asignadoANombre } from '../core/pedido-mapper';
 import { tiempoAtencionEn, pausarReloj } from '../core/atencion.util';
-import { derivarMotivoReingreso } from '../core/motivo-reingreso';
+import { derivarMotivoReingreso, motivoDeReingreso } from '../core/motivo-reingreso';
+import { piezasPendientesDeRetiro } from '../core/ajuste-cantidad.util';
 import type {
   SurtirJuntosPedidoDto,
   LoteSurtirJuntosDto,
@@ -615,24 +616,31 @@ export class BodegaService {
    * para que el frontend marque los pedidos que se surten juntos.
    */
   /**
-   * F17 (oct 2026): pedidos que volvieron de la PLANCHA y necesitan ajuste.
+   * F17 (oct 2026): pedidos que volvieron de la ÁREA DE ENTREGA y necesitan ajuste.
    *
    * El caso: el bodeguero cerró un surtido, la bolsa quedó en la mesa de
    * mostrador, y el cliente pidió cambios. El pedido vuelve a `EN_REVISION`
    * sin asignar — pero en la tablet de surtido aparecía como una tarjeta más
    * en la cola, indistinguible de un pedido nuevo. El bodeguero no sabía que
-   * ese pedido YA está físicamente en la plancha, ni qué prendas tiene que
-   * sacar de la bolsa y cuáles traer del anaquel.
+   * ese pedido YA está físicamente en el área de entrega.
    *
-   * Este endpoint alimenta la tarjeta de aviso de `/bodega` y le da al
-   * bodeguero exactamente eso: por pedido, la lista de lo que se QUITA de la
-   * bolsa y la de lo que se AGREGA.
+   * Este endpoint alimenta la tarjeta de aviso de `/bodega`.
+   *
+   * Oct 2026 — la tarjeta es un AVISO, no un detalle. Antes devolvía `porQuitar`
+   * y `porAgregar` (las listas de prendas con código/color/talla) y la tarjeta
+   * las pintaba. Eso duplicaba lo que el sheet ya muestra al abrir el pedido, y
+   * las dos copias podían divergir — de hecho divergían: el sheet arma su
+   * checklist con `filter(cancelada)` y no veía el sobrante de un ajuste a la
+   * baja, mientras la tarjeta sí. Ahora el detalle vive SOLO en el sheet, que es
+   * donde el bodeguero trabaja, y aquí queda lo que la tarjeta necesita para
+   * decir "hay trabajo pendiente en este pedido": folio, cliente, canal y por qué
+   * volvió.
    *
    * Solo devuelve pedidos que necesitan ajuste (decisión del usuario: no
    * ruido). Un pedido que volvió porque otro bodeguero lo liberó
    * (`motivoReingreso: 'LIBERADO'`) NO aparece: no hay nada nuevo que surtir.
    */
-  async obtenerAjustesPlancha(tiendaId?: number) {
+  async obtenerAjustesEntrega(tiendaId?: number) {
     if (!tiendaId) return [];
 
     const pedidos = await this.prisma.pedido.findMany({
@@ -640,9 +648,10 @@ export class BodegaService {
         tiendaId,
         estado: EstadoPedido.EN_REVISION,
         asignadoAId: null,
-        // Solo los que traen items nuevos o retirados. `original: false` es la
-        // señal que ya usa el monitor de bodega (ver `motivo-reingreso.ts`).
-        items: { some: { OR: [{ original: false }, { cancelada: true }] } },
+        // Filtro GRUESO: el fino se aplica en memoria, abajo, porque necesita
+        // comparar `piezasRetiradas` (una columna) contra el resultado de un
+        // predicado — algo que un `where` no puede expresar.
+        items: this.pedidoTraeAjuste,
       },
       select: {
         id: true,
@@ -653,13 +662,10 @@ export class BodegaService {
         items: {
           select: {
             id: true,
-            productoCodigo: true,
-            productoNombre: true,
-            corridaNombre: true,
-            tallaNombre: true,
-            colorNombre: true,
             cantidad: true,
             cantidadSurtida: true,
+            piezasRetiradas: true,
+            estadoSurtido: true,
             original: true,
             cancelada: true,
           },
@@ -675,57 +681,85 @@ export class BodegaService {
       orderBy: { fechaPedido: 'asc' },
     });
 
-    return pedidos.map((p) => {
-      // Lo que hay que SACAR de la bolsa: los items que el ajuste canceló.
-      // `cantidad` es la pedida; si bodega había surtido menos, la que de
-      // verdad está en la bolsa es `cantidadSurtida`.
-      const porQuitar = p.items
-        .filter((i) => i.cancelada)
-        .map((i) => ({
-          itemId: i.id,
-          productoCodigo: i.productoCodigo,
-          productoNombre: i.productoNombre,
-          corridaNombre: i.corridaNombre,
-          tallaNombre: i.tallaNombre,
-          colorNombre: i.colorNombre,
-          cantidad: i.cantidadSurtida > 0 ? i.cantidadSurtida : i.cantidad,
-        }));
-
-      // Lo que hay que TRAER del anaquel: los items que el ajuste agregó
-      // (`original: false`) y que nadie ha verificado todavía.
-      const porAgregar = p.items
-        .filter((i) => !i.cancelada && !i.original)
-        .map((i) => ({
-          itemId: i.id,
-          productoCodigo: i.productoCodigo,
-          productoNombre: i.productoNombre,
-          corridaNombre: i.corridaNombre,
-          tallaNombre: i.tallaNombre,
-          colorNombre: i.colorNombre,
-          cantidad: i.cantidad,
-        }));
-
-      const estadoAnterior = p.historial[0]?.estadoAnterior ?? null;
-
-      return {
+    return pedidos
+      .filter((p) => p.items.some((i) => this.itemPideTrabajo(i)))
+      .map((p) => ({
         id: p.id,
         numeroPedido: p.numeroPedido,
         clienteNombre: p.clienteNombre,
         canalOrigen: p.canalOrigen,
         fechaPedido: p.fechaPedido.toISOString(),
-        motivoReingreso:
-          estadoAnterior === EstadoPedido.REVISADO
-            ? ('AJUSTE_MOSTRADOR' as const)
-            : estadoAnterior === EstadoPedido.ESPERANDO_APROBACION
-              ? ('PROPUESTA_VENTAS' as const)
-              : null,
-        porQuitar,
-        porAgregar,
-        // Cuántas piezas hay que mover en total, para el resumen de la tarjeta.
-        piezasPorQuitar: porQuitar.reduce((a, i) => a + i.cantidad, 0),
-        piezasPorAgregar: porAgregar.reduce((a, i) => a + i.cantidad, 0),
-      };
-    });
+        motivoReingreso: motivoDeReingreso(p.historial[0]?.estadoAnterior ?? null),
+      }));
+  }
+
+  /**
+   * F21 (oct 2026): filtro GRUESO de "este pedido PODRÍA traer trabajo de ajuste".
+   *
+   * Tres caminos, y los tres son "hay algo que hacer con la bolsa o el anaquel":
+   *
+   *   `original: false`  → hay productos nuevos que traer del anaquel.
+   *   `cancelada: true`  → hay líneas que salieron y su mercancía vuelve.
+   *   `cantidadSurtida > cantidad` → una línea ACTIVA a la que se le bajó la
+   *                        cantidad: sobra mercancía dentro de la bolsa.
+   *
+   * El tercer término es un FIELD REFERENCE de Prisma (compara dos columnas del
+   * mismo modelo). Antes este caso no se podía expresar y el comentario decía que
+   * se resolvía "abajo, en memoria" — pero eso era falso: un pedido cuyo ÚNICO
+   * ajuste fue bajar la cantidad tiene todos sus items `original: true,
+   * cancelada: false`, así que NINGÚN item satisfacía el `where`, Prisma no lo
+   * devolvía, y el filtro en memoria solo puede DESCARTAR lo que ya llegó, nunca
+   * recuperar lo que se quedó fuera. El resultado: la mercancía de más viajaba al
+   * área de entrega dentro de la bolsa, que es justo lo que la tarjeta existe
+   * para evitar.
+   *
+   * Vive en un getter (y no en una constante de módulo) porque
+   * `prisma.itemPedido.fields` pertenece a la instancia del cliente. Es el MISMO
+   * predicado que usa `obtenerLoteSurtirJuntos` (negado) para excluir estos
+   * pedidos del picking por lote: si divergieran, un pedido con sobrante entraría
+   * al lote, que no tiene checklist de retiro, y avanzaría con prendas de más en
+   * la bolsa.
+   */
+  private get pedidoTraeAjuste(): Prisma.PedidoWhereInput['items'] {
+    return {
+      some: {
+        OR: [
+          { original: false },
+          { cancelada: true },
+          { cantidadSurtida: { gt: this.prisma.itemPedido.fields.cantidad } },
+        ],
+      },
+    };
+  }
+
+  /**
+   * F21 (oct 2026): filtro FINO — ¿este item pide trabajo de verdad?
+   *
+   * Es la corrección de dos huecos que el filtro grueso deja pasar:
+   *
+   *   1. **Ya retirado.** `piezasFueraDeLaBolsa` es posicional: no sabe que el
+   *      bodeguero ya sacó las prendas en un ajuste anterior. Sin
+   *      `piezasPendientesDeRetiro`, un segundo ajuste vuelve a pedir sacar
+   *      mercancía que ya está fuera de la bolsa.
+   *   2. **Ya verificado.** Un item agregado (`original: false`) que bodega YA
+   *      surtió no es trabajo pendiente. El filtro viejo solo miraba `!original`,
+   *      así que mandaba a "traer del anaquel" prendas que ya estaban en la bolsa
+   *      — su propio comentario decía "y que nadie ha verificado todavía", pero
+   *      no lo comprobaba.
+   *
+   * Las dos clases de trabajo son independientes: un pedido puede necesitar solo
+   * traer (item agregado en PENDIENTE) o solo sacar (sobrante de una baja).
+   */
+  private itemPideTrabajo(item: {
+    cancelada: boolean;
+    cantidad: number;
+    cantidadSurtida: number;
+    piezasRetiradas: number;
+    estadoSurtido: EstadoSurtido;
+    original: boolean;
+  }): boolean {
+    if (piezasPendientesDeRetiro(item) > 0) return true;
+    return !item.cancelada && !item.original && item.estadoSurtido === EstadoSurtido.PENDIENTE;
   }
 
   async obtenerSurtirJuntosCola(tiendaId?: number) {
@@ -845,21 +879,26 @@ export class BodegaService {
         asignadoAId: usuarioId,
         estado: { in: estadosEnLote },
         ...(tiendaId ? { tiendaId } : {}),
-        // F17 (oct 2026): los pedidos que volvieron de la PLANCHA se EXCLUYEN
+        // F17 (oct 2026): los pedidos que volvieron de la ÁREA DE ENTREGA se EXCLUYEN
         // del lote a propósito.
         //
         // El lote es picking por zona: el bodeguero va una vez a cada anaquel y
         // agarra tallas de varios pedidos. Un pedido ajustado necesita lo
-        // contrario — ir a la MESA de la plancha, abrir la bolsa y SACAR
+        // contrario — ir a la MESA del área de entrega, abrir la bolsa y SACAR
         // prendas, con un checklist obligatorio. Meterlo aquí lo dejaría sin
         // ese checklist (el lote solo marca "hay todo / no hay") y el pedido
         // avanzaría con prendas de más en la bolsa.
         //
         // Esos pedidos se atienden desde la tarjeta de aviso de `/bodega`, que
         // abre el sheet individual con el checklist de retiro.
-        NOT: {
-          items: { some: { OR: [{ original: false }, { cancelada: true }] } },
-        },
+        //
+        // F21 (oct 2026): el predicado se REUSA (`pedidoTraeAjuste`) en vez de
+        // copiarse. La copia que vivía aquí se había quedado sin el término del
+        // sobrante (`cantidadSurtida > cantidad`), así que un pedido cuyo único
+        // ajuste fue bajar la cantidad SÍ entraba al lote — sin checklist, y con
+        // la mercancía de más todavía en la bolsa. Es exactamente el bug que el
+        // comentario de arriba dice que esto evita.
+        NOT: { items: this.pedidoTraeAjuste },
       },
       select: {
         id: true,

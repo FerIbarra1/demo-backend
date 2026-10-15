@@ -48,14 +48,14 @@ enum RolUsuario {
 // F17 (oct 2026): los 8 procesos del negocio, con los nombres del negocio.
 //
 // Antes el enum tenía nombres técnicos y el negocio hablaba de otra cosa
-// ("plancha", "mesa", "revisado"), así que código y pantalla decían distinto.
+// ("área de entrega", "mesa", "revisado"), así que código y pantalla decían distinto.
 // Ahora dicen lo mismo. El estado NO se persiste en Firebird (el agente lee el
 // campo pero no lo usa para nada), así que el renombrado no toca la
 // sincronización.
 //
 //   1 SOLICITADO            el cliente lo creó. En cola de bodega.
 //   2 EN_REVISION           un bodeguero lo tomó y lo está surtiendo.
-//   3 REVISADO              la PLANCHA. El bodeguero cerró el surtido —completo
+//   3 REVISADO              el ÁREA DE ENTREGA. El bodeguero cerró el surtido —completo
 //                           o incompleto— y la bolsa con el ticket está en la
 //                           mesa de mostrador. Si hay faltantes, el sistema ya
 //                           mandó la propuesta y el cliente debe decidir.
@@ -80,11 +80,11 @@ enum EstadoPedido {
   // cliente responde (aprobar → REVISADO, rechazar → CANCELADO, asesor →
   // EN_ASESORIA).
   //
-  // OJO: este es el único camino que NO pasa por la plancha. El cierre de
+  // OJO: este es el único camino que NO pasa por el área de entrega. El cierre de
   // surtido normal (SurtidoService.confirmarSurtido) manda a REVISADO incluso
   // con faltantes, y crea la propuesta ahí mismo.
   ESPERANDO_APROBACION
-  // F16 (sep 2026) / F17: LA PLANCHA. Bodega ya verificó físicamente los
+  // F16 (sep 2026) / F17: EL ÁREA DE ENTREGA. Bodega ya verificó físicamente los
   // productos y el pedido está apartado en la mesa, esperando al cliente.
   //
   // Por qué un estado y no una columna sobre PENDIENTE_PAGO: con una columna,
@@ -188,6 +188,10 @@ enum TipoNotificacion {
   ASESOR_SOLICITADO
   // F13: el asesor de ventas envió una contrapropuesta al cliente.
   PROPUESTA_VENTAS
+  // F22 (oct 2026): "¿aún quieres tu pedido?". La bolsa lleva días apartada en
+  // el área de entrega y el cliente no ha pasado ni avisado. El correo lleva al
+  // pedido, donde puede confirmar que sigue interesado o cancelarlo.
+  RECORDATORIO_RECOGER
 }
 
 enum EstadoSurtido {
@@ -243,6 +247,9 @@ model Tienda {
   // F11 (ago 2026): ventanillas físicas del módulo de cajeros (1, 2, 3...).
   // Cada ventanilla puede estar asignada a un cajero a la vez.
   ventanillas     Ventanilla[]
+  // F22 (oct 2026): mostradores físicos (1, 2, 3...) donde el operador llama al
+  // cliente por la TV. Misma idea que las ventanillas del cajero.
+  mostradores     Mostrador[]
   // F9 ago 2026: inbox de eventos Firebird→nube por tienda.
   syncEventInbox  SyncEventInbox[]
 
@@ -301,6 +308,11 @@ model Usuario {
   // F11 (ago 2026): ventanilla física donde trabaja el cajero (1:1 nullable).
   // Se setea vía POST /cajero/ventanilla/elegir.
   ventanilla              Ventanilla?
+  // F22 (oct 2026): mostrador físico donde trabaja el operador (1:1 nullable).
+  // Se setea vía POST /pedidos/mostrador/puesto/elegir.
+  mostrador               Mostrador?           @relation("MostradorOperador")
+  // F22: pedidos que este operador mandó a llamar por la TV.
+  pedidosLlamados         Pedido[]             @relation("PedidoLlamadoPor")
 
   @@map("usuarios")
 }
@@ -345,6 +357,33 @@ model Ventanilla {
   @@unique([tiendaId, numero])
   @@index([tiendaId])
   @@map("ventanillas")
+}
+
+// F22 (oct 2026): mostrador físico de la tienda — el equivalente de `Ventanilla`
+// para el operador de mostrador. El admin define cuántos hay por tienda y el
+// operador elige en cuál trabaja al entrar. Cuando llama a un cliente, la TV
+// dice "Pasa al mostrador N".
+//
+// Es un modelo APARTE y no un `tipo` en `Ventanilla`: las queries del cajero
+// listan TODAS las ventanillas de la tienda, y un campo discriminador habría
+// colado los mostradores en su selector (o exigido tocar cada query).
+model Mostrador {
+  id         Int      @id @default(autoincrement())
+  tiendaId   Int      @map("tienda_id")
+  numero     Int // 1, 2, 3... definido por el admin.
+  // FK opcional a Usuario. Si está null, el mostrador está libre.
+  operadorId Int?     @unique @map("operador_id")
+  activa     Boolean  @default(true) @map("activa")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  tienda          Tienda   @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+  operador        Usuario? @relation("MostradorOperador", fields: [operadorId], references: [id], onDelete: SetNull)
+  pedidosLlamados Pedido[] @relation("PedidoLlamadoMostrador")
+
+  @@unique([tiendaId, numero])
+  @@index([tiendaId])
+  @@map("mostradores")
 }
 
 // Sesion eliminada en refactor B2B: auth stateless JWT.
@@ -643,6 +682,25 @@ model Pedido {
   llegadaDescartadaAt      DateTime?     @map("llegada_descartada_at")
   llegadaDescartadaPorId   Int?          @map("llegada_descartada_por_id")
 
+  // F22 (oct 2026): la cola del mostrador es "primero llegado, primero atendido".
+  //
+  // `presenteDesdeAt` es DESDE CUÁNDO está el cliente físicamente esperando:
+  //   - KIOSKO: la hora del pedido (el cliente estaba ahí al hacerlo).
+  //   - WEB:    la hora del aviso de llegada.
+  // Es la ÚNICA llave de orden de la cola, la consola y la TV. Antes se ordenaba
+  // por `llegadaAnunciadaAt nulls last`, y como un pedido de kiosko no tiene
+  // aviso, TODO web con aviso pasaba delante de cualquier kiosko aunque el
+  // kiosko llevara media hora esperando.
+  //
+  // Se conserva al "Devolver a la cola" (es el que no pierde su lugar) y se
+  // reinicia al "No se presentó" (pasa al final) y cuando el cliente vuelve a
+  // avisar tras un descarte (llegó de verdad ahora, no hace dos horas).
+  presenteDesdeAt          DateTime?     @map("presente_desde_at")
+  // Cuántas veces el mostrador descartó el aviso de ESTE pedido. A la segunda el
+  // botón web se bloquea: solo el kiosko o el operador pueden volver a marcar la
+  // llegada (un cliente que avisa en falso dos veces ya no se cree por web).
+  llegadaDescartes         Int           @default(0) @map("llegada_descartes")
+
   // F16 (sep 2026): "Atendiendo" del monitor de mostrador.
   //
   // Cuando el operador manda a llamar a un cliente, el pedido deja la cola de
@@ -655,6 +713,30 @@ model Pedido {
   // de EN_MOSTRADOR, así que no puede quedar un pedido "atendido" en otro
   // estado (ver el comentario en ese archivo).
   llamadoAt                DateTime?     @map("llamado_at")
+  // F22 (oct 2026): QUIÉN llamó y A QUÉ MOSTRADOR. La TV dice "Pasa al mostrador
+  // 2" y la consola de los demás operadores dice "Lo atiende Ana". Se escriben
+  // dentro de la misma transacción que la transición a EN_ATENCION y se limpian
+  // al salir de ella (junto con `llamadoAt`).
+  llamadoPorId             Int?          @map("llamado_por_id")
+  llamadoMostradorId       Int?          @map("llamado_mostrador_id")
+  // Cuántas veces se llamó a este pedido y el cliente no se presentó. A la
+  // segunda se descarta su aviso de llegada.
+  llamadasFallidas         Int           @default(0) @map("llamadas_fallidas")
+
+  // F22 (oct 2026): la bolsa está en el área de entrega esperando al cliente.
+  //
+  // Es desde cuándo el pedido está en REVISADO / ESPERANDO_APROBACION. De aquí
+  // sale (a) el recordatorio "¿aún lo quieres?" y (b) la lista de pedidos sin
+  // recoger que el operador puede cancelar. NO se reinicia al devolver a la cola
+  // ni al llamar: es la antigüedad de la ESPERA, no de la última acción.
+  esperaClienteDesdeAt     DateTime?     @map("espera_cliente_desde_at")
+  // Cuándo se mandó el correo "¿aún quieres tu pedido?". Una sola vez por ciclo
+  // de espera; se limpia si el cliente confirma que sigue interesado.
+  recordatorioRecogerAt    DateTime?     @map("recordatorio_recoger_at")
+  // Cuántas veces el cliente contestó "sí, lo quiero". Tope de 2: un cliente
+  // que posterga para siempre una bolsa apartada no puede hacerlo sin que el
+  // mostrador lo decida.
+  interesConfirmadoCount   Int           @default(0) @map("interes_confirmado_count")
 
   // F15 (sep 2026): marcas de agua de lectura del chat (modelo WhatsApp/Telegram).
   //   * Por LADO, no por usuario (hay UN asesor por tienda, así que "tienda leyó" es la
@@ -689,6 +771,8 @@ model Pedido {
   asignadoA            Usuario?                 @relation("PedidoBodeguero", fields: [asignadoAId], references: [id], onDelete: SetNull)
   cajeroAsignado       Usuario?                 @relation("PedidoCajero", fields: [cajeroAsignadoId], references: [id], onDelete: SetNull)
   llegadaDescartadaPor Usuario?                 @relation("PedidoLlegadaDescartada", fields: [llegadaDescartadaPorId], references: [id], onDelete: SetNull)
+  llamadoPor           Usuario?                 @relation("PedidoLlamadoPor", fields: [llamadoPorId], references: [id], onDelete: SetNull)
+  llamadoMostrador     Mostrador?               @relation("PedidoLlamadoMostrador", fields: [llamadoMostradorId], references: [id], onDelete: SetNull)
   items                ItemPedido[]
   historial            HistorialPedido[]
   actividades          LogActividad[]
@@ -716,6 +800,10 @@ model Pedido {
   // F16: el panel "Atendiendo" de la TV. El WHERE se implementa como índice
   // parcial en la migración SQL (Prisma no soporta @@index.where).
   @@index([tiendaId, llamadoAt])
+  // F22: la llave de orden de la cola de mostrador.
+  @@index([tiendaId, estado, presenteDesdeAt])
+  // F22: el barrido de pedidos que esperan al cliente (recordatorio y vencidos).
+  @@index([estado, esperaClienteDesdeAt])
   @@map("pedidos")
 }
 
@@ -778,6 +866,28 @@ model ItemPedido {
   cantidadSurtida Int           @default(0) @map("cantidad_surtida")
   estadoSurtido   EstadoSurtido @default(PENDIENTE) @map("estado_surtido")
   surtidoAt       DateTime?     @map("surtido_at")
+
+  // F21 (oct 2026): cuántas piezas de esta línea YA se sacaron de la bolsa del
+  // área de entrega.
+  //
+  // El predicado `piezasFueraDeLaBolsa` es POSICIONAL: mira `cantidadSurtida`
+  // contra `cantidad`. Una vez que el bodeguero saca las prendas, NADA en la BD
+  // cambia — el checklist del sheet vive en estado local y se pierde al cerrar.
+  // Si el pedido vuelve a bodega por un segundo ajuste, el predicado reporta otra
+  // vez las mismas prendas y el bodeguero va a buscar mercancía que ya sacó.
+  //
+  // Esta columna registra el hecho. `piezasPendientesDeRetiro` resta lo hecho de
+  // lo que hay que hacer, y es la que gobierna la tarjeta y el checklist.
+  //
+  // Es un CONTEO y no un flag booleano a propósito: si el ajuste 1 quita 2 y el
+  // ajuste 2 quita 1 más, el total fuera de la bolsa es 3 — un `retiradoAt` ya
+  // puesto reportaría 0 y la tercera prenda nunca saldría de la bolsa.
+  //
+  // OJO con el nombre: `piezasRetiradas` también nombra una variable local (un
+  // `Map<itemId, piezas>`) en `aplicar-propuesta-ventas.util.ts` y en
+  // `retiro-reposicion.spec.ts`. Es otra cosa — ese mapa es el transporte hacia
+  // `crearDesdeAjuste`. No confundir los dos.
+  piezasRetiradas Int @default(0) @map("piezas_retiradas")
 
   // B2B surtido B2.6: motivo textual del bodeguero al marcar el item
   // (ej. "No hay talla M", "Sólo hay 2 piezas"). Se propaga al PedidoRevisionItem.motivo

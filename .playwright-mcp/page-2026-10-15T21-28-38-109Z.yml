@@ -1,0 +1,105 @@
+- generic [ref=f1e1]:
+  - generic [aria-hidden] [ref=f1e18]:
+    - banner [ref=f1e19]:
+      - generic [ref=f1e21]:
+        - navigation [ref=f1e23]:
+          - link [ref=f1e24] [cursor=pointer]:
+            - /url: /mostrador
+            - text: Mostrador
+        - link [ref=f1e26] [cursor=pointer]:
+          - /url: /mostrador
+        - button [ref=f1e29] [cursor=pointer]:
+          - generic [ref=f1e30]: UM
+          - generic [ref=f1e31]: Usuario
+    - generic:
+      - generic:
+        - generic:
+          - heading [level=2]: Buscar
+          - button
+        - generic:
+          - generic:
+            - textbox:
+              - /placeholder: ¿Qué estás buscando?
+          - paragraph: Presiona Enter para buscar o ESC para cerrar
+        - generic:
+          - paragraph: Búsquedas populares
+          - generic:
+            - button: Playeras
+            - button: Polos
+            - button: Manga larga
+            - button: Camisetas básicas
+    - main [ref=f1e32]:
+      - generic [ref=f1e33]:
+        - generic [ref=f1e34]:
+          - generic [ref=f1e35]:
+            - heading [level=1] [ref=f1e37]: Mostrador
+            - paragraph [ref=f1e38]: Revisa el pedido con el cliente y entrégalo cuando esté pagado
+          - button [ref=f1e40] [cursor=pointer]: Elegir mostrador
+        - generic [ref=f1e41]:
+          - textbox [ref=f1e42]:
+            - /placeholder: Buscar por folio o nombre del cliente…
+          - button [ref=f1e44] [cursor=pointer]
+        - tablist [ref=f1e46]:
+          - tab [selected] [ref=f1e47] [cursor=pointer]:
+            - text: Por revisar
+            - generic [ref=f1e48]: "2"
+          - tab [ref=f1e49] [cursor=pointer]:
+            - text: Sin aviso
+            - generic [ref=f1e50]: "1"
+            - generic [ref=f1e51]: 1 vencido
+          - tab [ref=f1e52] [cursor=pointer]:
+            - text: Por entregar
+            - generic [ref=f1e53]: "0"
+        - button [ref=f1e55] [cursor=pointer]: Llamar siguiente
+        - generic [ref=f1e56]:
+          - link [ref=f1e57] [cursor=pointer]:
+            - /url: /mostrador/115
+            - generic [ref=f1e65]:
+              - generic [ref=f1e66]:
+                - paragraph [ref=f1e67]: "Pedido #115"
+                - generic [ref=f1e68]: Kiosko
+                - generic [ref=f1e69]: EN TIENDA · 42 min
+              - paragraph [ref=f1e70]: Juan Kiosko
+              - paragraph [ref=f1e71]: 0 producto(s) · $350.00
+          - link [ref=f1e74] [cursor=pointer]:
+            - /url: /mostrador/116
+            - generic [ref=f1e81]:
+              - generic [ref=f1e82]:
+                - paragraph [ref=f1e83]: "Pedido #116"
+                - generic [ref=f1e84]: Web
+                - generic [ref=f1e85]: EN TIENDA · 7 min
+              - paragraph [ref=f1e86]: María Web
+              - paragraph [ref=f1e87]: 0 producto(s) · $500.00
+          - generic [ref=f1e92]:
+            - paragraph [ref=f1e93]:
+              - text: Mostrando
+              - generic [ref=f1e94]: 1–2
+              - text: de 2 pedidos por revisar
+            - generic [ref=f1e95]:
+              - generic [ref=f1e96]: Ver
+              - combobox [ref=f1e98] [cursor=pointer]
+    - contentinfo [ref=f1e99]:
+      - generic [ref=f1e100]: © 2026 Punto Textil Mayoreo - Sistema de Mostrador
+  - button [ref=f1e151] [cursor=pointer]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f1e14] [cursor=pointer]
+  - alert [ref=f1e200]
+  - dialog [ref=f1e204]:
+    - generic [ref=f1e205]:
+      - heading "Elige tu mostrador" [level=2] [ref=f1e206]
+      - paragraph [ref=f1e207]: Cuando llames a un cliente, la pantalla le dirá a cuál pasar. No puedes elegir uno que ya ocupa otro operador.
+    - generic [ref=f1e208]:
+      - button [active] [ref=f1e209] [cursor=pointer]:
+        - generic [ref=f1e216]:
+          - paragraph [ref=f1e217]: Mostrador
+          - paragraph [ref=f1e218]: "1"
+        - generic [ref=f1e219]: Libre
+        - paragraph [ref=f1e222]: Disponible para tomar
+      - button [ref=f1e223] [cursor=pointer]:
+        - generic [ref=f1e230]:
+          - paragraph [ref=f1e231]: Mostrador
+          - paragraph [ref=f1e232]: "2"
+        - generic [ref=f1e233]: Libre
+        - paragraph [ref=f1e236]: Disponible para tomar
+    - button "Ahora no" [ref=f1e238] [cursor=pointer]
+    - button "Close" [ref=f1e239] [cursor=pointer]

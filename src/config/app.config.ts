@@ -43,6 +43,21 @@ export default registerAs('app', () => ({
     // true para MinIO y la mayoría de self-hosted; false para AWS/R2.
     forcePathStyle: process.env.AWS_S3_FORCE_PATH_STYLE === 'true',
   },
+  // F22 (oct 2026): pedidos apartados en el área de entrega que nadie recoge.
+  // Horas contadas desde que la bolsa quedó esperando al cliente
+  // (`Pedido.esperaClienteDesdeAt`).
+  pedidosSinRecoger: {
+    // A las N horas se le manda al cliente "¿aún quieres tu pedido?" (una vez).
+    recordatorioHoras: parseInt(process.env.PEDIDO_RECORDATORIO_HORAS || '24', 10),
+    // A las N horas el pedido aparece como VENCIDO en la consola de mostrador, y el
+    // operador puede cancelarlo (el cliente recibe el correo con el motivo).
+    // Debe ser mayor que `recordatorioHoras`: el cliente tiene que tener tiempo de
+    // contestar entre el aviso y el vencimiento.
+    vencidoHoras: parseInt(process.env.PEDIDO_VENCIDO_HORAS || '72', 10),
+    // Un aviso de llegada que nadie atendió en N horas caduca solo: el cliente que
+    // avisó y se fue no puede quedar en la TV de mañana.
+    presenciaCaducaHoras: parseInt(process.env.PRESENCIA_CADUCA_HORAS || '8', 10),
+  },
   smtp: {
     host: process.env.SMTP_HOST || 'localhost',
     port: parseInt(process.env.SMTP_PORT || '1025', 10),

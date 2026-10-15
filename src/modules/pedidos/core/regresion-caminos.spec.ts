@@ -141,6 +141,7 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
             historial.push({ observacion: args.data.observacion });
             return {};
           }),
+          count: jest.fn(async () => 0),
         },
         pedidoPendienteEnvio: { findFirst: jest.fn(async () => null), create: jest.fn() },
       };
@@ -168,17 +169,12 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
 
       let efectosCorrieron = false;
       await expect(
-        svc.cambiarEstado(
-          1,
-          { nuevoEstado: EstadoPedido.REVISADO } as never,
-          operador,
-          {
-            permitirMismoEstado: true,
-            efectos: async () => {
-              efectosCorrieron = true;
-            },
-          } as never,
-        ),
+        svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.REVISADO } as never, operador, {
+          permitirMismoEstado: true,
+          efectos: async () => {
+            efectosCorrieron = true;
+          },
+        } as never),
       ).resolves.toBeDefined();
 
       // Los efectos SÍ corren: son el punto de la opción (aplicar los items de
@@ -204,12 +200,9 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
       const enviar = jest.fn();
       (svc as unknown as { notifications: { enviar: jest.Mock } }).notifications = { enviar };
 
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.REVISADO } as never,
-        operador,
-        { permitirMismoEstado: true } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.REVISADO } as never, operador, {
+        permitirMismoEstado: true,
+      } as never);
 
       // Sin esto, cada vez que el operador resolviera un faltante el cliente
       // recibiría otro "tu pedido ya está listo en tienda".
@@ -244,7 +237,12 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
             return { count: 1 };
           }),
         },
-        historialPedido: { create: jest.fn().mockResolvedValue({}) },
+        historialPedido: {
+          create: jest.fn().mockResolvedValue({}),
+          // F22: el correo "listo en tienda" es del PRIMER paso a REVISADO; la máquina
+          // cuenta cuántas veces ya estuvo ahí.
+          count: jest.fn().mockResolvedValue(0),
+        },
         pedidoPendienteEnvio: { findFirst: jest.fn(), create: jest.fn() },
       };
 
@@ -259,12 +257,9 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
         {} as never,
       );
 
-      await svc.cambiarEstado(
-        1,
-        { nuevoEstado: EstadoPedido.REVISADO } as never,
-        operador,
-        { asignacion: 'limpiar' } as never,
-      );
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.REVISADO } as never, operador, {
+        asignacion: 'limpiar',
+      } as never);
 
       expect(escrituras[0]).toHaveProperty('llamadoAt', null);
     });

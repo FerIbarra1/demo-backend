@@ -8,6 +8,7 @@ import { PedidoConsultaController } from '../pedidos/core/pedido-consulta.contro
 import { PedidosModule } from '../pedidos/pedidos.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { KioskoModule } from '../kiosko/kiosko.module';
+import { MostradoresModule } from '../mostradores/mostradores.module';
 
 /**
  * Módulo Mostrador.
@@ -23,6 +24,10 @@ import { KioskoModule } from '../kiosko/kiosko.module';
  *     llamar, enviar a pagar, ajustar, cancelar, entregar.
  *   - `MostradorMonitorController` (rol MOSTRADOR_MONITOR) — la TV de la pared,
  *     solo lectura.
+ *
+ * F22 (oct 2026): importa `MostradoresModule` — los mostradores físicos (1, 2, 3...)
+ * que el admin configura por tienda y entre los que el operador elige al entrar.
+ * `llamar` los usa para que la TV diga "Pasa al mostrador N".
  *
  * Oct 2026: importa `KioskoModule` para reutilizar
  * `KioskoLlegadaService.confirmarDesdeMostrador` — el operador puede marcar la
@@ -46,12 +51,8 @@ import { KioskoModule } from '../kiosko/kiosko.module';
  * con los de mostrador, así que el orden de registro no importa aquí.
  */
 @Module({
-  imports: [PedidosModule, RealtimeModule, KioskoModule],
-  controllers: [
-    MostradorMonitorController,
-    MostradorController,
-    PedidoConsultaController,
-  ],
+  imports: [PedidosModule, RealtimeModule, KioskoModule, MostradoresModule],
+  controllers: [MostradorMonitorController, MostradorController, PedidoConsultaController],
   providers: [MostradorService, MostradorQueryService, MostradorMonitorService],
 })
 export class MostradorModule {}

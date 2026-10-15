@@ -3,6 +3,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoReposicion, Prisma } from '@prisma/client';
+import { piezasEnLaBolsa } from '../core/ajuste-cantidad.util';
 
 /**
  * F13 (sep 2026): lista de reposición de bodega.
@@ -19,6 +20,19 @@ import { EstadoReposicion, Prisma } from '@prisma/client';
  * 1:1 con Pedido. Solo se crea al cancelar por rechazo del cliente; una
  * cancelación que viene de Firebird (SWCANCEL) no la crea, porque en ese caso
  * el ERP ya sabe que el pedido murió.
+ *
+ * Y SOLO DE LO QUE YA SALIÓ DE LAS MANOS DE BODEGA (oct 2026). Si el pedido se
+ * cancela mientras bodega lo tiene (sin surtir o a medias), el bodeguero lo trae
+ * en las manos, recibe el aviso de cancelación (`pedido.cancelado-en-bodega`) y
+ * lo regresa al anaquel él mismo: no hay lista. Ver `bolsaEnManosDeBodega`.
+ *
+ * LA REPOSICIÓN ES SOLO DE PEDIDOS CANCELADOS O RECHAZADOS (oct 2026). Un AJUSTE
+ * (de mostrador o de ventas) NO genera reposición: el pedido sigue vivo y las
+ * piezas que salen las saca el bodeguero de la bolsa del área de entrega y las
+ * regresa al anaquel él mismo, con el checklist de retiro, mientras hace el
+ * ajuste. F17 hacía lo contrario (`crearDesdeAjuste`): además de sacarlas, las
+ * listaba en reposición, así que el bodeguero las acomodaba y la lista le
+ * pedía acomodarlas otra vez. El método se eliminó; no lo recrees.
  */
 @Injectable()
 export class ReposicionService {
@@ -36,11 +50,29 @@ export class ReposicionService {
    *
    * Idempotente: si ya existe una entrada para el pedido, no hace nada (un
    * segundo rechazo no debería duplicar la lista).
+   *
+   * Solo entran las piezas que HAY en la bolsa del área de entrega
+   * (`cantidadSurtida − piezasRetiradas`). Quedan fuera:
+   *
+   *   - lo que nadie ha surtido (`cantidadSurtida: 0`): no hay nada que devolver.
+   *     Antes el código caía a `cantidad` (lo PEDIDO) y un pedido cancelado en
+   *     SOLICITADO mandaba a bodega a "reponer" mercancía que jamás salió del
+   *     anaquel;
+   *   - lo que un ajuste anterior ya sacó: el bodeguero lo regresó él mismo.
+   *
+   * `opts.bolsaEnManosDeBodega`: el pedido se cancela mientras bodega lo tiene
+   * (ver `bolsaEnManosDeBodega`). No hay nada que listar — el bodeguero lo trae en
+   * las manos y lo regresa solo — pero la fila SE CREA igual, ya resuelta
+   * (`REPUESTO`, sin piezas): `motivo` no es solo del piso, `NotificationsService`
+   * lo lee como `motivoCancelacion` para el correo de cancelación, así que omitir
+   * la fila le quitaría al cliente la razón. Resuelta, no aparece en la lista
+   * pendiente ni en el contador.
    */
   async crearDesdePedido(
     tx: Prisma.TransactionClient,
     pedidoId: number,
     motivo?: string,
+    opts: { bolsaEnManosDeBodega?: boolean } = {},
   ): Promise<void> {
     const existente = await tx.pedidoReposicion.findUnique({
       where: { pedidoId },
@@ -55,141 +87,63 @@ export class ReposicionService {
     // apartadas. Antes se filtraba `cancelada: false`, así que los items que
     // bodega marcó `NO_DISPONIBLE` al cerrar el surtido **nunca entraban a la
     // lista** — esa mercancía no volvía al anaquel por ningún camino.
-    //
-    // `cantidad` se normaliza a lo que de verdad salió del anaquel
-    // (`cantidadSurtida`), igual que en `crearDesdeAjuste`.
-    const items = await tx.itemPedido.findMany({
-      where: {
-        pedidoId,
-        // Activos, o cancelados con piezas apartadas (esas también vuelven).
-        OR: [{ cancelada: false }, { cancelada: true, cantidadSurtida: { gt: 0 } }],
-      },
-      select: {
-        id: true,
-        productoNombre: true,
-        productoCodigo: true,
-        corridaNombre: true,
-        tallaNombre: true,
-        colorNombre: true,
-        cantidad: true,
-        cantidadSurtida: true,
-        estadoSurtido: true,
-      },
-      orderBy: { id: 'asc' },
-    });
+    const items = opts.bolsaEnManosDeBodega
+      ? []
+      : await tx.itemPedido.findMany({
+          where: { pedidoId, cantidadSurtida: { gt: 0 } },
+          select: {
+            id: true,
+            productoNombre: true,
+            productoCodigo: true,
+            corridaNombre: true,
+            tallaNombre: true,
+            colorNombre: true,
+            cantidad: true,
+            cantidadSurtida: true,
+            piezasRetiradas: true,
+            estadoSurtido: true,
+          },
+          orderBy: { id: 'asc' },
+        });
 
+    // `cantidad` se NORMALIZA a lo que de verdad está en la bolsa, que es lo
+    // único que puede volver al anaquel.
+    //
+    // F21 (oct 2026): antes guardaba el item crudo, así que un pedido colapsado
+    // (20 pedidas, 10 apartadas) le pedía a bodega reponer 20 piezas de las que
+    // solo salieron 10.
+    //
+    // Oct 2026 (ajustes): además se DESCUENTA lo que el bodeguero ya sacó en un
+    // ajuste anterior (`piezasRetiradas`). Esas piezas ya las regresó él al
+    // anaquel; sin descontarlas, un pedido ajustado que luego se cancela las
+    // listaba otra vez — el mismo "ya lo acomodé y me vuelve a salir", ahora por
+    // la puerta de la cancelación. Una línea que se quitó en un ajuste y cuyas
+    // piezas ya se sacaron queda en 0 y no entra a la lista.
+    const aReponer = items
+      .map(({ piezasRetiradas, ...i }) => ({
+        ...i,
+        cantidad: piezasEnLaBolsa({ ...i, piezasRetiradas }),
+      }))
+      .filter((i) => i.cantidad > 0);
+
+    // Sin nada que devolver la fila nace resuelta: ver el comentario del método.
+    const hayQueReponer = aReponer.length > 0;
     await tx.pedidoReposicion.create({
       data: {
         pedidoId,
-        estado: EstadoReposicion.PENDIENTE,
-        items: items as unknown as Prisma.InputJsonValue,
+        estado: hayQueReponer ? EstadoReposicion.PENDIENTE : EstadoReposicion.REPUESTO,
+        repuestoAt: hayQueReponer ? null : new Date(),
+        items: aReponer as unknown as Prisma.InputJsonValue,
         motivo: motivo ?? null,
       },
     });
 
-    this.logger.log(`Pedido ${pedidoId}: entrada de reposición creada (${items.length} item(s))`);
-  }
-
-  /**
-   * F17 (oct 2026): reposición de lo que un AJUSTE retiró del pedido.
-   *
-   * A diferencia de `crearDesdePedido` (que corre al CANCELAR y snapshotea
-   * TODOS los items activos porque el pedido entero muere), aquí el pedido
-   * sigue vivo: solo salieron algunas prendas. El snapshot es únicamente de
-   * esas — las que el ajuste canceló y que están físicamente en la bolsa de la
-   * plancha.
-   *
-   * Sin esto, un ajuste que quita 5 prendas no generaba ninguna lista: la
-   * mercancía se quedaba apartada sin que nadie la devolviera al anaquel.
-   *
-   * Idempotente por pedido (mismo `pedidoId` @unique que `crearDesdePedido`).
-   * Si el pedido YA tiene una reposición (p. ej. de una cancelación anterior),
-   * se AGREGAN los items nuevos al JSON en vez de descartarlos: el pedido puede
-   * acumular retiros de varios ajustes.
-   */
-  async crearDesdeAjuste(
-    tx: Prisma.TransactionClient,
-    pedidoId: number,
-    motivo?: string,
-    /**
-     * F17: las piezas que había en la bolsa al momento de retirar cada item,
-     * capturadas ANTES de que el ajuste pusiera `cantidadSurtida: 0`.
-     *
-     * Hace falta pasarlas porque el ajuste borra ese campo al cancelar, así que
-     * releerlo aquí devolvería 0 y la lista saldría vacía (bug encontrado en la
-     * prueba end-to-end). Si no se pasa, se cae al `cantidadSurtida` del item,
-     * que sirve para items cancelados por otros caminos.
-     */
-    piezasPorItem?: Map<number, number>,
-  ): Promise<void> {
-    // Los items retirados: cancelados y con algo que devolver al anaquel.
-    const retirados = await tx.itemPedido.findMany({
-      where: { pedidoId, cancelada: true },
-      select: {
-        id: true,
-        productoNombre: true,
-        productoCodigo: true,
-        corridaNombre: true,
-        tallaNombre: true,
-        colorNombre: true,
-        cantidad: true,
-        cantidadSurtida: true,
-        estadoSurtido: true,
-      },
-      orderBy: { id: 'asc' },
-    });
-
-    // La cantidad a reponer es lo que SALIÓ de la bolsa, no lo que el cliente
-    // había pedido. Se prefiere el valor capturado antes del ajuste; si no
-    // viene, el `cantidadSurtida` del item.
-    const aReponer = retirados
-      .map((i) => ({
-        ...i,
-        cantidad: piezasPorItem?.get(i.id) ?? i.cantidadSurtida,
-      }))
-      .filter((i) => i.cantidad > 0);
-    if (aReponer.length === 0) return;
-
-    const existente = await tx.pedidoReposicion.findUnique({
-      where: { pedidoId },
-      select: { id: true, items: true },
-    });
-
-    if (!existente) {
-      await tx.pedidoReposicion.create({
-        data: {
-          pedidoId,
-          estado: EstadoReposicion.PENDIENTE,
-          items: aReponer as unknown as Prisma.InputJsonValue,
-          motivo: motivo ?? 'Ajuste del pedido',
-        },
-      });
-      this.logger.log(
-        `Pedido ${pedidoId}: reposición por ajuste creada (${aReponer.length} item(s))`,
-      );
-      return;
-    }
-
-    // Ya había una lista. Si sigue PENDIENTE, se le suman los retiros nuevos
-    // (sin duplicar los que ya estaban). Si ya se confirmó como REPUESTO, se
-    // reabre: hay mercancía nueva que volver a acomodar.
-    const previos = Array.isArray(existente.items) ? (existente.items as any[]) : [];
-    const idsPrevios = new Set(previos.map((p) => p.id));
-    const nuevos = aReponer.filter((i) => !idsPrevios.has(i.id));
-    if (nuevos.length === 0) return;
-
-    await tx.pedidoReposicion.update({
-      where: { pedidoId },
-      data: {
-        items: [...previos, ...nuevos] as unknown as Prisma.InputJsonValue,
-        estado: EstadoReposicion.PENDIENTE,
-        repuestoAt: null,
-        repuestoPorId: null,
-      },
-    });
-
     this.logger.log(
-      `Pedido ${pedidoId}: ${nuevos.length} item(s) agregados a la reposición existente`,
+      hayQueReponer
+        ? `Pedido ${pedidoId}: entrada de reposición creada (${aReponer.length} item(s))`
+        : `Pedido ${pedidoId}: nada que reponer (${
+            opts.bolsaEnManosDeBodega ? 'bodega lo tiene en las manos' : 'sin piezas en la bolsa'
+          })`,
     );
   }
 

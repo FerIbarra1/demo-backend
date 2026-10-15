@@ -16,6 +16,7 @@ import { PedidoEntregado } from './templates/PedidoEntregado';
 import { PedidoEnviado } from './templates/PedidoEnviado';
 import { PedidoListoEnTienda } from './templates/PedidoListoEnTienda';
 import { PedidoRecibido } from './templates/PedidoRecibido';
+import { PedidoRecordatorioRecoger } from './templates/PedidoRecordatorioRecoger';
 import { ResetPassword } from './templates/ResetPassword';
 import { RevisionPropuesta, type OrigenPropuesta } from './templates/RevisionPropuesta';
 
@@ -90,6 +91,13 @@ export const mailTemplates = {
       pedidoUrl: string;
     } & MailContext,
   ): ReactElement => PedidoListoEnTienda(props),
+  // F22: "¿aún quieres tu pedido?" — la bolsa lleva días esperando.
+  PedidoRecordatorioRecoger: (
+    props: {
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+    } & MailContext,
+  ): ReactElement => PedidoRecordatorioRecoger(props),
   RevisionPropuesta: (
     props: {
       pedido: PedidoEmailData;
@@ -148,6 +156,8 @@ export const mailSubjects = {
   PEDIDO_RECIBIDO: (n: string) => `Recibimos tu pedido ${n}`,
   // F16: el pedido está apartado en tienda esperando revisión del cliente.
   LISTO_EN_TIENDA: (n: string) => `Tu pedido ${n} ya está listo en tienda`,
+  // F22: la bolsa lleva días apartada y el cliente no ha respondido.
+  RECORDATORIO_RECOGER: (n: string) => `¿Aún quieres tu pedido ${n}?`,
   // F13: la propuesta puede venir de bodega (faltantes) o del asesor de ventas
   // (contrapropuesta negociada). El subject es neutro para cubrir ambos.
   REVISION_PROPUESTA: (n: string) => `Tu pedido ${n} tiene una propuesta`,

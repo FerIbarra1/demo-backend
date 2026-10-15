@@ -10,6 +10,8 @@ import { StorageService } from '../../imagenes/storage.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
+import { ReposicionService } from '../reposicion/reposicion.service';
+import { bolsaEnManosDeBodega } from '../core/bolsa-en-bodega.util';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
 import { motivoNoAvisable } from '../core/llegada-aviso.util';
 import { construirItemPedido } from '../core/item-pedido.util';
@@ -22,6 +24,8 @@ import {
 } from '../../precios/precio-lista.util';
 import { KioskoService } from '../../kiosko/kiosko.service';
 import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
+import { PresenciaService } from '../core/presencia.service';
+import { SinRecogerService } from '../core/sin-recoger.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, TipoNotificacion, Prisma, CanalOrigen, ModoEntrega } from '@prisma/client';
@@ -46,6 +50,16 @@ export class ClienteService {
     private readonly kioskoService: KioskoService,
     private readonly kioskoLlegada: KioskoLlegadaService,
     private readonly precios: PreciosService,
+    /**
+     * F20 (oct 2026): la lista de reposición. El cliente puede cancelar su
+     * pedido, y la mercancía que bodega había apartado tiene que volver al
+     * anaquel — sin esto, esa cancelación no generaba trabajo para nadie.
+     */
+    private readonly reposicion: ReposicionService,
+    /** F22: retirar el aviso de llegada propio. */
+    private readonly presencia: PresenciaService,
+    /** F22: "sí, aún quiero mi pedido". */
+    private readonly sinRecoger: SinRecogerService,
   ) {}
 
   async crearPedido(
@@ -223,6 +237,11 @@ export class ClienteService {
             canalOrigen: canalOrigenFinal,
             kioskoId: kioskoIdFinal,
             modoEntrega: modoEntregaFinal,
+            // F22: un pedido de kiosko se hace con el cliente EN la tienda, así que
+            // su lugar en la cola de mostrador cuenta desde ahora. (Un web empieza
+            // sin lugar: lo toma cuando avisa su llegada.) Es la llave de orden de
+            // la cola — antes todo web con aviso pasaba delante de cualquier kiosko.
+            ...(canalOrigenFinal === CanalOrigen.KIOSKO ? { presenteDesdeAt: new Date() } : {}),
             ...envioFields,
             subtotal,
             total: subtotal,
@@ -395,12 +414,108 @@ export class ClienteService {
     return pedido;
   }
 
+  /**
+   * F20 (oct 2026): el cliente cancela su propio pedido.
+   *
+   * DOS bugs que esto arregla:
+   *
+   * 1. NO validaba el estado. El controller promete "sólo antes de PAID" pero
+   *    el código no lo cumplía: el cliente podía cancelar un pedido ya PAGADO
+   *    (y hasta ENVIADO), porque `TRANSICIONES[PAGADO]` incluye CANCELADO.
+   *
+   *    Ese arco existe A PROPÓSITO y NO se toca: lo usa Firebird (SWCANCEL)
+   *    cuando el ERP cancela un pedido. La regla del negocio es que la web se
+   *    adecúa al ERP, no al revés — así que el límite va aquí, en el camino del
+   *    CLIENTE, no en la tabla de transiciones.
+   *
+   *    El corte es `PENDIENTE_PAGO`: hasta ahí el pedido todavía no entró a
+   *    Firebird (el encolado al ERP ocurre justo al pasar a ese estado), así que
+   *    cancelarlo es seguro. Desde `PAGADO` en adelante el cobro ya ocurrió en
+   *    VFP y la cancelación tiene que venir del ERP.
+   *
+   * 2. NO creaba la lista de reposición. Mostrador y las propuestas sí la crean
+   *    (`crearDesdePedido`), pero este camino no — así que la mercancía que
+   *    bodega había apartado se quedaba sin que nadie la devolviera al anaquel.
+   *    Es justo el trabajo que el negocio necesita que bodega vea.
+   */
   async cancelarPedido(pedidoId: number, usuarioId: number, usuario: UserContext) {
+    const pedido = await this.prisma.pedido.findUnique({
+      where: { id: pedidoId },
+      select: { estado: true, asignadoAId: true },
+    });
+    if (!pedido) throw new NotFoundException('Pedido no encontrado');
+
+    /**
+     * Estados donde el cliente todavía puede cancelar.
+     *
+     * `PENDIENTE_PAGO` entra: el pedido está encolado al ERP pero el cobro no
+     * ha ocurrido. `PAGADO` y posteriores quedan fuera — ahí manda Firebird.
+     */
+    const CANCELABLES_POR_EL_CLIENTE: EstadoPedido[] = [
+      EstadoPedido.SOLICITADO,
+      EstadoPedido.EN_REVISION,
+      EstadoPedido.REVISADO,
+      EstadoPedido.EN_ATENCION,
+      EstadoPedido.ESPERANDO_APROBACION,
+      EstadoPedido.EN_ASESORIA,
+      EstadoPedido.PENDIENTE_PAGO,
+    ];
+
+    if (!CANCELABLES_POR_EL_CLIENTE.includes(pedido.estado)) {
+      throw new BadRequestException(
+        pedido.estado === EstadoPedido.PAGADO ||
+          pedido.estado === EstadoPedido.ENVIADO ||
+          pedido.estado === EstadoPedido.ENTREGADO
+          ? 'Tu pedido ya fue pagado, así que no se puede cancelar desde aquí. ' +
+              'Acércate a mostrador para cualquier cambio.'
+          : `No se puede cancelar un pedido en estado ${pedido.estado}.`,
+      );
+    }
+
+    // Oct 2026: si bodega lo tiene en las manos (sin surtir o a medias) NO hay
+    // lista de reposición: el bodeguero recibe el aviso de cancelación y regresa
+    // al anaquel lo que trae. Se decide ANTES de cancelar — después la máquina de
+    // estados ya limpió la asignación y movió el estado.
+    const enManosDeBodega = await bolsaEnManosDeBodega(this.prisma, {
+      id: pedidoId,
+      estado: pedido.estado,
+      asignadoAId: pedido.asignadoAId,
+    });
+
     return this.state.cambiarEstado(
       pedidoId,
       { nuevoEstado: EstadoPedido.CANCELADO, observacion: 'Cancelado por el cliente' },
       usuario,
+      {
+        asignacion: 'limpiar',
+        reloj: 'detener',
+        invalidarMonitor: true,
+        // La reposición va DENTRO de la transición: si el pedido se cancela
+        // pero la lista falla, quedaría mercancía apartada sin nadie que la
+        // devuelva. Mismo patrón que `MostradorService.cancelar`.
+        efectos: async (tx) => {
+          await this.reposicion.crearDesdePedido(tx, pedidoId, 'Cancelado por el cliente', {
+            bolsaEnManosDeBodega: enManosDeBodega,
+          });
+        },
+      },
     );
+  }
+
+  /**
+   * F22: el cliente retira su propio aviso de llegada ("ya no estoy aquí"). El
+   * pedido sale de la cola de mostrador. Ver `PresenciaService.retirarPorCliente`.
+   */
+  async retirarLlegada(pedidoId: number, usuarioId: number) {
+    return this.presencia.retirarPorCliente(pedidoId, usuarioId);
+  }
+
+  /**
+   * F22: el cliente contesta "sí, aún quiero mi pedido" al recordatorio. Ver
+   * `SinRecogerService.confirmarInteres`.
+   */
+  async confirmarInteres(pedidoId: number, usuarioId: number) {
+    return this.sinRecoger.confirmarInteres(pedidoId, usuarioId);
   }
 
   // PR7: el cliente avisa llegada desde la app/web autenticado. Como
@@ -422,10 +537,11 @@ export class ClienteService {
     if (!pedido || pedido.usuarioId !== usuarioId) {
       throw new NotFoundException('Pedido no encontrado');
     }
-    // F16 (sep 2026): solo se puede avisar llegada cuando el pedido YA ESTÁ
-    // LISTO para revisarse en tienda (`REVISADO`), y solo si se recoge en
-    // tienda. Antes de eso el pedido no está apartado, así que avisar no
-    // tendría sentido: el mostrador no tiene nada que mostrarle.
+    // F22 (oct 2026): se puede avisar la llegada en CUALQUIER estado no terminal
+    // de un pedido que se recoge en tienda — también antes de que bodega
+    // termine. (F16 lo limitaba a `REVISADO`, y el cliente que llegaba temprano no
+    // tenía cómo decirlo aunque bodega y el destino del surtido incompleto ya
+    // dependían de ese dato.)
     //
     // Oct 2026: la regla y sus mensajes viven en un solo lugar
     // (`pedidos/core/llegada-aviso.util.ts`). Antes estaban duplicados aquí y

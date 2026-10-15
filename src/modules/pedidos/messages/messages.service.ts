@@ -290,8 +290,9 @@ export class MessagesService {
     // segundo create fallaba, el cliente quedaba con una propuesta pendiente
     // que no podía ver ni responder — justo el bug que se decía haber
     // arreglado.
-    const { mensaje, adjunto, efectosTransicion } = await this.prisma.$transaction(async (tx) => {
+    const { mensaje, adjunto, efectosTransicion, propuestaEnviada } = await this.prisma.$transaction(async (tx) => {
       let adjunto: { tipo: 'propuesta'; propuestaId: number } | null = null;
+      let propuestaEnviada: { pedidoId: number; propuestaId: number; origen: RolUsuario } | null = null;
       // Efectos de la transición a ESPERANDO_APROBACION (realtime + correo).
       // `enviarPropuesta` no puede dispararlos cuando corre dentro de esta tx:
       // todavía no confirmó. Los emitimos nosotros después del commit.
@@ -302,7 +303,7 @@ export class MessagesService {
       if (dto.propuestaItems && dto.propuestaItems.length > 0) {
         // El service de propuestas hace todas las validaciones; nosotros sólo
         // creamos el `PedidoMensaje` con el id resultante en la misma tx.
-        const { propuesta, efectos } = await this.propuesta.enviarPropuesta(
+        const { propuesta, efectos, propuestaEnviada: avisoPropuesta } = await this.propuesta.enviarPropuesta(
           pedidoId,
           {
             items: dto.propuestaItems.map((it) => ({
@@ -326,6 +327,8 @@ export class MessagesService {
               productoOriginal: it.productoOriginal ?? null,
               varianteOriginal: it.varianteOriginal ?? null,
               cantidadOriginal: it.cantidadOriginal ?? null,
+              cantidadDisponible: it.cantidadDisponible ?? null,
+              ajusteExplicito: it.ajusteExplicito ?? false,
               productoNuevo: it.productoNuevo ?? null,
               varianteNueva: it.varianteNueva ?? null,
               cantidadNueva: it.cantidadNueva ?? null,
@@ -344,6 +347,7 @@ export class MessagesService {
         );
         adjunto = { tipo: 'propuesta', propuestaId: propuesta.id };
         efectosTransicion = efectos;
+        propuestaEnviada = avisoPropuesta;
       }
 
       // Oct 2026: si trae propuesta pero el texto viene vacío, usar uno por
@@ -369,7 +373,7 @@ export class MessagesService {
         include: { autor: { select: { id: true, nombre: true, rol: true } } },
       });
 
-      return { mensaje, adjunto, efectosTransicion };
+      return { mensaje, adjunto, efectosTransicion, propuestaEnviada };
     });
 
     // Oct 2026: disparar los efectos de la transición, AHORA que la transacción
@@ -381,6 +385,20 @@ export class MessagesService {
     // que el bug era invisible desde la app.
     if (efectosTransicion) {
       this.state.dispararEfectosDeTransicion(pedidoId, efectosTransicion);
+    }
+
+    /**
+     * F21 (oct 2026): el aviso `propuesta.enviada`, AHORA que la transacción
+     * confirmó.
+     *
+     * Antes lo emitía `PropuestaService` dentro de su propio flujo, pero con
+     * `txExterna` eso ocurría ANTES de este commit: si el `pedidoMensaje.create`
+     * de arriba fallaba, el rollback deshacía la propuesta pero el cliente ya
+     * tenía el aviso de una propuesta inexistente. Es el mismo contrato que los
+     * demás efectos externos — se emiten cuando el dato ya es durable.
+     */
+    if (propuestaEnviada) {
+      this.realtime.emitToUser(pedido.usuarioId, 'propuesta.enviada', propuestaEnviada);
     }
 
     // 4. Realtime: el cliente y el room del pedido reciben el mensaje con su

@@ -57,7 +57,7 @@ function crearSurtido(items: any[], opts: { propuestaAceptada?: boolean } = {}) 
       findFirst: jest.fn(async () => (opts.propuestaAceptada ? { id: 77 } : null)),
       update: jest.fn(async () => ({})),
       // F17: el cierre de surtido crea la propuesta automáticamente cuando hay
-      // faltantes y el pedido va a la plancha.
+      // faltantes y el pedido va al área de entrega.
       create: jest.fn(async () => ({ id: 88 })),
     },
     itemPedido: {
@@ -154,7 +154,7 @@ describe('confirmarSurtido: los items cancelados no son faltantes', () => {
     // F17 (oct 2026): antes este caso lanzaba un 400 pidiendo "envía la
     // propuesta y espera". Contradecía el piso: la bolsa con el ticket YA está
     // en la mesa de mostrador. Ahora el cierre es un solo paso — el sistema
-    // crea la propuesta y manda el pedido a la plancha.
+    // crea la propuesta y manda el pedido al área de entrega.
     const { svc, pedidoPropuestaCreate } = crearSurtido([
       item({ id: 1, estadoSurtido: EstadoSurtido.PARCIAL, cantidadSurtida: 1 }),
       item({ id: 2 }),
@@ -269,8 +269,20 @@ function crearPropuesta(items: any[]) {
 }
 
 describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
-  it("'cambio' limpia el estado de surtido del item original", async () => {
-    // La causa raíz del faltante fantasma.
+  it("'cambio' cancela el original y CONSERVA su hallazgo físico", async () => {
+    // La causa raíz del faltante fantasma era que el filtro de
+    // `confirmarSurtido` no excluía cancelados: el item original, ya
+    // reemplazado, seguía contando como faltante y exigía una propuesta
+    // ACEPTADA sin consumir (rama inalcanzable → 400 inevitable).
+    //
+    // Ese filtro ya está (`!i.cancelada` en `surtido.service.ts`, fijado por
+    // los tests de arriba). Por eso limpiar el estado físico al cancelar dejó
+    // de ser necesario — y era dañino: borraba el hecho de que el producto SÍ
+    // estaba apartado, así que la pantalla lo mostraba como "No disponible"
+    // cuando la verdad era "se cambió por otro".
+    //
+    // F20 (oct 2026): el original conserva `estadoSurtido` y `cantidadSurtida`.
+    // Lo que lo saca del pedido es `cancelada`, no el estado de surtido.
     const { aplicar, tx, pedido, updates } = crearPropuesta([
       item({ id: 1, estadoSurtido: EstadoSurtido.PARCIAL, cantidadSurtida: 2 }),
     ]);
@@ -298,8 +310,9 @@ describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
     const original = updates.find((u) => u.id === 1);
     expect(original?.data).toMatchObject({
       cancelada: true,
-      estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
-      cantidadSurtida: 0,
+      // El hallazgo físico sobrevive: bodega había apartado 2 piezas.
+      estadoSurtido: EstadoSurtido.PARCIAL,
+      cantidadSurtida: 2,
     });
   });
 
@@ -335,7 +348,14 @@ describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
     });
   });
 
-  it("'parcial' que BAJA la cantidad deja el item COMPLETO", async () => {
+  it("'parcial' que BAJA la cantidad deja el item COMPLETO y CONSERVA lo que hay", async () => {
+    // F21 (oct 2026): había 3 en el anaquel y el cliente se lleva 2.
+    //
+    // La aserción era `cantidadSurtida: 2` — el ajuste PISABA el hallazgo físico
+    // con la decisión. Eso hacía que la pantalla dijera "Disponibles 2" cuando
+    // la verdad era "había 3, se lleva 2", que es el bug que el usuario reportó
+    // (con 5/3/1 en su caso). El hallazgo se conserva; el sobrante (1 pieza)
+    // vuelve al anaquel.
     const { aplicar, tx, pedido, updates } = crearPropuesta([
       item({ id: 1, cantidad: 5, cantidadSurtida: 3, estadoSurtido: EstadoSurtido.PARCIAL }),
     ]);
@@ -360,9 +380,11 @@ describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
     );
 
     expect(updates[0].data).toMatchObject({
+      // Lo que se lleva y se cobra.
       cantidad: 2,
       estadoSurtido: EstadoSurtido.COMPLETO,
-      cantidadSurtida: 2,
+      // Lo que HAY: intacto. Es lo que permite decir "Hay 3 · Te llevas 2".
+      cantidadSurtida: 3,
     });
   });
 
@@ -451,9 +473,19 @@ describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
     expect(updates).toHaveLength(0);
   });
 
-  it('NINGÚN camino deja COMPLETO con menos piezas que las pedidas', async () => {
+  it('NINGÚN camino cobra MÁS piezas de las que bodega verificó', async () => {
     // El invariante que sostiene "lo que se cobra es lo que se surtió". Si se
     // rompe, el pedido avanza a pago cobrando piezas que nadie apartó.
+    //
+    // F21 (oct 2026): la aserción era `cantidadSurtida === cantidad`, que era un
+    // PROXY del invariante y solo se cumplía porque el ajuste PISABA
+    // `cantidadSurtida` con la decisión. Al bajar de 3 a 1 el item quedaba
+    // `cantidad: 1, cantidadSurtida: 1` — la igualdad se cumplía y el hecho
+    // físico ("había 3") se perdía, que es justo el bug que el usuario reportó.
+    //
+    // El invariante de verdad es `cantidadSurtida >= cantidad`: nunca se cobra
+    // más de lo que hay en la bolsa. Que sobren piezas es correcto y esperado —
+    // es el sobrante que vuelve al anaquel.
     for (const cantidadNueva of [1, 2, 3, 5, 10]) {
       for (const cantidadSurtida of [0, 1, 2, 3]) {
         const { aplicar, tx, pedido, updates } = crearPropuesta([
@@ -487,7 +519,8 @@ describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
 
         const u = updates[0];
         if (u && u.data.estadoSurtido === EstadoSurtido.COMPLETO) {
-          expect(u.data.cantidadSurtida).toBe(u.data.cantidad);
+          // Lo que se lleva nunca excede lo que hay en la bolsa.
+          expect(u.data.cantidadSurtida).toBeGreaterThanOrEqual(u.data.cantidad as number);
         }
       }
     }

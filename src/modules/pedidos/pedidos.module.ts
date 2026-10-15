@@ -22,6 +22,9 @@ import { ReposicionController } from './reposicion/reposicion.controller';
 import { ReposicionService } from './reposicion/reposicion.service';
 import { PedidoAccessService } from './core/pedido-access.service';
 import { PedidoStateService } from './core/pedido-state.service';
+import { PresenciaService } from './core/presencia.service';
+import { SinRecogerService } from './core/sin-recoger.service';
+import { SinRecogerWorker } from './core/sin-recoger.worker';
 import { PedidoBusquedaController } from './core/pedido-busqueda.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MailModule } from '../mail/mail.module';
@@ -88,10 +91,17 @@ import { KioskoModule } from '../kiosko/kiosko.module';
     ReposicionService,
     PedidoAccessService,
     PedidoStateService,
+    // F22: presencia del cliente (descartar, "no se presentó", llegada con
+    // propuesta pendiente) y pedidos sin recoger (recordatorio + vencidos).
+    PresenciaService,
+    SinRecogerService,
+    SinRecogerWorker,
   ],
   exports: [
     PedidoAccessService,
     PedidoStateService,
+    PresenciaService,
+    SinRecogerService,
     MonitorService,
     SurtidoService,
     AdminService,

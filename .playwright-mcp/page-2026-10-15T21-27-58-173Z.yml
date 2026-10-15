@@ -1,0 +1,92 @@
+- generic [ref=e1]:
+  - generic [aria-hidden] [ref=e156]:
+    - banner [ref=e157]:
+      - generic [ref=e159]:
+        - navigation [ref=e161]:
+          - link [ref=e162] [cursor=pointer]:
+            - /url: /mostrador
+            - text: Mostrador
+        - link [ref=e164] [cursor=pointer]:
+          - /url: /mostrador
+        - button [ref=e167] [cursor=pointer]:
+          - generic [ref=e168]: UM
+          - generic [ref=e169]: Usuario
+    - main [ref=e170]:
+      - generic [ref=e171]:
+        - generic [ref=e172]:
+          - generic [ref=e173]:
+            - heading [level=1] [ref=e175]: Mostrador
+            - paragraph [ref=e176]: Revisa el pedido con el cliente y entrégalo cuando esté pagado
+          - button [ref=e178] [cursor=pointer]: Elegir mostrador
+        - generic [ref=e179]:
+          - textbox [ref=e180]:
+            - /placeholder: Buscar por folio o nombre del cliente…
+          - button [ref=e182] [cursor=pointer]
+        - tablist [ref=e184]:
+          - tab [selected] [ref=e185] [cursor=pointer]:
+            - text: Por revisar
+            - generic [ref=e186]: "2"
+          - tab [ref=e187] [cursor=pointer]:
+            - text: Sin aviso
+            - generic [ref=e188]: "1"
+            - generic [ref=e189]: 1 vencido
+          - tab [ref=e190] [cursor=pointer]:
+            - text: Por entregar
+            - generic [ref=e191]: "0"
+        - button [ref=e193] [cursor=pointer]: Llamar siguiente
+        - generic [ref=e194]:
+          - link [ref=e195] [cursor=pointer]:
+            - /url: /mostrador/115
+            - generic [ref=e203]:
+              - generic [ref=e204]:
+                - paragraph [ref=e205]: "Pedido #115"
+                - generic [ref=e206]: Kiosko
+                - generic [ref=e207]: EN TIENDA · 41 min
+              - paragraph [ref=e208]: Juan Kiosko
+              - paragraph [ref=e209]: 0 producto(s) · $350.00
+          - link [ref=e212] [cursor=pointer]:
+            - /url: /mostrador/116
+            - generic [ref=e219]:
+              - generic [ref=e220]:
+                - paragraph [ref=e221]: "Pedido #116"
+                - generic [ref=e222]: Web
+                - generic [ref=e223]: EN TIENDA · 6 min
+              - paragraph [ref=e224]: María Web
+              - paragraph [ref=e225]: 0 producto(s) · $500.00
+          - generic [ref=e230]:
+            - paragraph [ref=e231]:
+              - text: Mostrando
+              - generic [ref=e232]: 1–2
+              - text: de 2 pedidos por revisar
+            - generic [ref=e233]:
+              - generic [ref=e234]: Ver
+              - combobox [ref=e236] [cursor=pointer]
+    - contentinfo [ref=e237]:
+      - generic [ref=e238]: © 2026 Punto Textil Mayoreo - Sistema de Mostrador
+  - button [ref=e239] [cursor=pointer]
+  - region "Notifications alt+T":
+    - list:
+      - listitem [ref=e240]:
+        - button "Close toast" [ref=e241] [cursor=pointer]
+        - generic [ref=e249]: Bienvenido, Usuario
+  - button "Open Next.js Dev Tools" [ref=e19] [cursor=pointer]
+  - alert [ref=e155]: Panel de Mostrador | Punto Textil Mayoreo
+  - dialog [ref=e254]:
+    - generic [ref=e255]:
+      - heading "Elige tu mostrador" [level=2] [ref=e256]
+      - paragraph [ref=e257]: Cuando llames a un cliente, la pantalla le dirá a cuál pasar. No puedes elegir uno que ya ocupa otro operador.
+    - generic [ref=e258]:
+      - button [active] [ref=e259] [cursor=pointer]:
+        - generic [ref=e266]:
+          - paragraph [ref=e267]: Mostrador
+          - paragraph [ref=e268]: "1"
+        - generic [ref=e269]: Libre
+        - paragraph [ref=e272]: Disponible para tomar
+      - button [ref=e273] [cursor=pointer]:
+        - generic [ref=e280]:
+          - paragraph [ref=e281]: Mostrador
+          - paragraph [ref=e282]: "2"
+        - generic [ref=e283]: Libre
+        - paragraph [ref=e286]: Disponible para tomar
+    - button "Ahora no" [ref=e288] [cursor=pointer]
+    - button "Close" [ref=e289] [cursor=pointer]

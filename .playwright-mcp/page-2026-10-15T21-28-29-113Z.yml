@@ -1,0 +1,5 @@
+- generic [active] [ref=f1e1]:
+  - status [ref=f1e2]:
+    - paragraph [ref=f1e8]: Cargando el panel de mostrador...
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f1e14] [cursor=pointer]

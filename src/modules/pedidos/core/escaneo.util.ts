@@ -49,7 +49,7 @@ const RESPONSABLES: Record<EstadoPedido, Responsable> = {
   [EstadoPedido.REVISADO]: {
     rol: RolUsuario.MOSTRADOR,
     label: 'Mostrador',
-    queHace: 'en la plancha, esperando al cliente',
+    queHace: 'en el área de entrega, esperando al cliente',
   },
   [EstadoPedido.EN_ATENCION]: {
     rol: RolUsuario.MOSTRADOR,

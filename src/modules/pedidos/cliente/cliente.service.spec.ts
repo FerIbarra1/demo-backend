@@ -89,6 +89,9 @@ function crearServicio(opts: {
     {} as never, // kioskoService
     {} as never, // kioskoLlegada
     new PreciosService(prisma as never),
+    {} as never, // reposicion (F20),
+    {} as never, // presencia (F22)
+    {} as never, // sinRecoger (F22)
   );
 
   return { svc, pedidoCreado, prisma };

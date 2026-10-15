@@ -120,6 +120,16 @@ export class NotificationsService {
           ...ctx,
         });
         break;
+      // F22: "¿aún quieres tu pedido?" — lo manda el barrido de pedidos sin
+      // recoger (`SinRecogerService`), no una transición de estado.
+      case TipoNotificacion.RECORDATORIO_RECOGER:
+        subject = mailSubjects.RECORDATORIO_RECOGER(folio);
+        template = mailTemplates.PedidoRecordatorioRecoger({
+          pedido: pedidoData,
+          pedidoUrl,
+          ...ctx,
+        });
+        break;
       case TipoNotificacion.REVISION_APROBADA:
         subject = mailSubjects.REVISION_APROBADA(folio);
         template = mailTemplates.PedidoAprobado({

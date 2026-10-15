@@ -98,6 +98,17 @@ describe('clientePresenteEnTienda', () => {
     ).toBe(true);
   });
 
+  it('KIOSKO descartado: el cliente se fue, no está (F22)', () => {
+    // Antes un kiosko era presente SIEMPRE y no había forma de decir "ya se fue".
+    expect(
+      clientePresenteEnTienda({
+        canalOrigen: 'KIOSKO',
+        llegadaAnunciadaAt: null,
+        llegadaDescartadaAt: new Date(),
+      }),
+    ).toBe(false);
+  });
+
   it('WEB con aviso vigente: el cliente está', () => {
     expect(
       clientePresenteEnTienda({

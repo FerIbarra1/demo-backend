@@ -4,7 +4,7 @@ import { StorageService } from '../../imagenes/storage.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { contarMensajesNoLeidos } from '../core/mensajes-no-leidos.util';
 import { UserContext } from '../../../types/pedido.types';
-import { EstadoPedido, Prisma } from '@prisma/client';
+import { EstadoPedido, EstadoPropuesta, Prisma } from '@prisma/client';
 
 /**
  * F13 (sep 2026): servicio del dominio VENTAS (asesor de ventas).
@@ -300,6 +300,30 @@ export class VentasService {
         asignacion: 'limpiar',
         reloj: 'reanudar',
         invalidarMonitor: true,
+        /**
+         * F21 (oct 2026): la propuesta viva queda SUPERADA.
+         *
+         * El asesor revisó con el cliente y decidió que el pedido original
+         * estaba bien: la contrapropuesta que hubiera mandado ya no aplica. Si
+         * se deja `PENDIENTE`, bodega choca contra el índice único parcial
+         * (`pedidos_propuestas_pendiente_unica_idx`) al cerrar el surtido
+         * siguiente — el `create` revienta con P2002 y el bodeguero lee un 409
+         * que no entiende. Y `enviarAPagar` queda bloqueado para siempre por su
+         * guard de propuesta pendiente.
+         *
+         * Es el MISMO tratamiento que ya hace `MostradorService.ajustar` cuando
+         * el cliente cambia de opinión en tienda. Faltaba en este camino.
+         */
+        efectos: async (tx) => {
+          await tx.pedidoPropuesta.updateMany({
+            where: { pedidoId, estado: EstadoPropuesta.PENDIENTE },
+            data: {
+              estado: EstadoPropuesta.SUPERADA,
+              respondidaAt: new Date(),
+              notaCliente: nota ?? null,
+            },
+          });
+        },
       },
     );
 

@@ -1,4 +1,5 @@
 import { Prisma, EstadoSurtido } from '@prisma/client';
+import { datosDeFaltaDeBodega } from './cancelacion-linea.util';
 
 /**
  * F16 (sep 2026): liquidación del estado de los items de un pedido tras
@@ -56,13 +57,11 @@ export async function aplicarCambiosFisicos(
 
   for (const item of items) {
     if (item.estadoSurtido === EstadoSurtido.NO_DISPONIBLE) {
+      // F20: falta de bodega — el único caso donde limpiar el estado físico es
+      // correcto. Ver `cancelacion-linea.util.ts` para la distinción completa.
       await tx.itemPedido.update({
         where: { id: item.id },
-        data: {
-          cancelada: true,
-          estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
-          cantidadSurtida: 0,
-        },
+        data: datosDeFaltaDeBodega(),
       });
       cambios.push(`Item #${item.id} cancelado (no disponible)`);
       continue;
@@ -73,11 +72,7 @@ export async function aplicarCambiosFisicos(
       if (nuevaCantidad === 0) {
         await tx.itemPedido.update({
           where: { id: item.id },
-          data: {
-            cancelada: true,
-            estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
-            cantidadSurtida: 0,
-          },
+          data: datosDeFaltaDeBodega(),
         });
         cambios.push(`Item #${item.id} cancelado (cantidad 0)`);
         continue;

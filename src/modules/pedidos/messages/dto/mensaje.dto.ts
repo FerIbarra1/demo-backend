@@ -130,6 +130,19 @@ export class PropuestaAdjuntaItemDto {
   @IsInt()
   cantidadOriginal?: number;
 
+  /** Lo que bodega encontró físicamente; 0 es un valor válido. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  cantidadDisponible?: number;
+
+  /** true solo si ventas/mostrador editó explícitamente esta línea. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  ajusteExplicito?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -198,7 +211,8 @@ export class CrearMensajeConAdjuntoDto {
   @Type(() => PropuestaAdjuntaItemDto)
   propuestaItems?: PropuestaAdjuntaItemDto[];
 
-  @ApiPropertyOptional({ description: 'Total propuesto; obligatorio si viene propuestaItems' })
+  @ApiPropertyOptional({ description: 'Total propuesto; el backend lo recalcula y no confía en este valor.' })
   @IsOptional()
+  @IsNumber()
   total?: number;
 }

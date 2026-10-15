@@ -12,6 +12,7 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoAccessService } from './pedido-access.service';
 import { asignadoANombre } from './pedido-mapper';
 import { pausarReloj, reanudarReloj } from './atencion.util';
+import { ESTADOS_BOLSA_APARTADA } from './presencia.util';
 import { CambiarEstadoDto } from '../admin/dto/cambiar-estado.dto';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, TipoNotificacion, Prisma, RolUsuario } from '@prisma/client';
@@ -33,72 +34,13 @@ import { EstadoPedido, TipoNotificacion, Prisma, RolUsuario } from '@prisma/clie
  * cuando código y pantalla dicen distinto, cada conversación necesita una
  * traducción mental y los bugs se esconden ahí.
  *
- *   1 SOLICITADO            el cliente lo creó. En cola de bodega.
- *   2 EN_REVISION           un bodeguero lo tomó y lo está surtiendo.
- *   3 REVISADO              LA PLANCHA. La bolsa con el ticket está en la mesa
- *                           de mostrador. Un pedido INCOMPLETO también llega
- *                           aquí: el sistema ya creó la propuesta.
- *   4 EN_ATENCION           el operador llamó al cliente y lo está atendiendo.
- *   5 PENDIENTE_PAGO        se envió a pagar. AQUÍ entra al ERP.
- *   6 PAGADO                cobrado en VFP.
- *   7 (listo para entregar) PAGADO sin domicilio.
- *   8 ENTREGADO             cerrado.
- *
- *   SOLICITADO → EN_REVISION → REVISADO → EN_ATENCION → PENDIENTE_PAGO → PAGADO → ENTREGADO
- *                    │            │            │
- *                    │            │            └─�� REVISADO   (deshacer la llamada)
- *                    │            ├─→ EN_REVISION   (el cliente pidió cambios)
- *                    │            └─→ CANCELADO     (+ lista de reposición)
- *                    └─→ PENDIENTE_PAGO  (solo DOMICILIO: salta mostrador)
- *
- * El negocio necesitaba que el cliente viera y aprobara los productos en tienda
- * antes de pagar, porque muchos piden más cosas o cambian algo al verlos.
- *
- * TRES INVARIANTES que sostienen el diseño:
- *
- *   1. **El ERP solo ve pedidos liberados por mostrador.** El encolado a
- *      Firebird (`encolarFirebird: true`) ocurre al pasar a PENDIENTE_PAGO, y a
- *      ese estado solo se llega liberando desde REVISADO/EN_ATENCION (o por el
- *      camino de domicilio). Así un ajuste o cancelación en mostrador nunca
- *      deja al ERP desincronizado: el pedido todavía no existe allá.
- *
- *   2. **PENDIENTE_PAGO ⟺ fila en `PedidoPendienteEnvio`.** Un pedido en ese
- *      estado sin fila es invisible al agente, nunca recibe folio y se queda
- *      atascado para siempre. Por eso `encolarFirebird` es obligatorio ahí.
- *      La decisión vive en `destinoTrasSurtido` (core/destino-post-surtido.util)
- *      para que los tres caminos que cierran la verificación no puedan divergir.
- *
- *   3. **El cierre de surtido es UN SOLO PASO (F17).** El bodeguero marca los
- *      items y aprieta "Terminar surtido"; el sistema decide. Un pedido
- *      incompleto TAMBIÉN va a REVISADO —la bolsa ya está en la mesa— y la
- *      propuesta se crea automáticamente (`core/propuesta-bodega.util.ts`).
- *      Antes esto lanzaba un 400 pidiendo "envía la propuesta y espera", que
- *      contradecía el piso: el bodeguero quedaba con un pedido abierto que
- *      físicamente ya había entregado a mostrador.
- *
- * Los pedidos a DOMICILIO saltan mostrador: no tiene sentido mostrarle el
- * pedido a un cliente que no está en la tienda. Van EN_REVISION →
- * PENDIENTE_PAGO directo, con el encolado inmediato.
- *
- * ─────────────────────────────────────────────────────────────────────────
- *
- * F13 (sep 2026): los arcos que salen de ESPERANDO_APROBACION se
- * distinguen por DESTINO, no por valores nuevos de enum:
- *
- *   → REVISADO       cliente APROBÓ una propuesta de BODEGA (o de VENTAS que
- *                    no dejó items pendientes). Bodega ya verificó físicamente
- *                    lo que propuso; el cliente lo revisa antes de pagar.
- *   → PENDIENTE_PAGO el camino de DOMICILIO (no pasa por mostrador).
- *   → EN_REVISION    cliente APROBÓ una propuesta de VENTAS y quedaron items
- *                    nuevos por surtir. Vuelve a bodega SIN ASIGNAR.
- *   → EN_ASESORIA    cliente pidió asesor (propuesta de bodega), o rechazó una
- *                    propuesta de VENTAS y quiere re-negociar.
- *   → CANCELADO      cliente rechazó una propuesta de BODEGA, o canceló
- *                    explícitamente.
- *
- * Los pedidos a DOMICILIO saltan mostrador: no tiene sentido mostrarle el
- * pedido a un cliente que no está en la tienda. Van EN_REVISION →
- * PENDIENTE_PAGO directo, como antes.
+ * F20 (oct 2026): el vocabulario de piso terminó de alinearse — lo que el
+ * negocio llama "el área de entrega" (el pedido ya surtido, listo para
+ * mostrarlo al cliente o mandarlo a domicilio) es lo que el código llama
+ * `REVISADO`. El enum NO cambia: renombrar un valor del enum no toca la
+ * sincronización con Firebird, pero sí obligaría a migrar la BD sin ganar nada.
+ * Lo que cambió es el nombre de las cosas que lo rodean: `obtenerAjustesEntrega`,
+ * la ruta `ajustes-entrega`, `TarjetaAjustesEntrega`.
  */
 const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
   [EstadoPedido.SOLICITADO]: [EstadoPedido.EN_REVISION, EstadoPedido.CANCELADO],
@@ -253,6 +195,15 @@ export interface CambiarEstadoOpts {
    * dejar rastro.
    */
   permitirMismoEstado?: boolean;
+  /**
+   * F22 (oct 2026): no mandar el correo que esta transición normalmente dispara.
+   *
+   * Para las transiciones que el operador hace con el cliente ENFRENTE (traerlo
+   * desde asesoría) o por la llegada del cliente (la propuesta pendiente pasa al
+   * área de entrega): decirle por correo "tu pedido ya está listo en tienda" a
+   * alguien que está de pie en el mostrador es ruido.
+   */
+  sinNotificar?: boolean;
 }
 
 /**
@@ -356,6 +307,8 @@ export class PedidoStateService {
       invalidarMonitor: boolean;
       notifTipo: TipoNotificacion | null;
       sinCambioDeEstado?: boolean;
+      bodegueroAsignadoId?: number | null;
+      numeroPedido?: string;
     },
   ): void {
     this.dispararEfectos(pedidoId, efectos);
@@ -375,6 +328,13 @@ export class PedidoStateService {
        * para NO anunciar un cambio de estado que no ocurrió.
        */
       sinCambioDeEstado?: boolean;
+      /**
+       * Oct 2026: el bodeguero que tenía el pedido en el momento de la
+       * transición (la asignación ya se limpió en la BD, así que se captura de
+       * la lectura previa). Solo importa si el pedido se cancela en bodega.
+       */
+      bodegueroAsignadoId?: number | null;
+      numeroPedido?: string;
     },
   ): void {
     // Sin cambio real de estado no se emite `pedido.estado`: los clientes
@@ -392,6 +352,23 @@ export class PedidoStateService {
         estadoNuevo: e.estadoNuevo,
       });
     }
+    // Oct 2026: el pedido se canceló MIENTRAS un bodeguero lo surtía. Él lo trae
+    // en las manos, así que no hay lista de reposición (ver
+    // `bolsaEnManosDeBodega`): lo que necesita es ENTERARSE para dejar de surtir y
+    // regresar al anaquel lo que tiene. Va solo a ese bodeguero (`user-{id}`), no
+    // a toda la tienda: al resto del turno un aviso así sería ruido.
+    if (
+      !e.sinCambioDeEstado &&
+      e.estadoNuevo === EstadoPedido.CANCELADO &&
+      e.estadoAnterior === EstadoPedido.EN_REVISION &&
+      e.bodegueroAsignadoId != null
+    ) {
+      this.realtime.emitToUser(e.bodegueroAsignadoId, 'pedido.cancelado-en-bodega', {
+        pedidoId,
+        numeroPedido: e.numeroPedido ?? null,
+      });
+    }
+
     // F13: los monitores (bodega/cajeros) no reaccionan a `pedido.estado`;
     // necesitan este evento para recomputar slots y colas.
     if (e.invalidarMonitor) {
@@ -482,6 +459,20 @@ export class PedidoStateService {
         }
       }
 
+      // F22: el correo "ya está listo en tienda" es del PRIMER paso a `REVISADO`.
+      //
+      // Antes salía cada vez que el pedido entraba ahí: al devolver a la cola un
+      // llamado equivocado, al traerlo desde asesoría y al volver de cada ajuste de
+      // mostrador. El cliente que está de pie en la tienda recibía "tu pedido ya
+      // está listo" tres veces. Se mira el historial ANTES de escribir la fila de
+      // esta transición, o siempre habría una.
+      const yaEstuvoEnRevisado =
+        estadoNuevo === EstadoPedido.REVISADO && !saltarTransicion
+          ? (await tx.historialPedido.count({
+              where: { pedidoId, estadoNuevo: EstadoPedido.REVISADO },
+            })) > 0
+          : false;
+
       const ahora = new Date();
       const result = await tx.pedido.updateMany({
         // El guard de estado se conserva incluso en el camino de "mismo
@@ -509,10 +500,19 @@ export class PedidoStateService {
           // espera pero la TV lo seguía mostrando como "atendido". Salir de
           // EN_ATENCION significa que la llamada terminó, sin importar a dónde
           // se vaya.
-          ...(estadoNuevo !== EstadoPedido.REVISADO ||
-          estadoAnterior === EstadoPedido.EN_ATENCION
-            ? { llamadoAt: null }
+          //
+          // F22: con `llamadoAt` se limpian también QUIÉN llamó y a QUÉ mostrador —
+          // son la misma señal ("este folio está anunciado") y no pueden
+          // sobrevivir separadas.
+          ...(estadoNuevo !== EstadoPedido.REVISADO || estadoAnterior === EstadoPedido.EN_ATENCION
+            ? { llamadoAt: null, llamadoPorId: null, llamadoMostradorId: null }
             : {}),
+          // F22: la antigüedad de la ESPERA. Arranca cuando la bolsa queda apartada
+          // (entra a REVISADO / ESPERANDO_APROBACION / EN_ATENCION desde fuera de
+          // ese grupo) y se limpia al salir. Moverse DENTRO del grupo (llamar,
+          // devolver a la cola, resolver una propuesta) no la reinicia: lo que
+          // importa es cuánto lleva la bolsa esperando, no la última acción.
+          ...(saltarTransicion ? {} : this.cambiosDeEspera(estadoAnterior, estadoNuevo, ahora)),
         },
       });
       if (result.count !== 1) {
@@ -580,7 +580,9 @@ export class PedidoStateService {
       // el pedido ya estaba en ese estado, así que su correo ya se mandó en su
       // momento. Reenviarlo sería un duplicado (p. ej. un segundo "ya está listo
       // en tienda" cada vez que el operador resuelve un faltante).
-      const notifTipo = saltarTransicion ? null : this.notifTipoParaEstado(estadoNuevo);
+      let notifTipo =
+        saltarTransicion || opts.sinNotificar ? null : this.notifTipoParaEstado(estadoNuevo);
+      if (notifTipo === TipoNotificacion.LISTO_EN_TIENDA && yaEstuvoEnRevisado) notifTipo = null;
 
       return {
         pedido: pedidoActualizado,
@@ -593,6 +595,9 @@ export class PedidoStateService {
           // El caller lo usa para no emitir `pedido.estado` cuando no hubo
           // cambio: los clientes verían un evento que no describe nada.
           sinCambioDeEstado: saltarTransicion,
+          // Lectura PREVIA al update: la asignación ya se limpió en la BD.
+          bodegueroAsignadoId: pedido.asignadoAId,
+          numeroPedido: pedido.numeroPedido,
         },
       };
     }
@@ -619,6 +624,34 @@ export class PedidoStateService {
       case undefined:
         return {};
     }
+  }
+
+  /**
+   * F22: la antigüedad de la espera del cliente (`esperaClienteDesdeAt`).
+   * Ver el comentario en `ejecutarCambio`.
+   */
+  private cambiosDeEspera(
+    anterior: EstadoPedido,
+    nuevo: EstadoPedido,
+    ahora: Date,
+  ): {
+    esperaClienteDesdeAt?: Date | null;
+    recordatorioRecogerAt?: Date | null;
+    interesConfirmadoCount?: number;
+  } {
+    const estabaApartada = ESTADOS_BOLSA_APARTADA.includes(anterior);
+    const quedaApartada = ESTADOS_BOLSA_APARTADA.includes(nuevo);
+    if (!estabaApartada && quedaApartada) {
+      return {
+        esperaClienteDesdeAt: ahora,
+        recordatorioRecogerAt: null,
+        interesConfirmadoCount: 0,
+      };
+    }
+    if (estabaApartada && !quedaApartada) {
+      return { esperaClienteDesdeAt: null, recordatorioRecogerAt: null };
+    }
+    return {};
   }
 
   /**
@@ -785,6 +818,11 @@ export class PedidoStateService {
         // el pedido está siendo surtido por otro bodeguero. Permitido en
         // EN_REVISION sin asignar (devuelve null).
         asignadoA: { select: { id: true, nombre: true, apellido: true } },
+        // F22: quién llamó al cliente y desde qué mostrador. El segundo operador que
+        // abre un pedido ya llamado ve "Lo atiende Ana · Mostrador 2" y no pisa a su
+        // compañera. Solo tiene valor en EN_ATENCION (la máquina lo limpia al salir).
+        llamadoPor: { select: { id: true, nombre: true, apellido: true } },
+        llamadoMostrador: { select: { id: true, numero: true } },
         historial: { orderBy: { createdAt: 'asc' } },
         // F14: incluir el autor para poder aplanar `autorNombre` (el admin
         // renderiza las burbujas del chat y antes salían sin nombre).
@@ -818,6 +856,12 @@ export class PedidoStateService {
       };
     }) as any;
     (pedido as any).asignadoANombre = asignadoANombre((pedido as any).asignadoA);
+    // F22: mismo shape plano que usa la cola de mostrador (`conAtencion`).
+    const llamadoPor = (pedido as any).llamadoPor;
+    (pedido as any).atendidoPorNombre = llamadoPor
+      ? `${llamadoPor.nombre}${llamadoPor.apellido ? ' ' + llamadoPor.apellido : ''}`
+      : null;
+    (pedido as any).mostradorNumero = (pedido as any).llamadoMostrador?.numero ?? null;
     // F14: aplanar el nombre del autor de cada mensaje (mismo shape que
     // `MessagesService.listar` y que el payload de `mensaje.creado`).
     (pedido as any).mensajes = (pedido as any).mensajes.map((m: any) => ({

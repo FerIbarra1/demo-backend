@@ -1,6 +1,13 @@
 -- PR7 (sep 2026): emparejamiento remoto de tablets de kiosko.
 -- Esta migración faltaba del historial original: la migración siguiente
 -- asumía que la tabla ya existía y migrate deploy fallaba desde cero.
+--
+-- OJO: la tabla se crea como era el 23-sep, SIN `updated_at`. Esa columna (y su
+-- índice) la agrega `20260924000000_kiosko_pairing_updated_at`. Esta migración
+-- la traía ya incluida, así que desde cero la siguiente fallaba con
+-- `column "updated_at" ... already exists` (P3006 en la shadow database de
+-- `migrate dev`). Las bases existentes nunca ejecutaron este archivo (se
+-- marcó con `migrate resolve`), solo cambia su checksum.
 
 CREATE TYPE "KioskoPairingEstado" AS ENUM (
     'PENDIENTE', 'APROBADO', 'RECLAMADO', 'EXPIRADO', 'CANCELADO'
@@ -22,7 +29,6 @@ CREATE TABLE "kiosko_pairings" (
     "user_agent" VARCHAR(255),
     "expira_at" TIMESTAMP(3) NOT NULL,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "kiosko_pairings_pkey" PRIMARY KEY ("id")
 );
 

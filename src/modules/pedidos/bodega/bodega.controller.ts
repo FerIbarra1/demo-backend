@@ -12,7 +12,7 @@ import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiResponse } from '@ne
 import { BodegaService } from './bodega.service';
 import { SurtidoService } from './surtido.service';
 import { PedidoStateService } from '../core/pedido-state.service';
-import { MarcarSurtidoItemDto } from './dto/surtido.dto';
+import { ConfirmarSurtidoDto, MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { TomarGrupoDto } from './dto/tomar-grupo.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
@@ -128,19 +128,20 @@ export class BodegaController {
     return this.bodegaService.tomarGrupo(dto.ids, user);
   }
 
-  @Get('ajustes-plancha')
+  @Get('ajustes-entrega')
   @ApiOperation({
     summary:
-      'F17: pedidos que volvieron de la plancha y necesitan ajuste. Cada uno trae ' +
-      'qué quitar de la bolsa y qué traer del anaquel.',
+      'F17: pedidos que volvieron del área de entrega y necesitan ajuste. Aviso ' +
+      'para la tarjeta de /bodega: folio, cliente, canal y por qué volvió. El ' +
+      'detalle de prendas a mover vive en el sheet de surtido, no aquí.',
   })
   @ApiResponse({
     status: 200,
     description:
       'Array (puede ser vacío). Solo los que necesitan ajuste — un pedido liberado no aparece.',
   })
-  async ajustesPlancha(@CurrentUser() user: any) {
-    return this.bodegaService.obtenerAjustesPlancha(user.tiendaId);
+  async ajustesEntrega(@CurrentUser() user: any) {
+    return this.bodegaService.obtenerAjustesEntrega(user.tiendaId);
   }
 
   @Get('surtir-juntos/cola')
@@ -226,9 +227,16 @@ export class BodegaController {
     summary:
       'Cerrar surtido. Si hay faltantes, requiere una propuesta aceptada por el cliente. Aplica los cambios y pasa el pedido a PENDIENTE_PAGO.',
   })
-  async confirmarSurtido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
+  async confirmarSurtido(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: ConfirmarSurtidoDto,
+    @CurrentUser() user: any,
+  ) {
     const esAdmin = user.rol === RolUsuario.ADMIN;
-    return this.surtidoService.confirmarSurtido(id, user, esAdmin);
+    // F21: `itemsRetirados` es la lista que el bodeguero marcó en el checklist de
+    // retiro. Sin ella el sistema no registra que la mercancía ya salió de la
+    // bolsa (ver `ConfirmarSurtidoDto`).
+    return this.surtidoService.confirmarSurtido(id, user, esAdmin, dto.itemsRetirados ?? []);
   }
 
   /**

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsArray,
+  IsBoolean,
   IsIn,
   IsInt,
   IsNotEmpty,
@@ -33,6 +34,22 @@ export class PropuestaItemDto {
   @ApiProperty()
   @IsString()
   producto: string;
+
+  /**
+   * F21 (oct 2026): el código del producto (ej. "C0200").
+   *
+   * Faltaba en el DTO de ENTRADA aunque el editor lo manda en TODAS sus ramas
+   * desde oct 2026. Con `forbidNonWhitelisted: true` en el `ValidationPipe`
+   * global, eso significa que **ninguna propuesta del asesor se podía enviar**:
+   * el request moría con 400 antes de llegar al servicio.
+   *
+   * No lo veía ningún test porque todos llaman a los utils directamente, sin
+   * pasar por el pipe. Ver `propuesta-dto.spec.ts`, que existe justo para esto.
+   */
+  @ApiPropertyOptional({ description: 'Código del producto (ej. "C0200").' })
+  @IsOptional()
+  @IsString()
+  productoCodigo?: string | null;
 
   @ApiProperty()
   @IsString()
@@ -70,6 +87,27 @@ export class PropuestaItemDto {
   @IsOptional()
   @IsInt()
   cantidadOriginal?: number;
+  /** true solo si ventas/mostrador editó explícitamente esta línea. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  ajusteExplicito?: boolean;
+
+  /**
+   * F21 (oct 2026): lo que HAY en el anaquel, cuando difiere de lo que se lleva.
+   *
+   * Tiene que estar declarado aquí, no solo en `ItemPropuestaJson`: el
+   * `ValidationPipe` global corre con `forbidNonWhitelisted: true`, así que un
+   * campo fuera del DTO **rechaza el request con 400**. El editor de ventas manda
+   * la propuesta completa por `POST /pedidos/:id/mensajes/con-adjunto`, así que
+   * sin esta declaración el asesor no podría enviar ninguna propuesta que ajuste
+   * una cantidad — el flujo se rompe en producción, no en los tests (que llaman
+   * a los utils directamente y no pasan por el pipe).
+   */
+  @ApiPropertyOptional({ description: 'Lo que hay en el anaquel, si difiere de lo que se lleva.' })
+  @IsOptional()
+  @IsInt()
+  cantidadDisponible?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -215,6 +253,20 @@ export interface ItemPropuestaJson {
   productoOriginal?: string;
   varianteOriginal?: string;
   cantidadOriginal?: number;
+  /** true solo si ventas/mostrador editó explícitamente esta línea. */
+  ajusteExplicito?: boolean;
+  /**
+   * F21 (oct 2026): lo que HAY en el anaquel, cuando difiere de lo que el cliente
+   * se lleva.
+   *
+   * Es el número del medio en "Pediste 5 · Hay 3 · Te llevas 1". Sin él, la
+   * tarjeta de la propuesta solo puede pintar dos de los tres hechos — y el que
+   * se cae es justo "había 3", que es lo que le dice al cliente que no le están
+   * dando de menos.
+   *
+   * Se omite cuando coincide con `cantidadNueva`: no hay nada que aclarar.
+   */
+  cantidadDisponible?: number;
   productoNuevo?: string;
   varianteNueva?: string;
   cantidadNueva?: number;
