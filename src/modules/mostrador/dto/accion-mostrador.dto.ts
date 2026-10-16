@@ -35,22 +35,24 @@ import { Type } from 'class-transformer';
 export class ItemAjusteDto {
   @ApiPropertyOptional({
     description:
-      'ID del item existente. Obligatorio para parcial/no-disponible; ' + 'ausente para agregado.',
+      'ID del item existente. Obligatorio para parcial/no-disponible/reponer; ' +
+      'ausente para agregado.',
   })
   @IsOptional()
   @IsInt()
   itemId?: number;
 
   @ApiProperty({
-    enum: ['completo', 'parcial', 'no-disponible', 'agregado'],
+    enum: ['completo', 'parcial', 'no-disponible', 'agregado', 'reponer'],
     description:
       'completo = sin cambio · parcial = nueva cantidad · ' +
-      'no-disponible = quitar · agregado = producto nuevo',
+      'no-disponible = quitar · agregado = producto nuevo · ' +
+      'reponer = una línea que bodega no encontró vuelve al pedido',
   })
-  @IsIn(['completo', 'parcial', 'no-disponible', 'agregado'])
-  tipo!: 'completo' | 'parcial' | 'no-disponible' | 'agregado';
+  @IsIn(['completo', 'parcial', 'no-disponible', 'agregado', 'reponer'])
+  tipo!: 'completo' | 'parcial' | 'no-disponible' | 'agregado' | 'reponer';
 
-  @ApiPropertyOptional({ description: 'Nueva cantidad (para tipo=parcial).' })
+  @ApiPropertyOptional({ description: 'Nueva cantidad (para tipo=parcial o reponer).' })
   @IsOptional()
   @IsInt()
   @Min(1)
@@ -102,6 +104,25 @@ export class CancelarPedidoDto {
   @MinLength(3)
   @MaxLength(500)
   motivo!: string;
+}
+
+/**
+ * Oct 2026 (16-oct): confirmar la entrega. El operador dice QUIÉN recoge cuando no es el titular
+ * del pedido (el mandadero que mandó su patrón, un familiar). Sin nombre = lo recogió el titular.
+ *
+ * No es un permiso —no se le pide identificación a nadie— sino constancia: queda en el historial,
+ * en el detalle del pedido y en el correo de "entregado", donde el titular puede avisar si no
+ * reconoce a quien se lo llevó.
+ */
+export class EntregarPedidoDto {
+  @ApiPropertyOptional({
+    description: 'Nombre de quien recoge el pedido, solo si NO es el titular.',
+    example: 'Juan Pérez (chofer)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(150)
+  recogioNombre?: string;
 }
 
 export class EnviarAPagarDto {

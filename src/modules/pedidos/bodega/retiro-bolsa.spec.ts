@@ -273,23 +273,17 @@ describe('confirmarSurtido: registrar el retiro de la bolsa', () => {
     const { svc, itemUpdates } = crearServicio([item({ id: 10 })]);
 
     await expect(svc.confirmarSurtido(1, usuario, false)).resolves.toBeDefined();
-    expect(
-      itemUpdates.filter((u) => u.data?.piezasRetiradas != null),
-    ).toHaveLength(0);
+    expect(itemUpdates.filter((u) => u.data?.piezasRetiradas != null)).toHaveLength(0);
   });
 
   it('ignora ids que no tienen piezas fuera de la bolsa', async () => {
     // Un item marcado por error en el checklist no debe inflar el conteo: el
     // número sale del predicado, no de lo que el cliente mande.
-    const { svc, itemUpdates } = crearServicio([
-      item({ id: 11, cantidad: 5, cantidadSurtida: 5 }),
-    ]);
+    const { svc, itemUpdates } = crearServicio([item({ id: 11, cantidad: 5, cantidadSurtida: 5 })]);
 
     await svc.confirmarSurtido(1, usuario, false, [11]);
 
-    expect(
-      itemUpdates.filter((u) => u.data?.piezasRetiradas != null),
-    ).toHaveLength(0);
+    expect(itemUpdates.filter((u) => u.data?.piezasRetiradas != null)).toHaveLength(0);
   });
 });
 
@@ -343,5 +337,192 @@ describe('confirmarSurtido: el guard de coherencia cuenta lo que HAY en la bolsa
     ]);
 
     await expect(svc.confirmarSurtido(1, usuario, false, [22])).resolves.toBeDefined();
+  });
+});
+
+// =============================================================================
+// Oct 2026 (decisión 2): bodega verifica SOLO las piezas de más de una línea que se subió
+// =============================================================================
+//
+// Al subir de 3 a 5 con 3 en la bolsa, la línea queda PENDIENTE con
+// `cantidadSurtida: 3` y `piezasBase: 3`. Bodega marca el TOTAL (3 + lo que
+// encuentre) y nunca menos que `piezasBase`: esas 3 siguen dentro de la bolsa.
+
+describe('marcarItem: el piso de una línea que se subió (piezasBase)', () => {
+  const subida = (over: Partial<Record<string, unknown>> = {}) =>
+    item({
+      id: 9,
+      cantidad: 5,
+      cantidadSurtida: 3,
+      piezasBase: 3,
+      estadoSurtido: EstadoSurtido.PENDIENTE,
+      ...over,
+    });
+
+  it('"Hay todo" (5) y "hay menos" (4) son válidos: se suma a lo que ya está en la bolsa', async () => {
+    const { svc, itemUpdates } = crearServicio([subida()]);
+
+    await svc.marcarItem(
+      1,
+      9,
+      { cantidadSurtida: 5, estadoSurtido: EstadoSurtido.COMPLETO } as never,
+      usuario,
+    );
+    await svc.marcarItem(
+      1,
+      9,
+      { cantidadSurtida: 4, estadoSurtido: EstadoSurtido.PARCIAL } as never,
+      usuario,
+    );
+
+    expect(itemUpdates.map((u) => u.data.cantidadSurtida)).toEqual([5, 4]);
+  });
+
+  it('"no hay más" es marcar el piso (3), que queda PARCIAL: la línea NO se cancela', async () => {
+    const { svc, itemUpdates } = crearServicio([subida()]);
+
+    await svc.marcarItem(
+      1,
+      9,
+      { cantidadSurtida: 3, estadoSurtido: EstadoSurtido.PARCIAL } as never,
+      usuario,
+    );
+
+    expect(itemUpdates[0].data).toMatchObject({
+      cantidadSurtida: 3,
+      estadoSurtido: EstadoSurtido.PARCIAL,
+    });
+  });
+
+  it('rechaza "No hay" (0): cancelaría una línea con piezas dentro de la bolsa', async () => {
+    // El caso que justifica la columna: `NO_DISPONIBLE` cancela la línea y
+    // `datosDeFaltaDeBodega()` limpia el hallazgo, así que las 3 prendas quedarían
+    // dentro de la bolsa sin que el checklist ni la reposición supieran de ellas.
+    const { svc, itemUpdates } = crearServicio([subida()]);
+
+    await expect(
+      svc.marcarItem(
+        1,
+        9,
+        { cantidadSurtida: 0, estadoSurtido: EstadoSurtido.NO_DISPONIBLE } as never,
+        usuario,
+      ),
+    ).rejects.toThrow(/ya tiene 3 pieza\(s\) dentro de la bolsa/);
+    expect(itemUpdates).toHaveLength(0);
+  });
+
+  it.each([1, 2])('rechaza marcar %s, por debajo del piso', async (dto) => {
+    const { svc } = crearServicio([subida()]);
+
+    await expect(
+      svc.marcarItem(
+        1,
+        9,
+        { cantidadSurtida: dto, estadoSurtido: EstadoSurtido.PARCIAL } as never,
+        usuario,
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('el piso SOBREVIVE a la primera marca: corregir hacia abajo tras marcar también se rechaza', async () => {
+    // Es lo que no se puede derivar: tras marcar 5, `cantidadSurtida` ya es el total
+    // y se perdió cuántas estaban. Por eso la columna.
+    const { svc } = crearServicio([
+      subida({ cantidadSurtida: 5, estadoSurtido: EstadoSurtido.COMPLETO }),
+    ]);
+
+    await expect(
+      svc.marcarItem(
+        1,
+        9,
+        { cantidadSurtida: 0, estadoSurtido: EstadoSurtido.NO_DISPONIBLE } as never,
+        usuario,
+      ),
+    ).rejects.toThrow(/dentro de la bolsa/);
+  });
+
+  it('una línea sin piso (la normal) se marca como siempre, incluso "No hay"', async () => {
+    const { svc } = crearServicio([
+      item({ id: 3, cantidad: 5, cantidadSurtida: 0, estadoSurtido: EstadoSurtido.PENDIENTE }),
+    ]);
+
+    await expect(
+      svc.marcarItem(
+        1,
+        3,
+        { cantidadSurtida: 0, estadoSurtido: EstadoSurtido.NO_DISPONIBLE } as never,
+        usuario,
+      ),
+    ).resolves.toBeDefined();
+  });
+});
+
+describe('confirmarSurtido: el piso vive UNA ronda de surtido', () => {
+  it('lo limpia en todas las líneas al cerrar', async () => {
+    const { svc, prisma } = crearServicio([
+      item({
+        id: 9,
+        cantidad: 5,
+        cantidadSurtida: 5,
+        piezasBase: 3,
+        estadoSurtido: EstadoSurtido.COMPLETO,
+      }),
+    ]);
+    (prisma.itemPedido as any).updateMany = jest.fn(async () => ({ count: 1 }));
+
+    await svc.confirmarSurtido(1, usuario as never, false);
+
+    expect((prisma.itemPedido as any).updateMany).toHaveBeenCalledWith({
+      where: { pedidoId: 1, piezasBase: { gt: 0 } },
+      data: { piezasBase: 0 },
+    });
+  });
+
+  it('no escribe nada de más si ninguna línea tiene piso (el caso normal)', async () => {
+    const { svc, prisma } = crearServicio([item({ id: 9, cantidad: 5, cantidadSurtida: 5 })]);
+    (prisma.itemPedido as any).updateMany = jest.fn(async () => ({ count: 0 }));
+
+    await svc.confirmarSurtido(1, usuario as never, false);
+
+    expect((prisma.itemPedido as any).updateMany).not.toHaveBeenCalled();
+  });
+
+  it('no deja cerrar si la línea subida sigue PENDIENTE: bodega todavía no verifica lo de más', async () => {
+    const { svc } = crearServicio([
+      item({
+        id: 9,
+        cantidad: 5,
+        cantidadSurtida: 3,
+        piezasBase: 3,
+        estadoSurtido: EstadoSurtido.PENDIENTE,
+      }),
+    ]);
+
+    await expect(svc.confirmarSurtido(1, usuario as never, false)).rejects.toThrow(/aún PENDIENTE/);
+  });
+
+  it('una línea subida que bodega NO completa se liquida a lo que hay en la bolsa (PARCIAL)', async () => {
+    // Bodega encontró 0 de las 2 extra: marca el piso (3) → PARCIAL. Al cerrar, la
+    // línea queda en 3 (lo que hay en la bolsa), NO se cancela, y el cliente recibe
+    // una propuesta por la diferencia.
+    const { svc, prisma } = crearServicio([
+      item({
+        id: 9,
+        cantidad: 5,
+        cantidadSurtida: 3,
+        piezasBase: 3,
+        estadoSurtido: EstadoSurtido.PARCIAL,
+      }),
+    ]);
+    (prisma.itemPedido as any).updateMany = jest.fn(async () => ({ count: 1 }));
+
+    const r = await svc.confirmarSurtido(1, usuario as never, false);
+
+    expect(r.incompleto).toBe(true);
+    const liquidacion = (prisma.itemPedido.update as jest.Mock).mock.calls.find(
+      ([a]: any) => a.where.id === 9,
+    )![0].data;
+    expect(liquidacion).toMatchObject({ cantidad: 3, estadoSurtido: EstadoSurtido.COMPLETO });
+    expect(liquidacion.cancelada).toBeUndefined();
   });
 });

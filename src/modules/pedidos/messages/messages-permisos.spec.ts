@@ -31,6 +31,7 @@ function crearServicio() {
     {} as never, // propuesta
     {} as never, // configuracion
     {} as never, // state
+    {} as never, // ajuste
   );
 
   return { svc, prisma };

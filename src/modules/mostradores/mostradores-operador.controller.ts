@@ -27,7 +27,7 @@ export class MostradoresOperadorController {
   @ApiOperation({ summary: 'Mostrador asignado al operador actual (o null)' })
   async miMostrador(@CurrentUser() user: any) {
     if (!user.tiendaId) return null;
-    return this.service.delOperador(user.userId, user.tiendaId);
+    return this.service.delOperadorConCarga(user.userId, user.tiendaId);
   }
 
   @Get('disponibles')
@@ -39,7 +39,7 @@ export class MostradoresOperadorController {
   @Post('elegir')
   @ApiOperation({ summary: 'Elegir el mostrador donde trabaja el operador' })
   elegir(@CurrentUser() user: any, @Body() dto: ElegirMostradorDto) {
-    return this.service.elegir(user.userId, user.tiendaId, dto.mostradorId);
+    return this.service.elegir(user.userId, user.tiendaId, dto.mostradorId, dto.forzar === true);
   }
 
   @Post('liberar')

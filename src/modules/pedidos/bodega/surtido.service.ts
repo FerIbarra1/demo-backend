@@ -201,6 +201,8 @@ export class SurtidoService {
         pedidoId: true,
         cantidad: true,
         cantidadSurtida: true,
+        // Oct 2026 (decisión 2): el piso de lo que se puede marcar.
+        piezasBase: true,
         cancelada: true,
       },
     });
@@ -225,6 +227,28 @@ export class SurtidoService {
     if (dto.cantidadSurtida > item.cantidad) {
       throw new BadRequestException(
         `La cantidad surtida (${dto.cantidadSurtida}) no puede exceder la cantidad pedida (${item.cantidad}).`,
+      );
+    }
+
+    /**
+     * Oct 2026 (decisión 2 del dueño): el PISO de una línea que se subió.
+     *
+     * Al subir de 3 a 5 con 3 en la bolsa, bodega verifica SOLO las 2 de más:
+     * `piezasBase` (3) son piezas que ya están dentro de la bolsa del área de entrega
+     * y lo que se marca es el TOTAL (3 + lo que encuentre). Marcar menos de 3 no
+     * tiene sentido físico —esas 3 siguen ahí— y es justo el error que deja piezas
+     * sin dueño: un "No hay" (0) cancela la línea entera y `datosDeFaltaDeBodega()`
+     * limpia el hallazgo, así que ni el checklist de retiro ni la reposición sabrían
+     * que quedan 3 prendas dentro de la bolsa.
+     *
+     * No es un caso de `validarCoherencia`: ahí PENDIENTE/COMPLETO/NO_DISPONIBLE se
+     * validan contra el DTO solo. Este piso depende del ITEM.
+     */
+    if (item.piezasBase > 0 && dto.cantidadSurtida < item.piezasBase) {
+      throw new BadRequestException(
+        `Esta línea ya tiene ${item.piezasBase} pieza(s) dentro de la bolsa de un surtido ` +
+          `anterior: marca de ${item.piezasBase} para arriba. Bodega solo verifica las ` +
+          `${Math.max(0, item.cantidad - item.piezasBase)} de más.`,
       );
     }
 
@@ -549,6 +573,20 @@ export class SurtidoService {
             await tx.itemPedido.update({
               where: { id: itemId },
               data: { piezasRetiradas: { increment: piezas } },
+            });
+          }
+
+          // Oct 2026 (decisión 2): el piso `piezasBase` vive UNA ronda de surtido. Al
+          // cerrarla ya no hay nada que bodega deba verificar de más, y dejarlo
+          // puesto bloquearía marcar la línea más abajo en un surtido futuro (si
+          // entre tanto se quitan piezas de la bolsa).
+          //
+          // Solo se escribe si alguna línea lo tiene: el caso normal (nadie subió
+          // nada) no paga una escritura de más.
+          if (pedido.items.some((i) => i.piezasBase > 0)) {
+            await tx.itemPedido.updateMany({
+              where: { pedidoId, piezasBase: { gt: 0 } },
+              data: { piezasBase: 0 },
             });
           }
 

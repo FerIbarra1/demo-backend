@@ -55,6 +55,7 @@ function crearServicio(opciones: { ultimoMensajeReal?: number | null } = {}) {
     {} as never, // propuesta
     {} as never, // configuracion
     {} as never, // state
+    {} as never, // ajuste
   );
 
   return { svc, updateMany, aggregate, realtime };

@@ -69,6 +69,9 @@ async function bootstrap() {
   app.enableCors({
     origin: process.env.NODE_ENV === 'production' ? corsOrigins : true,
     credentials: true,
+    // Sin esto el navegador (otro origen) NO deja leer `Content-Disposition`, y una descarga
+    // pierde el nombre de archivo que el servidor le puso (p. ej. el CSV de conciliación).
+    exposedHeaders: ['Content-Disposition'],
   });
 
   // Prefijo global

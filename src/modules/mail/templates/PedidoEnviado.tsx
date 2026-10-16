@@ -15,20 +15,19 @@ export const PedidoEnviado = ({ pedido, pedidoUrl, logoUrl, frontendUrl }: Pedid
   <PedidoEmailShell
     preview={`Tu pedido ${folioVisible(pedido)} ya va en camino`}
     title={`¡Tu pedido va en camino!`}
-    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido ${folioVisible(pedido)} salió de nuestras instalaciones y ya va en camino a la dirección que nos diste.`}
+    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido ya salió de nuestras instalaciones y va hacia la dirección que registraste.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     logoUrl={logoUrl}
     frontendUrl={frontendUrl}
     bodyExtras={
       <>
-        {pedido.paqueteria || pedido.direccionEnvio ? (
-          <Callout
-            variant="success"
-            label={pedido.paqueteria ? `Enviado por ${pedido.paqueteria}` : 'Se enviará a'}
-          >
-            {pedido.direccionEnvio ??
-              'Tu pedido viaja con la paquetería que elegiste al confirmar la compra.'}
+        {/* La paquetería ya va en el resumen ("Paquetería:"): aquí solo la dirección, que es lo
+            que el cliente debe poder verificar. Antes se repetía la paquetería en una tarjeta y
+            en una frase. */}
+        {pedido.direccionEnvio ? (
+          <Callout variant="success" label="Se envía a">
+            {pedido.direccionEnvio}
           </Callout>
         ) : null}
         <Text
@@ -39,8 +38,8 @@ export const PedidoEnviado = ({ pedido, pedidoUrl, logoUrl, frontendUrl }: Pedid
             lineHeight: '1.6',
           }}
         >
-          Recibirás otro correo en cuanto tu pedido sea entregado. Si necesitas rastrearlo,
-          contáctanos con tu folio {folioVisible(pedido)}.
+          Te avisaremos por correo cuando se entregue. Si necesitas rastrearlo, contáctanos con tu
+          folio.
         </Text>
       </>
     }

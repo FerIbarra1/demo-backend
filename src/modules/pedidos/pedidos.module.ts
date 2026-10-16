@@ -16,6 +16,7 @@ import { MessagesController } from './messages/messages.controller';
 import { MessagesService } from './messages/messages.service';
 import { PropuestaController } from './propuesta/propuesta.controller';
 import { PropuestaService } from './propuesta/propuesta.service';
+import { AjusteService } from './propuesta/ajuste.service';
 import { VentasController } from './ventas/ventas.controller';
 import { VentasService } from './ventas/ventas.service';
 import { ReposicionController } from './reposicion/reposicion.controller';
@@ -87,6 +88,7 @@ import { KioskoModule } from '../kiosko/kiosko.module';
     AdminService,
     MessagesService,
     PropuestaService,
+    AjusteService,
     VentasService,
     ReposicionService,
     PedidoAccessService,

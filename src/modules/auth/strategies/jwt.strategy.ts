@@ -31,14 +31,21 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       include: { tienda: true },
     });
 
-    if (!usuario || !usuario.activo) {
+    // `deletedAt` además de `activo`: `eliminar()` marca los dos, pero la baja lógica no
+    // debe depender de que alguien recuerde apagar el otro flag.
+    if (!usuario || !usuario.activo || usuario.deletedAt !== null) {
       throw new UnauthorizedException('Usuario no encontrado o inactivo');
     }
 
     return {
       userId: payload.sub,
       email: payload.email,
-      rol: payload.rol,
+      // Oct 2026: el rol sale de la BD, NO del token. `tiendaId` ya salía de la BD, pero
+      // `rol` se copiaba del token firmado: cambiarle el rol a un empleado (o quitarle
+      // el de ADMIN) no surtía efecto hasta que expiraba su access token, aunque las
+      // sesiones nuevas ya vinieran con el rol correcto. Con un rol que tocará dinero,
+      // el permiso tiene que ser el de ahora, no el de cuando inició sesión.
+      rol: usuario.rol,
       tiendaId: usuario.tiendaId,
       nombre: usuario.nombre,
     };

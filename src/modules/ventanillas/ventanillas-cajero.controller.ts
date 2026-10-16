@@ -34,8 +34,11 @@ export class VentanillasCajeroController {
 
   @Post('elegir')
   @ApiOperation({ summary: 'Elegir la ventanilla donde trabaja el cajero' })
-  async elegir(@CurrentUser() user: any, @Body() body: { ventanillaId: number }) {
-    return this.service.elegir(user.userId, user.tiendaId, body.ventanillaId);
+  async elegir(
+    @CurrentUser() user: any,
+    @Body() body: { ventanillaId: number; forzar?: boolean },
+  ) {
+    return this.service.elegir(user.userId, user.tiendaId, body.ventanillaId, body.forzar === true);
   }
 
   @Post('liberar')

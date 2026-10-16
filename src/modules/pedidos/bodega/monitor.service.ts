@@ -5,6 +5,8 @@ import { MonitorResponseDto, MonitorPedidoDto, MonitorBodegueroDto } from './dto
 import { MAX_PEDIDOS_POR_BODEGUERO, ESTADOS_OCUPAN_SLOT_BODEGA } from '../core/pedido-limits';
 import { asignadoANombre } from '../core/pedido-mapper';
 import { derivarMotivoReingreso } from '../core/motivo-reingreso';
+import { clientePresenteEnTienda } from '../core/presencia.util';
+import { INACTIVIDAD_ESTACION_MS } from '../core/estacion.util';
 
 /**
  * Umbrales de antigüedad (en minutos) para asignar nivel de urgencia.
@@ -22,14 +24,6 @@ const UMBRALES_BODEGUERO = [4, 7, 10];
 const BONO_TIENDA_MIN = 1;
 const TOP_SUGERENCIAS = 3;
 const UMBRAL_SUGERENCIA = 4; // al menos un match por producto, no sólo categoría + bono
-
-/**
- * F6 (jul 2026): ventana de logueo para considerar a un bodeguero "activo"
- * en el monitor. Replica la lógica del monitor de cajeros. Un bodeguero
- * con `activo=true` en DB pero que no se ha logueado en este tiempo NO
- * aparece en el equipo, para no inflar la sensación de personal disponible.
- */
-const VENTANA_LOGUEO_BODEGUERO_MS = 12 * 60 * 60 * 1000;
 
 @Injectable()
 export class MonitorService {
@@ -59,25 +53,28 @@ export class MonitorService {
 
     const ahora = new Date();
 
-    // 1) Equipo de bodega activo de esta tienda. F6 (jul 2026): filtramos
-    // además por lastLogin reciente. F7 (jul 2026): también por
-    // `ultimoHeartbeat` (ping cada 5min desde la tablet del bodeguero).
-    // Un bodeguero que NO esté físicamente en su tablet desaparece del
-    // monitor aunque su `lastLogin` sea reciente.
-    const limiteLogueo = new Date(ahora.getTime() - VENTANA_LOGUEO_BODEGUERO_MS);
+    // 1) Equipo de bodega EN LÍNEA en esta tienda. Oct 2026: "en línea" es un estado, no una ventana
+    // de 12 h desde el último login: entrar lo pone (`BodegaPresenciaService.entro`), el latido de la
+    // tablet lo mantiene y cerrar sesión lo quita (con lo que traía en las manos, que regresa a la
+    // cola). Se incluye también a quien aún trae pedidos aunque su latido haya caducado: el
+    // barrido (cada 5 min) todavía no lo saca, y sin esto sus pedidos desaparecían de la TV (ya no
+    // salen en las columnas porque "viven" en su ficha) durante esos minutos.
+    const limiteLatido = new Date(ahora.getTime() - INACTIVIDAD_ESTACION_MS);
     const bodeguerosRaw = await this.prisma.usuario.findMany({
       where: {
         rol: RolUsuario.BODEGA,
         tiendaId,
         activo: true,
-        OR: [{ lastLogin: { gte: limiteLogueo } }, { ultimoHeartbeat: { gte: limiteLogueo } }],
+        OR: [
+          { ultimoHeartbeat: { gte: limiteLatido } },
+          { pedidosAsignados: { some: { estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } } } },
+        ],
       },
       select: {
         id: true,
         nombre: true,
         apellido: true,
         activo: true,
-        lastLogin: true,
         pedidosAsignados: {
           // F12: incluir ESPERANDO_APROBACION para que el slot del
           // bodeguero muestre "esperando cliente" (el pedido sigue asignado).
@@ -89,6 +86,11 @@ export class MonitorService {
             numeroPedido: true,
             estado: true,
             asignadoAt: true,
+            // Oct 2026: ¿el cliente de lo que está surtiendo ya llegó? El encargado lo ve en la
+            // ficha del bodeguero sin tener que cruzarlo con las columnas de abajo.
+            canalOrigen: true,
+            llegadaAnunciadaAt: true,
+            llegadaDescartadaAt: true,
           },
         },
       },
@@ -96,9 +98,7 @@ export class MonitorService {
 
     const equipo: MonitorBodegueroDto[] = bodeguerosRaw.map((b) => {
       // F6 (jul 2026): hasta MAX_PEDIDOS_POR_BODEGUERO slots. Calculamos
-      // nivelUrgencia por slot usando UMBRALES_BODEGUERO. La "última
-      // actividad" del bodeguero es el asignadoAt más reciente de sus
-      // pedidos en curso, o su lastLogin si está libre.
+      // nivelUrgencia por slot usando UMBRALES_BODEGUERO.
       const slots = b.pedidosAsignados.map((p) => {
         const minutosEnProceso = p.asignadoAt ? this.minutosEntre(p.asignadoAt, ahora) : 0;
         return {
@@ -112,18 +112,16 @@ export class MonitorService {
             | 1
             | 2
             | 3,
+          clienteEnTienda: clientePresenteEnTienda(p),
         };
       });
-      const masReciente = b.pedidosAsignados[0]?.asignadoAt ?? null;
       return {
         id: b.id,
         nombre: b.nombre,
         apellido: b.apellido,
         activo: b.activo,
-        lastLogin: b.lastLogin ? b.lastLogin.toISOString() : null,
         pedidosActuales: slots,
         maxPedidos: MAX_PEDIDOS_POR_BODEGUERO,
-        ultimaActividad: (masReciente ?? b.lastLogin ?? new Date(0)).toISOString(),
       };
     });
 
@@ -161,6 +159,10 @@ export class MonitorService {
         asignadoAt: true,
         asignadoAId: true,
         asignadoA: { select: { nombre: true, apellido: true } },
+        // Oct 2026: presencia del cliente (ver `clienteEnTienda` en el DTO).
+        llegadaAnunciadaAt: true,
+        llegadaDescartadaAt: true,
+        presenteDesdeAt: true,
         cajeroAsignadoId: true,
         cajeroAsignadoAt: true,
         cajeroAsignado: { select: { nombre: true, apellido: true } },
@@ -182,15 +184,24 @@ export class MonitorService {
 
     const pedidosFormateados: MonitorPedidoDto[] = pedidosRaw.map((p) => {
       // El "tiempo en cola" para el monitor:
-      //   - SOLICITADO  → desde fechaPedido (esperando ser tomado)
-      //   - otros           → desde fechaPedido igual (cuenta total desde la creación)
-      // El bono de tienda resta 1 minuto al cálculo visual.
-      const minutosBase = this.minutosEntre(p.fechaPedido, ahora);
+      //   - cliente AUSENTE → desde fechaPedido (cuánto lleva el pedido esperando).
+      //   - cliente PRESENTE (kiosko, o web que ya avisó llegada) → desde que está esperando EN la
+      //     tienda: es lo que el encargado necesita ver, y es el criterio de urgencia que ya
+      //     se usa para kiosko. Un pedido web hecho hace dos horas cuyo cliente acaba de entrar
+      //     no está "dos horas crítico": lleva un minuto con alguien de pie.
+      // El bono de tienda resta 1 minuto al cálculo visual de los pedidos de KIOSKO.
+      const clienteEnTienda = clientePresenteEnTienda(p);
+      const desde = clienteEnTienda
+        ? (p.presenteDesdeAt ?? p.llegadaAnunciadaAt ?? p.fechaPedido)
+        : p.fechaPedido;
+      const minutosBase = this.minutosEntre(desde, ahora);
       const minutos =
         p.canalOrigen === CanalOrigen.KIOSKO
           ? Math.max(0, minutosBase - BONO_TIENDA_MIN)
           : minutosBase;
-      const umbrales = p.canalOrigen === CanalOrigen.KIOSKO ? UMBRALES_TIENDA : UMBRALES_WEB;
+      // Un cliente web ya presente se mide con los umbrales de tienda: está esperando de pie igual.
+      const umbrales =
+        p.canalOrigen === CanalOrigen.KIOSKO || clienteEnTienda ? UMBRALES_TIENDA : UMBRALES_WEB;
       const nivelUrgencia = this.calcularUrgencia(minutos, umbrales);
 
       const nombreAsignado = asignadoANombre(p.asignadoA);
@@ -248,6 +259,10 @@ export class MonitorService {
         // para no romper el frontend que aún lo lee.
         motivoReingreso,
         itemsNuevos,
+        clienteEnTienda,
+        presenteDesdeAt: clienteEnTienda
+          ? (p.presenteDesdeAt ?? p.llegadaAnunciadaAt ?? p.fechaPedido).toISOString()
+          : null,
       };
     });
 
@@ -281,19 +296,35 @@ export class MonitorService {
       p.itemsCompartidos = data?.itemsCompartidos ?? 0;
     }
 
-    // 3) Separar por canal y ordenar por edad desc (más viejos arriba)
+    // 3) Separar por canal. Orden: primero los que tienen al cliente EN la tienda (es el mismo
+    //    criterio que la cola de la consola de bodega: el cliente de pie va antes que el que ni
+    //    ha salido de casa), y dentro de cada grupo el más viejo arriba.
+    // Entre los que tienen al cliente EN la tienda, el que lleva más ESPERANDO (hora exacta de su
+    // llegada): comparar minutos enteros dejaba empatados a todos los que llegaron en el último
+    // minuto, y el desempate caía en la fecha del pedido — no en quién llegó antes.
+    const porUrgencia = (a: MonitorPedidoDto, b: MonitorPedidoDto) => {
+      if (a.clienteEnTienda !== b.clienteEnTienda) return a.clienteEnTienda ? -1 : 1;
+      if (a.clienteEnTienda && a.presenteDesdeAt && b.presenteDesdeAt) {
+        return Date.parse(a.presenteDesdeAt) - Date.parse(b.presenteDesdeAt);
+      }
+      return b.minutosEnCola - a.minutosEnCola;
+    };
     const pedidosTienda = pedidosFormateados
       .filter((p) => p.canalOrigen === CanalOrigen.KIOSKO)
-      .sort((a, b) => b.minutosEnCola - a.minutosEnCola);
+      .sort(porUrgencia);
     const pedidosWeb = pedidosFormateados
       .filter((p) => p.canalOrigen === CanalOrigen.WEB)
-      .sort((a, b) => b.minutosEnCola - a.minutosEnCola);
+      .sort(porUrgencia);
 
     // 4) Contadores
     const contadores = {
       pedidosEnTienda: pedidosTienda.length,
       pedidosWeb: pedidosWeb.length,
       alertasCriticas: pedidosFormateados.filter((p) => p.nivelUrgencia >= 3).length,
+      // Clientes de pie esperando: los de la cola más los que ya están en manos de un bodeguero.
+      clientesEnTienda:
+        pedidosFormateados.filter((p) => p.clienteEnTienda).length +
+        equipo.reduce((n, b) => n + b.pedidosActuales.filter((s) => s.clienteEnTienda).length, 0),
       bodeguerosLibres: equipo.filter((b) => b.pedidosActuales.length === 0).length,
       bodeguerosOcupados: equipo.filter((b) => b.pedidosActuales.length > 0).length,
       totalEnCola: pedidosFormateados.length,

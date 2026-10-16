@@ -2,7 +2,12 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { Prisma, EstadoSurtido } from '@prisma/client';
 import { recalcularTotalesPedido } from './totales.util';
 import { construirItemPedido } from './item-pedido.util';
-import { datosDeRetiroPorDecision, datosDeFaltaDeBodega } from './cancelacion-linea.util';
+import {
+  datosDeRetiroPorDecision,
+  datosDeFaltaDeBodega,
+  datosDeReposicion,
+  sePuedeReponer,
+} from './cancelacion-linea.util';
 import { calcularAjusteDeCantidad, piezasEnLaBolsa } from './ajuste-cantidad.util';
 import type { ColumnaLista } from '../../precios/precio-lista.util';
 import type { ItemPropuestaJson } from '../propuesta/dto/propuesta.dto';
@@ -249,6 +254,7 @@ export async function aplicarPropuestaDeVentas(
           cantidadSurtida: true,
           piezasRetiradas: true,
           estadoSurtido: true,
+          cancelada: true,
         },
       });
       if (!actual) continue;
@@ -265,6 +271,30 @@ export async function aplicarPropuestaDeVentas(
           }),
         });
         cambios.push(`Item #${it.itemId} quitado del pedido`);
+        continue;
+      }
+      // Oct 2026 (decisión 3): un `parcial` sobre una línea que BODEGA NO ENCONTRÓ es
+      // una REPOSICIÓN. El snapshot la describe como `parcial` ("Pediste 5 · Hay 0 ·
+      // Te llevas 3") y quien decide que es una reposición es el estado de la línea
+      // en la BD, no una marca del snapshot: un snapshot viejo no puede resucitar
+      // una línea que no esté sin existencia.
+      //
+      // Vuelve como una línea que nadie ha visto en el anaquel (`PENDIENTE`, 0
+      // apartadas), así que el pedido pasa por bodega — `pendientesRestantes` de
+      // abajo lo detecta solo. `cantidadPedida` no se toca: sigue siendo lo que el
+      // cliente pidió.
+      if (sePuedeReponer(actual)) {
+        await tx.itemPedido.update({
+          where: { id: it.itemId },
+          data: {
+            ...datosDeReposicion(),
+            cantidad: nuevaCantidad,
+            subtotal: new Prisma.Decimal(actual.precioUnitario).mul(nuevaCantidad),
+          },
+        });
+        cambios.push(
+          `Item #${it.itemId} repuesto (${nuevaCantidad} pzas, vuelve a bodega a surtir)`,
+        );
         continue;
       }
       // La cantidad ajustada tiene que quedar COHERENTE con lo que bodega

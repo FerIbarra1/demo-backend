@@ -1,177 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  IsArray,
-  IsBoolean,
-  IsIn,
-  IsInt,
-  IsNotEmpty,
-  IsNumber,
-  IsOptional,
-  IsString,
-  MaxLength,
-  Min,
-  ValidateIf,
-  ValidateNested,
-} from 'class-validator';
-import { Type } from 'class-transformer';
-
-/**
- * F12 (sep 2026): item de una propuesta de ajuste que bodega envía al cliente.
- * Mismo shape que el frontend `lib/propuesta.ts` (ItemPropuesta), para que el
- * snapshot sea directamente renderizable.
- */
-export class PropuestaItemDto {
-  @ApiProperty({ description: 'itemId real del pedido (>=1) o tempId negativo para agregados' })
-  @IsInt()
-  itemId: number;
-
-  @ApiProperty({
-    enum: ['completo', 'cambio', 'no-disponible', 'parcial', 'agregado'],
-  })
-  @IsString()
-  tipo: string;
-
-  @ApiProperty()
-  @IsString()
-  producto: string;
-
-  /**
-   * F21 (oct 2026): el código del producto (ej. "C0200").
-   *
-   * Faltaba en el DTO de ENTRADA aunque el editor lo manda en TODAS sus ramas
-   * desde oct 2026. Con `forbidNonWhitelisted: true` en el `ValidationPipe`
-   * global, eso significa que **ninguna propuesta del asesor se podía enviar**:
-   * el request moría con 400 antes de llegar al servicio.
-   *
-   * No lo veía ningún test porque todos llaman a los utils directamente, sin
-   * pasar por el pipe. Ver `propuesta-dto.spec.ts`, que existe justo para esto.
-   */
-  @ApiPropertyOptional({ description: 'Código del producto (ej. "C0200").' })
-  @IsOptional()
-  @IsString()
-  productoCodigo?: string | null;
-
-  @ApiProperty()
-  @IsString()
-  variante: string;
-
-  @ApiPropertyOptional({ description: 'Imagen del producto (del color pedido).' })
-  @IsOptional()
-  @IsString()
-  productoImagen?: string | null;
-
-  @ApiProperty()
-  @IsInt()
-  @Min(0)
-  cantidad: number;
-
-  @ApiProperty()
-  @IsNumber()
-  precioUnitario: number;
-
-  @ApiProperty()
-  @IsNumber()
-  subtotal: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  productoOriginal?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  varianteOriginal?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  cantidadOriginal?: number;
-  /** true solo si ventas/mostrador editó explícitamente esta línea. */
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  ajusteExplicito?: boolean;
-
-  /**
-   * F21 (oct 2026): lo que HAY en el anaquel, cuando difiere de lo que se lleva.
-   *
-   * Tiene que estar declarado aquí, no solo en `ItemPropuestaJson`: el
-   * `ValidationPipe` global corre con `forbidNonWhitelisted: true`, así que un
-   * campo fuera del DTO **rechaza el request con 400**. El editor de ventas manda
-   * la propuesta completa por `POST /pedidos/:id/mensajes/con-adjunto`, así que
-   * sin esta declaración el asesor no podría enviar ninguna propuesta que ajuste
-   * una cantidad — el flujo se rompe en producción, no en los tests (que llaman
-   * a los utils directamente y no pasan por el pipe).
-   */
-  @ApiPropertyOptional({ description: 'Lo que hay en el anaquel, si difiere de lo que se lleva.' })
-  @IsOptional()
-  @IsInt()
-  cantidadDisponible?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  productoNuevo?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  varianteNueva?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  cantidadNueva?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsNumber()
-  precioUnitarioNuevo?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsNumber()
-  subtotalNuevo?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  tempId?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  productoId?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  precioCOId?: number;
-}
-
-export class CrearPropuestaDto {
-  @ApiProperty({ type: [PropuestaItemDto] })
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => PropuestaItemDto)
-  items: PropuestaItemDto[];
-
-  @ApiProperty({
-    description:
-      'Total propuesto. El backend lo RECALCULA desde los items y lo ignora: ' +
-      'ahora que el asesor de ventas propone precios, confiar en este valor ' +
-      'permitiría aprobar un número distinto al que se cobra.',
-  })
-  @IsNumber()
-  @Min(0)
-  total: number;
-
-  @ApiPropertyOptional({ description: 'Nota libre del autor que acompaña la propuesta' })
-  @IsOptional()
-  @IsString()
-  nota?: string;
-}
+import { IsIn, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateIf } from 'class-validator';
 
 /**
  * F13 (sep 2026): decisiones del cliente. Cuáles son legales depende del
@@ -250,6 +78,24 @@ export interface ItemPropuestaJson {
   cantidad: number;
   precioUnitario: number;
   subtotal: number;
+  /**
+   * Oct 2026: lo que esta línea VALÍA antes de esta propuesta (cantidad × precio
+   * congelado del item, tal como estaba en el pedido).
+   *
+   * Lo sella el SERVIDOR (`calcularAjuste`), nunca el navegador. Desde la Fase 2
+   * el cliente de la API ni siquiera manda líneas: manda su intención
+   * (`IntencionAjusteDto`) y el servidor arma todo el snapshot.
+   *
+   * Existe porque la tarjeta no podía decir "antes de estos cambios" con el
+   * `subtotal` de la propia línea: una línea sin existencia viaja con
+   * `subtotal: 0` (no se cobra) y una completa con el precio YA re-evaluado, así
+   * que la suma daba $548.75 donde el pedido valía $707.75 y la tarjeta le
+   * mostraba al cliente una baja de $178.75 cuando la real era de $337.75.
+   *
+   * Ausente en propuestas anteriores a este cambio y en las líneas `agregado`
+   * (no existían en el pedido). La tarjeta no inventa un total "antes" si falta.
+   */
+  subtotalOriginal?: number;
   productoOriginal?: string;
   varianteOriginal?: string;
   cantidadOriginal?: number;
@@ -275,4 +121,20 @@ export interface ItemPropuestaJson {
   tempId?: number;
   productoId?: number;
   precioCOId?: number;
+  /**
+   * Fase 2 (oct 2026): cuántas piezas de esta línea tiene que surtir bodega
+   * (las que exceden lo que ya está en la bolsa). Ausente cuando es 0.
+   *
+   * Lo estampa la calculadora (`calcularAjuste`): la tarjeta del cliente solo suma
+   * este campo para decir "Bodega surtirá N piezas más", sin reimplementar la
+   * regla de qué hay en la bolsa.
+   */
+  piezasPorSurtir?: number;
+  /**
+   * Fase 2: el precio de mayoreo de esta propuesta depende de piezas que bodega
+   * aún no ha visto (si no las encuentra, el pedido baja de 12 y el precio se
+   * recalcula). Se estampa en TODAS las líneas cuando aplica, porque el snapshot
+   * es un arreglo y no tiene dónde llevar un dato de la propuesta entera.
+   */
+  mayoreoCondicional?: boolean;
 }

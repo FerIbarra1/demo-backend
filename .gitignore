@@ -86,6 +86,10 @@ test-results/
 
 # Imágenes subidas en local (fallback sin S3). En prod viven en el bucket.
 /uploads/
+# Comprobantes de transferencia en desarrollo (datos bancarios de clientes): jamás al repo.
+/storage-privado/
 
 # Trazas de build de Next.js (el frontend es un repo aparte; no pertenecen aquí)
 /.next/
+# Comprobantes de transferencia en dev (sin S3): datos bancarios de clientes, nunca al repo.
+/storage-privado

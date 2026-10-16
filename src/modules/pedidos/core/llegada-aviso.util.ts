@@ -147,6 +147,32 @@ export function evaluarAviso(
 const TERMINALES = new Set<EstadoPedido>([EstadoPedido.ENTREGADO, EstadoPedido.CANCELADO]);
 
 /**
+ * Estados en los que el aviso CAMBIA algo (ver la tabla de arriba). Es lo que decide si la app del
+ * cliente le ofrece "Ya llegué a la tienda" (`puedeAvisarLlegada`).
+ *
+ * El servidor aceptaría el aviso en `PENDIENTE_PAGO` o `PAGADO`, pero ahí "solo deja constancia":
+ * el cliente ya pasó por mostrador y no hay cola que entrar ni bodega que apurar. Ofrecerle el
+ * botón (o seguir diciéndole "Ya avisamos que llegaste") en el detalle de un pedido que está por
+ * pagarse no tenía sentido, y la pantalla lo decidía por su cuenta con una lista de estados que
+ * podía desincronizarse de esta. `EN_ATENCION` tampoco: ya lo están atendiendo.
+ */
+const ESTADOS_DONDE_EL_AVISO_SIRVE = new Set<EstadoPedido>([
+  EstadoPedido.SOLICITADO,
+  EstadoPedido.EN_REVISION,
+  EstadoPedido.ESPERANDO_APROBACION,
+  EstadoPedido.EN_ASESORIA,
+  EstadoPedido.REVISADO,
+]);
+
+/** ¿La app del cliente debe ofrecer el aviso de llegada (o mostrar que ya lo avisó)? */
+export function avisoDeLlegadaSirve(pedido: {
+  estado: EstadoPedido;
+  modoEntrega: ModoEntrega;
+}): boolean {
+  return evaluarAviso(pedido, 'CLIENTE').puede && ESTADOS_DONDE_EL_AVISO_SIRVE.has(pedido.estado);
+}
+
+/**
  * Compatibilidad: la regla vista desde el CLIENTE (F22: ya solo rechaza los
  * terminales y los pedidos a domicilio).
  *

@@ -2,7 +2,7 @@ import { EstadoSurtido, Prisma } from '@prisma/client';
 import { construirPropuestaDeBodega } from './propuesta-bodega.util';
 import { aplicarPropuestaDeVentas } from './aplicar-propuesta-ventas.util';
 import { aplicarCambiosFisicos } from './aplicar-cambios-surtido.util';
-import { totalDePropuesta } from './total-propuesta.util';
+import { calcularAjuste } from './calculadora-ajuste.util';
 import { seRetiraronPiezas } from './cancelacion-linea.util';
 import { precioConPromoVolumen, COLUMNA_MAYOREO } from '../../precios/precio-lista.util';
 
@@ -355,7 +355,10 @@ describe('F20 — paso 2: el cliente pide ajustes y entra el asesor', () => {
     // nadie verificó las 2 piezas nuevas.
     expect(y.data.cantidad).toBe(5);
     expect(y.data.estadoSurtido).toBe(EstadoSurtido.PENDIENTE);
-    expect(y.data.cantidadSurtida).toBe(0);
+    // Decisión 2 (oct 2026): las 3 apartadas se conservan como piso y bodega verifica
+    // solo las 2 nuevas.
+    expect(y.data.cantidadSurtida).toBe(3);
+    expect(y.data.piezasBase).toBe(3);
     expect(r.quedanPendientes).toBe(true);
   });
 
@@ -434,9 +437,15 @@ describe('F20 — paso 3: el dinero que se aprueba es el que se cobra', () => {
       'lista1',
     );
 
-    // Lo que queda: solo Y con 3 piezas.
-    const sobreviven = [{ cantidad: 3, base: BASE, mayoreo: MAYOREO, precioUnitario: 80 }];
-    const totalPropuesta = totalDePropuesta(sobreviven);
+    // Lo que queda: solo Y con 3 piezas. La calculadora arma el total desde la
+    // INTENCIÓN del asesor (quitar X y Z; Y se queda en lo que hay).
+    const totalPropuesta = calcularAjuste(
+      items as never,
+      [
+        { accion: 'QUITAR', itemId: 1 },
+        { accion: 'QUITAR', itemId: 3 },
+      ],
+    ).total;
 
     // 3 piezas < 12 → la promo se revoca → $100/pieza.
     expect(totalPropuesta).toBe(300);
@@ -454,18 +463,27 @@ describe('F20 — paso 3: el dinero que se aprueba es el que se cobra', () => {
 
   it('la propuesta NO suma la línea que se quita', () => {
     // X (10 pzas) sale; solo queda Y con 3.
-    const total = totalDePropuesta([
-      { cantidad: 0, base: BASE, mayoreo: MAYOREO, precioUnitario: 80 },
-      { cantidad: 3, base: BASE, mayoreo: MAYOREO, precioUnitario: 80 },
-    ]);
+    const { total } = calcularAjuste(
+      [
+        item(1, 'X', 10, 10, 10, EstadoSurtido.COMPLETO),
+        item(2, 'Y', 5, 5, 3, EstadoSurtido.PARCIAL),
+      ] as never,
+      [{ accion: 'QUITAR', itemId: 1 }],
+    );
     expect(total).toBe(300);
   });
 
   it('un pedido donde TODO se quita da 0, no el total original', () => {
-    const total = totalDePropuesta([
-      { cantidad: 0, base: BASE, mayoreo: MAYOREO, precioUnitario: 80 },
-      { cantidad: 0, base: BASE, mayoreo: MAYOREO, precioUnitario: 80 },
-    ]);
+    const { total } = calcularAjuste(
+      [
+        item(1, 'X', 10, 10, 10, EstadoSurtido.COMPLETO),
+        item(2, 'Y', 5, 5, 3, EstadoSurtido.PARCIAL),
+      ] as never,
+      [
+        { accion: 'QUITAR', itemId: 1 },
+        { accion: 'QUITAR', itemId: 2 },
+      ],
+    );
     expect(total).toBe(0);
   });
 });
@@ -494,7 +512,7 @@ describe('F20 — el invariante que sostiene todo', () => {
    *
    * Este test nació de una mutación: al reintroducir el bug (la rama `completo`
    * usando el precio congelado) los tests de total seguían pasando — porque
-   * `totalDePropuesta` recalcula desde el input y no lee el snapshot. El
+   * el total se recalculaba desde el input y no leía el snapshot. El
    * resultado era una propuesta que decía **$1000 en el total y $800 en la
    * línea**, y la tarjeta del cliente muestra la línea.
    *

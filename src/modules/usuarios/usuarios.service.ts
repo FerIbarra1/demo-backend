@@ -113,11 +113,16 @@ export class UsuariosService {
     if (existente) {
       throw new ConflictException('El email ya está registrado');
     }
-    const tienda = await this.prisma.tienda.findUnique({
-      where: { id: dto.tiendaId },
-      select: { id: true },
-    });
-    if (!tienda) throw new BadRequestException('La tienda no existe');
+    // TESORERIA es multi-tienda: no pertenece a ninguna. Todos los demás roles necesitan tienda
+    // (sin ella `PedidoAccessService` los rechaza en todo).
+    const esMultiTienda = dto.rol === RolUsuario.TESORERIA;
+    if (!esMultiTienda) {
+      const tienda = await this.prisma.tienda.findUnique({
+        where: { id: dto.tiendaId },
+        select: { id: true },
+      });
+      if (!tienda) throw new BadRequestException('La tienda no existe');
+    }
 
     const password = await bcrypt.hash(dto.password, 10);
     const usuario = await this.prisma.usuario.create({
@@ -128,7 +133,7 @@ export class UsuariosService {
         apellido: dto.apellido,
         telefono: dto.telefono,
         rol: dto.rol,
-        tiendaId: dto.tiendaId,
+        tiendaId: esMultiTienda ? null : dto.tiendaId,
         activo: true,
       },
       include: { tienda: { select: { id: true, nombre: true, ciudad: true } } },
@@ -158,14 +163,25 @@ export class UsuariosService {
       if (!tienda) throw new BadRequestException('La tienda no existe');
     }
 
+    // La tienda sigue al rol: TESORERIA no tiene (se limpia), y quien deja de serlo la necesita.
+    const rolFinal = dto.rol ?? usuario.rol;
+    let tiendaFinal: number | null = dto.tiendaId ?? usuario.tiendaId;
+    if (rolFinal === RolUsuario.TESORERIA) {
+      tiendaFinal = null;
+    } else if (tiendaFinal === null) {
+      throw new BadRequestException(
+        'Este rol necesita una tienda: indica `tiendaId` al sacar a un usuario de Tesorería.',
+      );
+    }
+
     const actualizado = await this.prisma.usuario.update({
       where: { id },
       data: {
         nombre: dto.nombre ?? usuario.nombre,
         apellido: dto.apellido !== undefined ? dto.apellido : usuario.apellido,
         telefono: dto.telefono !== undefined ? dto.telefono : usuario.telefono,
-        rol: dto.rol ?? usuario.rol,
-        tiendaId: dto.tiendaId ?? usuario.tiendaId,
+        rol: rolFinal,
+        tiendaId: tiendaFinal,
       },
       include: { tienda: { select: { id: true, nombre: true, ciudad: true } } },
     });

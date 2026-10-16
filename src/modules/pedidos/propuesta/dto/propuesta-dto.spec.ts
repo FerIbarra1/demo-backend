@@ -1,254 +1,182 @@
 import { plainToInstance } from 'class-transformer';
-import { validateSync, getMetadataStorage } from 'class-validator';
-import { CrearMensajeConAdjuntoDto, PropuestaAdjuntaItemDto } from '../../messages/dto/mensaje.dto';
+import { validateSync } from 'class-validator';
+import { CrearMensajeConAdjuntoDto } from '../../messages/dto/mensaje.dto';
+import { VistaPreviaAjusteDto } from './ajuste.dto';
 
 /**
- * F21 (oct 2026): el contrato de ENTRADA de una propuesta.
+ * El contrato de ENTRADA de un ajuste (Fase 2, oct 2026).
  *
- * Por qué existe este spec, que es distinto de todos los demás del repo: los
- * otros prueban los UTILS, y los utils no pasan por el `ValidationPipe`. Este
- * prueba la FRONTERA — lo que el `ValidationPipe` global acepta o rechaza.
+ * Por qué existe este spec, distinto de los demás del repo: los otros prueban los
+ * UTILS, y los utils no pasan por el `ValidationPipe`. Este prueba la FRONTERA —
+ * lo que el `ValidationPipe` global acepta o rechaza.
  *
- * El bug que lo motivó: `cantidadDisponible` se agregó a `ItemPropuestaJson` (el
- * tipo de SALIDA, el snapshot que se guarda) pero no a `PropuestaItemDto` (el de
- * ENTRADA). El `ValidationPipe` de `main.ts` corre con `forbidNonWhitelisted:
- * true`, así que el editor del asesor —que manda la propuesta completa por
- * `POST /pedidos/:id/mensajes/con-adjunto`— habría recibido un **400** al enviar
- * cualquier propuesta que ajustara una cantidad.
+ * Historia: F21 perdió un día porque `cantidadDisponible` se agregó al tipo de
+ * SALIDA (el snapshot) y no al DTO de ENTRADA; con `forbidNonWhitelisted: true`
+ * el asesor no podía enviar ninguna propuesta que ajustara una cantidad, y ningún
+ * test lo veía.
  *
- * Ningún test lo veía: los specs llaman a `aplicarPropuestaDeVentas` y a
- * `construirPropuestaDeBodega` directamente, así que el pipe nunca entra en
- * juego. Es un fallo que solo aparece en producción, con el asesor enfrente.
- *
- * La lección: cuando un campo se agrega al tipo de SALIDA y el mismo objeto
- * viaja de vuelta como ENTRADA, hay que declararlo en los dos sitios.
+ * Fase 2 cierra esa clase de bug de raíz: el cliente de la API ya no manda el
+ * snapshot, manda su INTENCIÓN (`ajuste`), y el servidor arma el resto. No hay un
+ * tipo de salida que mantener en sincronía con uno de entrada. Lo que este spec
+ * fija ahora es lo contrario: que el cliente NO PUEDA mandar precios.
  */
 
-/**
- * Corre el mismo `ValidationPipe` que `main.ts`, con sus mismas opciones, y
- * aplana los errores de los objetos ANIDADOS.
- *
- * La recursión es imprescindible: los items viven dentro de `items`, así que sus
- * errores —incluido el de "campo no permitido"— llegan en `children`, no en la
- * raíz. Sin bajar, el helper devolvía siempre `[]` y TODOS los tests de este spec
- * pasaban en falso, incluido el que verifica que el pipe rechaza de verdad.
- */
-function validar(dto: object): string[] {
-  const instancia = plainToInstance(CrearMensajeConAdjuntoDto, dto);
-  const errores = validateSync(instancia, {
-    whitelist: true,
-    forbidNonWhitelisted: true,
-  });
+/** Corre las mismas opciones que el `ValidationPipe` de `main.ts` y aplana los errores anidados. */
+function validar<T extends object>(clase: new () => T, dto: object): string[] {
+  const instancia = plainToInstance(clase, dto);
+  const errores = validateSync(instancia, { whitelist: true, forbidNonWhitelisted: true });
 
   const aplanar = (lista: typeof errores, prefijo = ''): string[] =>
     lista.flatMap((e) => {
       const ruta = prefijo ? `${prefijo}.${e.property}` : e.property;
-      const propios = Object.keys(e.constraints ?? {}).map(
-        (k) => `${ruta}: ${e.constraints![k]}`,
-      );
+      const propios = Object.keys(e.constraints ?? {}).map((k) => `${ruta}: ${e.constraints![k]}`);
       return [...propios, ...aplanar(e.children ?? [], ruta)];
     });
 
   return aplanar(errores);
 }
 
-/** Una propuesta mínima y válida, para ir agregando campos encima. */
-function propuestaBase(items: object[]) {
-  return { contenido: "Ajustes propuestos", propuestaItems: items, total: 100 };
-}
+const enChat = (ajuste: object[], extra: object = {}) => ({
+  contenido: 'Te propongo estos ajustes',
+  ajuste,
+  ...extra,
+});
+const enVistaPrevia = (intenciones: object[]) => ({ intenciones });
 
-const itemParcial = {
-  itemId: 1,
-  tipo: 'parcial',
-  producto: 'Camiseta',
-  variante: 'M · Negro',
-  cantidad: 5,
-  precioUnitario: 100,
-  subtotal: 500,
-  cantidadOriginal: 5,
-  cantidadNueva: 2,
-};
-
-describe('F21 — el DTO de entrada acepta todo lo que el snapshot de salida lleva', () => {
-  it('acepta `cantidadDisponible` (el número del medio, "Hay N")', () => {
-    // Sin esta declaración el `ValidationPipe` responde 400 y el asesor no puede
-    // enviar la propuesta. Es el bug que este spec previene.
-    const errores = validar(
-      propuestaBase([{ ...itemParcial, cantidadDisponible: 3 }]),
-    );
-    expect(errores).toEqual([]);
+describe('IntencionAjusteDto — lo que el asesor puede decir', () => {
+  it.each([
+    ['CANTIDAD', { accion: 'CANTIDAD', itemId: 1, cantidad: 3 }],
+    ['QUITAR', { accion: 'QUITAR', itemId: 1 }],
+    ['AGREGAR', { accion: 'AGREGAR', precioCOId: 9, cantidad: 5 }],
+    ['REPONER', { accion: 'REPONER', itemId: 1, cantidad: 3 }],
+  ])('acepta %s', (_n, intencion) => {
+    expect(validar(CrearMensajeConAdjuntoDto, enChat([intencion]))).toEqual([]);
+    expect(validar(VistaPreviaAjusteDto, enVistaPrevia([intencion]))).toEqual([]);
   });
 
-  it('acepta el snapshot completo de un `parcial`', () => {
-    const errores = validar(propuestaBase([itemParcial]));
-    expect(errores).toEqual([]);
-  });
-
-  it('acepta el snapshot de un `cambio`', () => {
+  it('acepta varias intenciones a la vez', () => {
     const errores = validar(
-      propuestaBase([
-        {
-          ...itemParcial,
-          tipo: 'cambio',
-          productoNuevo: 'Otra prenda',
-          varianteNueva: 'L · Azul',
-          cantidadNueva: 3,
-          precioUnitarioNuevo: 120,
-          subtotalNuevo: 360,
-          precioCOId: 42,
-        },
+      CrearMensajeConAdjuntoDto,
+      enChat([
+        { accion: 'CANTIDAD', itemId: 1, cantidad: 3 },
+        { accion: 'QUITAR', itemId: 2 },
+        { accion: 'AGREGAR', precioCOId: 9, cantidad: 5 },
       ]),
     );
     expect(errores).toEqual([]);
   });
 
-  it('acepta el snapshot de un `agregado`', () => {
-    const errores = validar(
-      propuestaBase([
-        {
-          itemId: -1,
-          tipo: 'agregado',
-          producto: 'Prenda nueva',
-          variante: 'L · Azul',
-          cantidad: 2,
-          precioUnitario: 100,
-          subtotal: 200,
-          tempId: -1,
-          productoId: 9,
-          precioCOId: 42,
-        },
-      ]),
-    );
-    expect(errores).toEqual([]);
+  it('RECHAZA una acción inventada', () => {
+    expect(
+      validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'REGALAR', itemId: 1 }])).length,
+    ).toBeGreaterThan(0);
   });
 
-
-  it('acepta el payload EXACTO que falló: 3 líneas, la 2ª con cantidadDisponible', () => {
-    // Reproduce el reporte del usuario, que devolvía
-    // `propuestaItems.1.property cantidadDisponible should not exist`.
-    //
-    // El índice 1 es la SEGUNDA línea: quitó un producto completo, bajó la
-    // cantidad de uno parcial y dejó el otro igual. La línea bajada es la que
-    // manda `cantidadDisponible`, y el pipe la rechazaba por no estar declarada
-    // en `PropuestaAdjuntaItemDto` — el DTO real del endpoint.
-    const errores = validar(
-      propuestaBase([
-        // 1. Quitado: el cliente ya no lo quiere.
-        {
-          itemId: 10,
-          tipo: 'no-disponible',
-          producto: 'Playera A',
-          productoCodigo: 'D0300',
-          variante: 'M · Negro',
-          cantidad: 3,
-          precioUnitario: 65,
-          subtotal: 195,
-          ajusteExplicito: true,
-          cantidadDisponible: 3,
-        },
-        // 2. Bajado: había 3 y se lleva 2. ESTA es la línea que fallaba.
-        {
-          itemId: 11,
-          tipo: 'parcial',
-          producto: 'Playera B',
-          productoCodigo: 'D0301',
-          variante: 'S · Rojo',
-          cantidad: 3,
-          precioUnitario: 65,
-          subtotal: 195,
-          cantidadOriginal: 3,
-          cantidadNueva: 2,
-          ajusteExplicito: true,
-          cantidadDisponible: 3,
-          precioUnitarioNuevo: 65,
-          subtotalNuevo: 130,
-        },
-        // 3. Sin tocar: solo se reporta el pedido completo.
-        {
-          itemId: 12,
-          tipo: 'completo',
-          producto: 'Playera C',
-          productoCodigo: 'D0302',
-          variante: 'L · Blanco',
-          cantidad: 2,
-          precioUnitario: 65,
-          subtotal: 130,
-        },
-      ]),
-    );
-    expect(errores).toEqual([]);
+  it('CANTIDAD exige itemId y una cantidad de al menos 1', () => {
+    expect(
+      validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'CANTIDAD', cantidad: 3 }])).join(' '),
+    ).toContain('itemId');
+    expect(
+      validar(
+        VistaPreviaAjusteDto,
+        enVistaPrevia([{ accion: 'CANTIDAD', itemId: 1, cantidad: 0 }]),
+      ).join(' '),
+    ).toContain('cantidad');
   });
 
-  it('acepta `ajusteExplicito` (la marca de causalidad)', () => {
-    const errores = validar(
-      propuestaBase([{ ...itemParcial, ajusteExplicito: true, cantidadDisponible: 3 }]),
-    );
-    expect(errores).toEqual([]);
+  it('REPONER exige el itemId y una cantidad de al menos 1', () => {
+    expect(
+      validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'REPONER', cantidad: 3 }])).join(' '),
+    ).toContain('itemId');
+    expect(
+      validar(
+        VistaPreviaAjusteDto,
+        enVistaPrevia([{ accion: 'REPONER', itemId: 1, cantidad: 0 }]),
+      ).join(' '),
+    ).toContain('cantidad');
+    expect(
+      validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'REPONER', itemId: 1 }])).join(' '),
+    ).toContain('cantidad');
   });
 
-  it('RECHAZA un `total` que no es número', () => {
-    // El backend recalcula el total, pero un valor basura no debe colarse en
-    // silencio: el contrato dice número.
-    const errores = validar({
-      contenido: 'Ajustes',
-      propuestaItems: [itemParcial],
-      total: 'cien',
-    });
-    expect(errores.join(' ')).toContain('total');
+  it('REPONER no acepta un precio: el servidor lo calcula', () => {
+    expect(
+      validar(
+        VistaPreviaAjusteDto,
+        enVistaPrevia([{ accion: 'REPONER', itemId: 1, cantidad: 2, precioUnitario: 0 }]),
+      ).length,
+    ).toBeGreaterThan(0);
   });
 
-  it('RECHAZA un campo que no está en el DTO (así se comporta el pipe real)', () => {
-    // La otra cara del contrato: si esto dejara de fallar, el spec de arriba
-    // pasaría por la razón equivocada (el pipe no estaría validando nada).
-    const errores = validar(
-      propuestaBase([{ ...itemParcial, campoInventado: 'x' }]),
-    );
-    expect(errores.length).toBeGreaterThan(0);
-    expect(errores.join(' ')).toContain('campoInventado');
+  it('AGREGAR exige la variante', () => {
+    expect(
+      validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'AGREGAR', cantidad: 2 }])).join(' '),
+    ).toContain('precioCOId');
   });
 
-  it('la propuesta debe traer al menos un item', () => {
-    const instancia = plainToInstance(CrearMensajeConAdjuntoDto, propuestaBase([]));
-    expect(instancia.propuestaItems).toEqual([]);
+  it('QUITAR no necesita cantidad', () => {
+    expect(
+      validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'QUITAR', itemId: 1 }])),
+    ).toEqual([]);
+  });
+
+  it('rechaza cantidades absurdas', () => {
+    expect(
+      validar(
+        VistaPreviaAjusteDto,
+        enVistaPrevia([{ accion: 'CANTIDAD', itemId: 1, cantidad: 100000 }]),
+      ).length,
+    ).toBeGreaterThan(0);
   });
 });
 
-describe('F21 — `PropuestaItemDto` cubre el snapshot completo', () => {
-  it('declara todos los campos que `ItemPropuestaJson` puede llevar', () => {
-    // Guardia contra la próxima vez: si alguien agrega un campo al tipo de
-    // salida y se olvida del de entrada, este test lo dice por su nombre.
-    const camposDelSnapshot = [
-      'itemId',
-      'tipo',
-      'producto',
-      'productoCodigo',
-      'variante',
-      'productoImagen',
-      'cantidad',
-      'precioUnitario',
-      'subtotal',
-      'productoOriginal',
-      'varianteOriginal',
-      'cantidadOriginal',
-      'cantidadDisponible',
-      'productoNuevo',
-      'varianteNueva',
-      'cantidadNueva',
-      'precioUnitarioNuevo',
-      'subtotalNuevo',
-      'tempId',
-      'productoId',
-      'precioCOId',
-    ];
+describe('el cliente de la API NO puede influir en un precio', () => {
+  // La razón de la Fase 2: antes el navegador mandaba nombre, precio, subtotal y
+  // "antes/después" de cada línea y el servidor los guardaba tal cual.
+  const camposDeDinero = [
+    'precioUnitario',
+    'subtotal',
+    'subtotalOriginal',
+    'precioUnitarioNuevo',
+    'subtotalNuevo',
+  ];
 
-    // `Object.keys(new Dto())` no sirve: los campos sin inicializador no existen
-    // como propiedades propias. Se leen los METADATOS que class-validator registra
-    // con cada decorador, que es la lista real de lo que el pipe conoce.
-    const declarados = getMetadataStorage()
-      .getTargetValidationMetadatas(PropuestaAdjuntaItemDto, '', false, false)
-      .map((m) => m.propertyName);
-    const faltantes = camposDelSnapshot.filter((c) => !declarados.includes(c));
+  it.each(camposDeDinero)('RECHAZA `%s` dentro de una intención', (campo) => {
+    const errores = validar(
+      VistaPreviaAjusteDto,
+      enVistaPrevia([{ accion: 'CANTIDAD', itemId: 1, cantidad: 3, [campo]: 1 }]),
+    );
+    expect(errores.join(' ')).toContain(campo);
+  });
 
-    expect(faltantes).toEqual([]);
+  it('RECHAZA `total` en el cuerpo del mensaje', () => {
+    const errores = validar(
+      CrearMensajeConAdjuntoDto,
+      enChat([{ accion: 'QUITAR', itemId: 1 }], { total: 0 }),
+    );
+    expect(errores.join(' ')).toContain('total');
+  });
+
+  it('RECHAZA el formato viejo `propuestaItems`: ya no hay snapshot que armar en el navegador', () => {
+    const errores = validar(CrearMensajeConAdjuntoDto, {
+      contenido: 'x',
+      propuestaItems: [{ itemId: 1, tipo: 'parcial' }],
+    });
+    expect(errores.join(' ')).toContain('propuestaItems');
+  });
+});
+
+describe('CrearMensajeConAdjuntoDto — el texto', () => {
+  it('es obligatorio cuando NO hay propuesta', () => {
+    expect(validar(CrearMensajeConAdjuntoDto, { contenido: '' }).join(' ')).toContain('contenido');
+  });
+
+  it('es opcional cuando SÍ hay propuesta (el servidor pone un texto por defecto)', () => {
+    expect(
+      validar(
+        CrearMensajeConAdjuntoDto,
+        enChat([{ accion: 'QUITAR', itemId: 1 }], { contenido: '' }),
+      ),
+    ).toEqual([]);
   });
 });

@@ -74,6 +74,25 @@ export class MonitorPedidoDto {
    */
   @ApiProperty({ default: 0 })
   itemsNuevos: number;
+
+  /**
+   * Oct 2026: ¿el cliente de este pedido está FÍSICAMENTE en la tienda?
+   *
+   * Es la misma respuesta que usan la cola de bodega, la consola y la TV de mostrador
+   * (`clientePresenteEnTienda`): kiosko siempre (salvo descartado), web solo con aviso de llegada
+   * vigente. Es lo que le dice al encargado que un pedido WEB ya tiene al cliente de pie esperando
+   * y que debe surtirse antes que los de gente que ni ha salido de casa.
+   */
+  @ApiProperty({ default: false })
+  clienteEnTienda: boolean;
+
+  /**
+   * Oct 2026: desde cuándo está el cliente esperando en la tienda (hora del pedido en kiosko, del
+   * aviso en web). `null` si no está. Es la base del cronómetro de un pedido con cliente presente:
+   * lo que importa es cuánto lleva ESPERANDO, no cuánto lleva el pedido en la base.
+   */
+  @ApiProperty({ nullable: true, type: String })
+  presenteDesdeAt: string | null;
 }
 
 /**
@@ -91,6 +110,11 @@ export class MonitorBodegueroPedidoSlotDto {
   minutosEnProceso: number;
   @ApiProperty({ description: '0=normal, 1=aviso, 2=alerta, 3=crítico' })
   nivelUrgencia: 0 | 1 | 2 | 3;
+  @ApiProperty({
+    default: false,
+    description: 'Oct 2026: el cliente de este pedido ya está en la tienda esperándolo.',
+  })
+  clienteEnTienda: boolean;
 }
 
 export class MonitorBodegueroDto {
@@ -98,7 +122,6 @@ export class MonitorBodegueroDto {
   @ApiProperty() nombre: string;
   @ApiProperty({ nullable: true }) apellido: string | null;
   @ApiProperty() activo: boolean;
-  @ApiProperty({ nullable: true, type: String }) lastLogin: string | null;
   /**
    * F6 (jul 2026): hasta MAX_PEDIDOS_POR_BODEGUERO pedidos en curso. El
    * frontend renderiza cada uno como un slot. Si está vacío, el bodeguero
@@ -109,13 +132,14 @@ export class MonitorBodegueroDto {
   /** Máximo permitido de pedidos simultáneos (referencia para la UI). */
   @ApiProperty({ description: 'Tope de pedidos simultáneos para este bodeguero' })
   maxPedidos: number;
-  @ApiProperty() ultimaActividad: string;
 }
 
 export class MonitorContadoresDto {
   @ApiProperty() pedidosEnTienda: number;
   @ApiProperty() pedidosWeb: number;
   @ApiProperty() alertasCriticas: number;
+  /** Oct 2026: pedidos (en cola o en manos de un bodeguero) cuyo cliente ya está en la tienda. */
+  @ApiProperty() clientesEnTienda: number;
   @ApiProperty() bodeguerosLibres: number;
   @ApiProperty() bodeguerosOcupados: number;
   @ApiProperty() totalEnCola: number;

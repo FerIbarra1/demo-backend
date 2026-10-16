@@ -182,6 +182,8 @@ export class AuthController {
     RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
+    // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
+    RolUsuario.TESORERIA,
     RolUsuario.ADMIN,
   )
   @HttpCode(HttpStatus.OK)
@@ -190,10 +192,11 @@ export class AuthController {
   async logout(
     @CurrentUser('userId') userId: number,
     @CurrentUser('token') token: string,
+    @CurrentUser('rol') rol: RolUsuario,
     @Res({ passthrough: true }) res: Response,
   ) {
     this.clearRefreshCookie(res);
-    return this.authService.logout(userId, token);
+    return this.authService.logout(userId, token, rol);
   }
 
   @Get('me')
@@ -211,6 +214,8 @@ export class AuthController {
     RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
+    // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
+    RolUsuario.TESORERIA,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -234,6 +239,8 @@ export class AuthController {
     RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
+    // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
+    RolUsuario.TESORERIA,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -257,6 +264,8 @@ export class AuthController {
     RolUsuario.MOSTRADOR_MONITOR,
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
+    // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
+    RolUsuario.TESORERIA,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -279,7 +288,11 @@ export class AuthController {
     // F16: el rol de la TV. No aparece en el monitor de bodega (no tiene
     // slots), pero sin él el heartbeat devolvía 403.
     RolUsuario.MOSTRADOR_MONITOR,
+    // Oct 2026: faltaba (lo destapó `roles-contrato.spec`): la TV del cajero también monta el
+    // `RolShell`, que manda el latido; sin este rol recibía 403 en silencio cada 5 minutos.
+    RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
+    RolUsuario.TESORERIA,
     RolUsuario.ADMIN,
   )
   @HttpCode(HttpStatus.OK)
@@ -287,8 +300,8 @@ export class AuthController {
   @ApiOperation({
     summary: 'Heartbeat del operador (cada 5min desde la tablet). Actualiza ultimoHeartbeat.',
   })
-  async heartbeat(@CurrentUser('userId') userId: number) {
-    return this.authService.heartbeat(userId);
+  async heartbeat(@CurrentUser('userId') userId: number, @CurrentUser('rol') rol: RolUsuario) {
+    return this.authService.heartbeat(userId, rol);
   }
 
   // =====================================================

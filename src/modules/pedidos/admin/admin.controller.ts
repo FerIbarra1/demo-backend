@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
+import { MarcarPagadoDto } from './dto/marcar-pagado.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { ApiKeyAuth } from '../../../common/decorators/api-key.decorator';
 import { ApiKeyGuard } from '../../../common/guards/api-key.guard';
@@ -67,7 +68,9 @@ export class AdminController {
    * Autenticado por header `X-Agent-Key` contra `process.env.AGENT_API_KEY`.
    * También accesible manualmente por ADMIN (vía JWT) como herramienta de soporte.
    *
-   * Body esperado: { fechaPago?: string (ISO), referencia?: string }
+   * Body: `MarcarPagadoDto` ({ fechaPago?: ISO 8601, referencia?: string ≤ 120 }).
+   * Idempotente: un pedido que ya pasó por el cobro (PAGADO/ENVIADO/ENTREGADO) se
+   * devuelve tal cual, sin volver a emitir nada.
    */
   @Post(':id/marcar-pagado')
   @UseGuards(ApiKeyGuard)
@@ -77,7 +80,7 @@ export class AdminController {
   })
   async marcarPagado(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { fechaPago?: string; referencia?: string },
+    @Body() body: MarcarPagadoDto,
     @CurrentUser() user: any,
   ) {
     return this.adminService.marcarComoPagado(id, body, user);

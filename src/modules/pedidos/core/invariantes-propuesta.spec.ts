@@ -3,6 +3,7 @@ import { EstadoPedido, EstadoSurtido, ModoEntrega, Prisma, RolUsuario } from '@p
 import { SurtidoService } from '../bodega/surtido.service';
 import { PropuestaService } from '../propuesta/propuesta.service';
 import { aplicarCambiosFisicos } from './aplicar-cambios-surtido.util';
+import type { ResultadoAjuste } from './calculadora-ajuste.util';
 
 /**
  * F16 (sep 2026): invariantes monetarios del flujo de propuestas + surtido.
@@ -11,8 +12,10 @@ import { aplicarCambiosFisicos } from './aplicar-cambios-surtido.util';
  * adversarial encontró 8 problemas adicionales (H1–H8). Este spec cubre los
  * que se pueden probar en backend:
  *
- *   T1/T2 — H2 prevención: `enviarPropuesta` rechaza si bodega tiene
- *           items PENDIENTE.
+ *   T1/T2 — (retirados en la Fase 2) el guard de PENDIENTE de `enviarPropuesta`
+ *           era de la ruta BODEGA, que ya no existe: bodega no envía propuestas,
+ *           las arma el sistema al cerrar el surtido. Sus casos nuevos viven en
+ *           "Fase 2 — enviarPropuesta recibe el CÁLCULO del servidor".
  *   T3    — H2 red de seguridad: si por una carrera se cuela un item
  *           PENDIENTE en `aprobarPropuestaBodega`, el pedido vuelve a
  *           EN_REVISION en vez de avanzar a pago.
@@ -68,7 +71,7 @@ function item(over: Partial<Record<string, unknown>> = {}) {
 }
 
 // =============================================================================
-// T1/T2 — H2: enviarPropuesta (BODEGA) debe rechazar items PENDIENTE
+// Fase 2 — enviarPropuesta (ventas) recibe el cálculo del servidor
 // =============================================================================
 
 function crearPropuestaServiceParaEnvio(items: any[], opts: { pedidoEncontrado?: any } = {}) {
@@ -143,123 +146,100 @@ function crearPropuestaServiceParaEnvio(items: any[], opts: { pedidoEncontrado?:
   return { svc, enviar, prisma, creado };
 }
 
-describe('T1/T2 — H2 prevención: enviarPropuesta valida items PENDIENTE', () => {
-  it('lanza 400 si bodega tiene items PENDIENTE', async () => {
-    const { enviar } = crearPropuestaServiceParaEnvio([
-      item({ id: 1, estadoSurtido: EstadoSurtido.COMPLETO }),
-      item({ id: 2, estadoSurtido: EstadoSurtido.PENDIENTE, cantidadSurtida: 0 }),
-    ]);
+/** Un cálculo mínimo, como el que entrega `AjusteService.calcular`. */
+function calculo(over: Partial<ResultadoAjuste> = {}): ResultadoAjuste {
+  return {
+    items: [
+      {
+        itemId: 1,
+        tipo: 'parcial',
+        producto: 'Camiseta',
+        variante: 'M · Marino',
+        cantidad: 5,
+        precioUnitario: 100,
+        subtotal: 500,
+        cantidadNueva: 3,
+        ajusteExplicito: true,
+      },
+    ],
+    total: 300,
+    totalAntes: 500,
+    piezasFinales: 3,
+    piezasPorSurtir: 0,
+    hayCambios: true,
+    mayoreoCondicional: false,
+    ...over,
+  };
+}
 
-    // El DTO necesita al menos 1 item (la validación previa de `length >
-    // 0` está antes del guard de PENDIENTE), así que mandamos uno
-    // cualquiera y dejamos el PENDIENTE en el pedido.
+describe('Fase 2 — enviarPropuesta recibe el CÁLCULO del servidor, no líneas del cliente', () => {
+  const enAsesoria = { id: 1, estado: EstadoPedido.EN_ASESORIA, tiendaId: 5, usuarioId: 100 };
+
+  it('guarda el snapshot y el total EXACTOS del cálculo (no recalcula nada)', async () => {
+    const { enviar, creado } = crearPropuestaServiceParaEnvio([], { pedidoEncontrado: enAsesoria });
+    const c = calculo({ total: 1234.5 });
+
+    await enviar(1, { calculo: c }, usuarioVentas);
+
+    // Una sola fuente: el total guardado es el del cálculo, sin un segundo número.
+    expect(Number(creado[0].total)).toBe(1234.5);
+    expect(creado[0].items).toEqual(c.items);
+    expect(creado[0].creadaPorRol).toBe(RolUsuario.VENTAS);
+  });
+
+  it('también se puede re-negociar desde ESPERANDO_APROBACION', async () => {
+    const { enviar } = crearPropuestaServiceParaEnvio([], {
+      pedidoEncontrado: { ...enAsesoria, estado: EstadoPedido.ESPERANDO_APROBACION },
+    });
+    await expect(enviar(1, { calculo: calculo() }, usuarioVentas)).resolves.toBeDefined();
+  });
+
+  it('rechaza una propuesta que no cambia nada', async () => {
+    const { enviar, creado } = crearPropuestaServiceParaEnvio([], { pedidoEncontrado: enAsesoria });
+
+    // Dejaría al cliente con el pedido detenido, esperando una respuesta sin objeto.
     await expect(
-      enviar(
-        1,
-        {
-          items: [
-            {
-              itemId: 1,
-              tipo: 'completo',
-              producto: '',
-              variante: '',
-              cantidad: 5,
-              precioUnitario: 100,
-              subtotal: 500,
-            },
-          ] as any,
-          total: 500,
-        },
-        usuarioBodega,
-      ),
-    ).rejects.toThrow(/Hay 1 item\(s\) sin marcar/i);
+      enviar(1, { calculo: calculo({ hayCambios: false }) }, usuarioVentas),
+    ).rejects.toThrow(/no cambia nada/i);
+    expect(creado).toHaveLength(0);
   });
 
-  it('acepta cuando todos los items están en estado terminal', async () => {
-    const { enviar, creado } = crearPropuestaServiceParaEnvio([
-      item({ id: 1, estadoSurtido: EstadoSurtido.COMPLETO }),
-      item({ id: 2, estadoSurtido: EstadoSurtido.NO_DISPONIBLE, cantidadSurtida: 0 }),
-      item({ id: 3, estadoSurtido: EstadoSurtido.PARCIAL, cantidadSurtida: 2 }),
-    ]);
-
-    await enviar(
-      1,
-      {
-        items: [
-          {
-            itemId: 1,
-            tipo: 'completo',
-            producto: '',
-            variante: '',
-            cantidad: 5,
-            precioUnitario: 100,
-            subtotal: 500,
-          },
-          {
-            itemId: 2,
-            tipo: 'no-disponible',
-            producto: '',
-            variante: '',
-            cantidad: 5,
-            precioUnitario: 100,
-            subtotal: 500,
-          },
-          {
-            itemId: 3,
-            tipo: 'parcial',
-            producto: '',
-            variante: '',
-            cantidad: 5,
-            cantidadNueva: 2,
-            precioUnitario: 100,
-            subtotal: 500,
-            subtotalNuevo: 200,
-          },
-        ] as any,
-        total: 1200,
-      },
-      usuarioBodega,
+  it('rechaza un cálculo sin líneas', async () => {
+    const { enviar } = crearPropuestaServiceParaEnvio([], { pedidoEncontrado: enAsesoria });
+    await expect(enviar(1, { calculo: calculo({ items: [] }) }, usuarioVentas)).rejects.toThrow(
+      BadRequestException,
     );
-
-    expect(creado).toHaveLength(1);
-    expect(creado[0].estado).toBe('PENDIENTE');
   });
 
-  it('NO valida items PENDIENTE si el rol es VENTAS (su propio flujo)', async () => {
-    // Ventas opera sobre pedidos en EN_ASESORIA/ESPERANDO_APROBACION;
-    // el concepto de "PENDIENTE" es propio de bodega. Validar que la
-    // guardia NO se dispara cuando el rol es ventas.
-    const { enviar, creado } = crearPropuestaServiceParaEnvio(
-      [item({ id: 1, estadoSurtido: EstadoSurtido.PENDIENTE, cantidadSurtida: 0 })],
-      {
-        pedidoEncontrado: {
-          id: 1,
-          estado: EstadoPedido.EN_ASESORIA,
-          tiendaId: 5,
-        },
-      },
+  it('BODEGA no envía propuestas: la suya la arma el sistema al cerrar el surtido', async () => {
+    const { enviar } = crearPropuestaServiceParaEnvio([], { pedidoEncontrado: enAsesoria });
+    await expect(enviar(1, { calculo: calculo() }, usuarioBodega)).rejects.toThrow(
+      /Sólo el asesor de ventas/i,
     );
+  });
 
-    await enviar(
-      1,
-      {
-        items: [
-          {
-            itemId: 1,
-            tipo: 'completo',
-            producto: '',
-            variante: '',
-            cantidad: 5,
-            precioUnitario: 100,
-            subtotal: 500,
-          },
-        ] as any,
-        total: 500,
-      },
-      usuarioVentas,
+  it('el cliente tampoco', async () => {
+    const { enviar } = crearPropuestaServiceParaEnvio([], { pedidoEncontrado: enAsesoria });
+    await expect(enviar(1, { calculo: calculo() }, usuarioCliente)).rejects.toThrow(
+      BadRequestException,
     );
+  });
 
-    expect(creado).toHaveLength(1);
+  it('solo desde EN_ASESORIA o ESPERANDO_APROBACION', async () => {
+    const { enviar } = crearPropuestaServiceParaEnvio([], {
+      pedidoEncontrado: { ...enAsesoria, estado: EstadoPedido.EN_REVISION },
+    });
+    await expect(enviar(1, { calculo: calculo() }, usuarioVentas)).rejects.toThrow(
+      /No se puede enviar una propuesta desde el estado EN_REVISION/,
+    );
+  });
+
+  it('con una propuesta PENDIENTE viva responde 409', async () => {
+    const { enviar, prisma } = crearPropuestaServiceParaEnvio([], { pedidoEncontrado: enAsesoria });
+    prisma.pedidoPropuesta.findFirst = jest.fn(async () => ({ id: 7 }));
+    await expect(enviar(1, { calculo: calculo() }, usuarioVentas)).rejects.toThrow(
+      /propuesta pendiente/i,
+    );
   });
 });
 
@@ -837,5 +817,101 @@ describe('T10 — H7: aplicarCambiosFisicos (helper unificado)', () => {
     );
 
     expect(updates).toEqual([]);
+  });
+});
+
+// =============================================================================
+// Oct 2026 (decisión 2) — la red de seguridad NO cancela una línea subida que tiene
+// piezas dentro de la bolsa
+// =============================================================================
+
+describe('red de seguridad: una línea que se subió y bodega no alcanzó a verificar', () => {
+  it('se liquida a lo que hay en la bolsa; cancelarla dejaría esas piezas sin dueño', async () => {
+    const updates: Array<{ id: number; data: any }> = [];
+    const itemPedidoMock = {
+      update: jest.fn(async ({ where, data }: any) => {
+        updates.push({ id: where.id, data });
+        return {};
+      }),
+      count: jest.fn(async () => 2),
+      findMany: jest.fn(async () => []),
+    };
+    const pedidoPropuestaMock = { update: jest.fn(async () => ({})) };
+
+    const prisma = {
+      pedido: {
+        findUnique: jest.fn(async ({ include }: any) =>
+          include?.items
+            ? {
+                id: 1,
+                estado: EstadoPedido.ESPERANDO_APROBACION,
+                tiendaId: 5,
+                modoEntrega: ModoEntrega.KIOSKO,
+                descuento: new Prisma.Decimal(0),
+                impuestos: new Prisma.Decimal(0),
+                items: [
+                  item({ id: 1, estadoSurtido: EstadoSurtido.COMPLETO }),
+                  // Se subió de 3 a 5: 3 dentro de la bolsa, las 2 de más sin verificar.
+                  item({
+                    id: 2,
+                    cantidad: 5,
+                    estadoSurtido: EstadoSurtido.PENDIENTE,
+                    cantidadSurtida: 3,
+                    piezasBase: 3,
+                    precioUnitario: new Prisma.Decimal(100),
+                  }),
+                  // La normal: nadie la marcó, no hay nada en la bolsa.
+                  item({ id: 3, estadoSurtido: EstadoSurtido.PENDIENTE, cantidadSurtida: 0 }),
+                ],
+              }
+            : null,
+        ),
+      },
+      itemPedido: itemPedidoMock,
+      pedidoPropuesta: pedidoPropuestaMock,
+      $transaction: jest.fn(async (fn: (tx: any) => unknown) =>
+        fn({
+          itemPedido: itemPedidoMock,
+          pedidoPropuesta: pedidoPropuestaMock,
+          pedido: { update: jest.fn(async () => ({})) },
+        }),
+      ),
+    };
+    const state = {
+      cambiarEstado: jest.fn(async (_id: number, dto: any) => ({ id: 1, estado: dto.nuevoEstado })),
+    };
+    const svc = new PropuestaService(
+      prisma as never,
+      { emitToUser: jest.fn(), emitToPedido: jest.fn(), emitToTienda: jest.fn() } as never,
+      { cargarYValidar: jest.fn() } as never,
+      state as never,
+      { crearDesdePedido: jest.fn() } as never,
+      { columnaParaPedido: jest.fn() } as never,
+      { enviar: jest.fn() } as never,
+    );
+
+    await (svc as any).aprobarPropuestaBodega(
+      { id: 1, tiendaId: 5 },
+      { id: 7 },
+      { decision: 'APROBAR' },
+      usuarioCliente,
+      new Date(),
+    );
+
+    // La subida: liquidada a las 3 que hay, COMPLETO, y sin piso.
+    const subida = updates.find((u) => u.id === 2)!.data;
+    expect(subida).toMatchObject({
+      cantidad: 3,
+      estadoSurtido: EstadoSurtido.COMPLETO,
+      piezasBase: 0,
+    });
+    expect(subida.cancelada).toBeUndefined();
+    expect(Number(subida.subtotal)).toBe(300);
+    // La que nadie marcó sigue cancelándose como antes (no hay nada que conservar).
+    expect(updates.find((u) => u.id === 3)!.data).toMatchObject({
+      cancelada: true,
+      estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
+      cantidadSurtida: 0,
+    });
   });
 });

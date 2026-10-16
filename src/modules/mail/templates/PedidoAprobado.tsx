@@ -20,11 +20,11 @@ export const PedidoAprobado = ({
 }: PedidoAprobadoProps) => (
   <PedidoEmailShell
     preview={`Tu pedido ${folioVisible(pedido)} ya está listo para pagar`}
-    title={`Tu pedido ${folioVisible(pedido)} ya está listo`}
-    greeting={`Hola, ${pedido.clienteNombre}. Revisamos tu pedido y ya puedes pasar a pagar.`}
+    title="Tu pedido ya está listo para pagar"
+    greeting={`Hola, ${pedido.clienteNombre}. Ya revisamos tu pedido y puedes completar tu pago.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
-    ctaLabel="Ver mi pedido"
+    ctaLabel={pedido.pagoPorTransferencia ? 'Ver datos para transferir' : 'Ver mi pedido'}
     logoUrl={logoUrl}
     frontendUrl={frontendUrl}
     bodyExtras={
@@ -37,34 +37,26 @@ export const PedidoAprobado = ({
             lineHeight: '1.6',
           }}
         >
-          {pedido.direccionEnvio
-            ? 'Tu pedido va a domicilio: ya puedes completar el pago y te avisaremos por correo en cuanto salga a camino.'
-            : 'Presenta este folio en caja para completar tu pago. Si ya estás en la tienda, acércate a la ventanilla que te indiquen.'}
+          {/* Un solo mensaje de "cómo pagar", según lo que el cliente eligió: antes decía "presenta
+              este folio" y, debajo del QR, "muestra este código" (lo mismo dos veces), y a quien
+              transfiere le daba instrucciones de caja. */}
+          {pedido.pagoPorTransferencia
+            ? 'Elegiste pagar por transferencia: entra a tu pedido para ver los datos y subir tu comprobante.'
+            : pedido.direccionEnvio
+              ? 'Tu pedido va a domicilio: ya puedes completar el pago y te avisaremos por correo en cuanto salga a camino.'
+              : qrDataUrl
+                ? 'Muestra este código en caja para pagar. Si ya estás en la tienda, acércate a la ventanilla que te indiquen.'
+                : 'Presenta tu folio en caja para pagar. Si ya estás en la tienda, acércate a la ventanilla que te indiquen.'}
         </Text>
-        {qrDataUrl ? (
-          <div
-            style={{
-              textAlign: 'center',
-              margin: '16px 0 8px 0',
-            }}
-          >
+        {qrDataUrl && !pedido.pagoPorTransferencia ? (
+          <div style={{ textAlign: 'center', margin: '16px 0 8px 0' }}>
             <img
               src={qrDataUrl}
-              alt={`QR del pedido ${folioVisible(pedido)}`}
+              alt={`Código QR del folio ${folioVisible(pedido)}`}
               width={180}
               height={180}
               style={{ borderRadius: '8px' }}
             />
-            <Text
-              style={{
-                fontSize: '12px',
-                color: '#78716c',
-                margin: '8px 0 0 0',
-                lineHeight: '1.5',
-              }}
-            >
-              Muestra este código QR en caja para agilizar tu pago.
-            </Text>
           </div>
         ) : null}
       </>

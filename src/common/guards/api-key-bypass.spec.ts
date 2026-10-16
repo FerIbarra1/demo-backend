@@ -32,22 +32,24 @@ describe('Guards globales vs. rutas de API key', () => {
     } as unknown as Reflector;
   }
 
-  function contextoCon(user?: unknown): ExecutionContext {
+  function contextoCon(user?: unknown, headers: Record<string, string> = {}): ExecutionContext {
     return {
       getHandler: () => undefined,
       getClass: () => undefined,
       switchToHttp: () => ({
-        getRequest: () => ({ user }),
+        getRequest: () => ({ user, headers }),
         getResponse: () => ({}),
       }),
     } as unknown as ExecutionContext;
   }
 
   describe('JwtAuthGuard', () => {
-    it('deja pasar una ruta @ApiKeyAuth() sin JWT', () => {
+    it('deja pasar al AGENTE (X-Agent-Key) en una ruta @ApiKeyAuth() sin JWT', () => {
       const guard = new JwtAuthGuard(reflectorCon({ isApiKeyAuth: true }));
-      // Sin el bypass esto delegaría en passport y lanzaría 401.
-      expect(guard.canActivate(contextoCon())).toBe(true);
+      // Sin el bypass esto delegaría en passport y lanzaría 401. El agente siempre trae su
+      // llave; sin ella la petición se autentica como cualquier otra (ver `jwt-auth.guard.spec`:
+      // así un ADMIN con sesión puede usar "Marcar como pagado" del panel).
+      expect(guard.canActivate(contextoCon(undefined, { 'x-agent-key': 'llave' }))).toBe(true);
     });
 
     it('sigue dejando pasar una ruta @Public()', () => {

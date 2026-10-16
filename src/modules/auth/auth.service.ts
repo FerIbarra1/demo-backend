@@ -23,6 +23,7 @@ import { MailService } from '../mail/mail.service';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { mailTemplates, mailSubjects } from '../mail/mail.templates';
 import { CuentaDesactivadaException } from './exceptions/cuenta-desactivada.exception';
+import { BodegaPresenciaService } from '../estaciones/bodega-presencia.service';
 
 @Injectable()
 export class AuthService {
@@ -34,6 +35,7 @@ export class AuthService {
     private configService: ConfigService,
     private mail: MailService,
     private readonly configuracion: ConfiguracionService,
+    private readonly bodegaPresencia: BodegaPresenciaService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponse> {
@@ -114,6 +116,7 @@ export class AuthService {
       where: { id: usuario.id },
       data: { lastLogin: new Date() },
     });
+    await this.marcarEntrada(usuario);
 
     if (dto.tiendaId && usuario.rol === RolUsuario.CLIENTE) {
       const tienda = await this.prisma.tienda.findFirst({
@@ -262,6 +265,7 @@ export class AuthService {
         where: { id: usuario.id },
         data: { lastLogin: new Date() },
       });
+      await this.marcarEntrada(usuario);
     }
 
     this.logger.log(`Kiosk login: ${usuario.email} en tienda ${dto.tiendaId}`);
@@ -269,13 +273,33 @@ export class AuthService {
     return this.generateTokens(usuario);
   }
 
-  async logout(userId: number, _token: string): Promise<{ message: string }> {
+  /**
+   * Oct 2026: entrar pone al bodeguero EN LÍNEA en la TV de bodega en el momento (antes aparecía
+   * hasta el siguiente movimiento de otro pedido). Los demás roles no tienen presencia propia:
+   * caja y mostrador la tienen en su estación.
+   */
+  private async marcarEntrada(usuario: Pick<Usuario, 'id' | 'rol' | 'tiendaId'>) {
+    if (usuario.rol !== RolUsuario.BODEGA) return;
+    await this.bodegaPresencia.entro(usuario.id, usuario.tiendaId);
+  }
+
+  async logout(userId: number, _token: string, rol?: RolUsuario): Promise<{ message: string }> {
     // Revocar todos los refresh tokens activos del usuario (cierre de sesión
     // en todos los dispositivos). El access token expira solo en 1h.
     await this.prisma.refreshToken.updateMany({
       where: { usuarioId: userId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    // Oct 2026: un bodeguero que sale deja la TV y regresa a la cola lo que traía. Va DESPUÉS de
+    // revocar los tokens (así un latido rezagado no lo revive) y nunca impide cerrar sesión: si
+    // falla, el latido sigue guardado y el barrido de inactividad lo saca igual.
+    if (rol === RolUsuario.BODEGA) {
+      await this.bodegaPresencia
+        .salio(userId)
+        .catch((err: Error) =>
+          this.logger.error(`Salida de bodega falló (usuario ${userId}): ${err.message}`),
+        );
+    }
     this.logger.log(`Logout: usuario ${userId}`);
     return { message: 'Sesión cerrada exitosamente' };
   }
@@ -392,14 +416,22 @@ export class AuthService {
    * (caso muy raro de token de un user ya borrado), se ignora silenciosamente
    * porque no queremos spamear logs ni mostrar errores al cliente en cada ping.
    */
-  async heartbeat(userId: number): Promise<{ userId: number; ultimoHeartbeat: string }> {
+  async heartbeat(
+    userId: number,
+    rol?: RolUsuario,
+  ): Promise<{ userId: number; ultimoHeartbeat: string }> {
     const now = new Date();
     try {
-      await this.prisma.usuario.update({
-        where: { id: userId },
-        data: { ultimoHeartbeat: now },
-        select: { id: true },
-      });
+      if (rol === RolUsuario.BODEGA) {
+        // El bodeguero tiene presencia propia (la TV de bodega): ver `BodegaPresenciaService`.
+        await this.bodegaPresencia.latido(userId, now);
+      } else {
+        await this.prisma.usuario.update({
+          where: { id: userId },
+          data: { ultimoHeartbeat: now },
+          select: { id: true },
+        });
+      }
     } catch {
       // Usuario no existe: ignorar (token de un user borrado). El polling
       // 5s de auth-store lo refrescará o lo deslogeará automáticamente.

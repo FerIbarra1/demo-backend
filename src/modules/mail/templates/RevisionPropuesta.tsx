@@ -29,10 +29,10 @@ const TEXTOS: Record<
     preview: 'Nuestro equipo de bodega tiene una propuesta para tu pedido',
     title: 'Tu pedido tiene cambios propuestos',
     greeting:
-      'Nuestro equipo de bodega terminó de revisar tu pedido y encontró algo que queremos confirmar contigo antes de continuar.',
+      'Nuestro equipo de bodega revisó tu pedido y hay algo que necesitamos confirmar contigo antes de continuar.',
     label: 'Mensaje de bodega',
     cuerpo:
-      'Revisa el detalle para ver exactamente qué se ajustó (sustituciones, cantidades o piezas no disponibles) y, si estás de acuerdo, confírmalo. Si prefieres otra opción, respóndenos desde el chat del pedido o pide hablar con un asesor de ventas.',
+      'Revisa en tu pedido qué se ajustó (cantidades o piezas sin existencia) y, si estás de acuerdo, confírmalo. Si prefieres otra opción, pide ajustes ahí mismo y un asesor de ventas te atenderá.',
   },
   ventas: {
     preview: 'Tu asesor de ventas tiene una propuesta para tu pedido',
@@ -41,7 +41,7 @@ const TEXTOS: Record<
       'Tu asesor de ventas revisó tu pedido y preparó una propuesta para que puedas continuar con tu compra.',
     label: 'Mensaje de tu asesor',
     cuerpo:
-      'Revisa el detalle de la propuesta y, si estás de acuerdo, confírmala. Si quieres ajustar algo, responde directamente desde el chat del pedido — tu asesor sigue atendiéndote.',
+      'Revisa la propuesta en tu pedido y, si estás de acuerdo, confírmala. Si quieres ajustar algo, escríbele a tu asesor desde el chat del pedido.',
   },
   asesor: {
     preview: 'Un asesor de ventas atenderá tu pedido',
@@ -50,7 +50,7 @@ const TEXTOS: Record<
       'Recibimos tu solicitud. Un asesor de ventas revisará tu pedido y se pondrá en contacto contigo para ayudarte a resolverlo.',
     label: 'Tu solicitud',
     cuerpo:
-      'Puedes seguir la conversación en tiempo real desde el chat del pedido. Te avisaremos por correo en cuanto tu asesor tenga una propuesta lista.',
+      'Puedes seguir la conversación desde el chat de tu pedido. Te avisaremos por correo en cuanto tu asesor tenga una propuesta lista.',
   },
 };
 

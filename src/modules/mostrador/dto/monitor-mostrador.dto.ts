@@ -1,99 +1,57 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { CanalOrigen } from '@prisma/client';
 
 /**
- * F16 (sep 2026): snapshot del monitor de mostrador.
+ * F16 (sep 2026): snapshot del monitor de mostrador — la TV de la pared.
  *
- * A diferencia del monitor de cajero (agrupado por ventanilla) y del de bodega
- * (agrupado por canal), este es una COLA LINEAL: el operador manda a llamar al
- * siguiente conforme al orden. Es el modelo "TV bancaria" que el negocio pidió
- * (decisión D16): el cliente ve su pedido aparecer en la pantalla y sabe que le
- * toca pasar a revisarlo.
+ * Oct 2026 (16-oct): REDUCIDO A FOLIO + NÚMEROS. La pantalla es PÚBLICA y este payload viaja hasta
+ * el navegador de la pared, aunque la TV no pinte todo lo que recibe. Antes cada pedido traía
+ * nombre del cliente, total, canal, número de productos, fechas, tiempos de espera y el nombre del
+ * operador, y la respuesta traía además la lista de "pedidos sin recoger" con nombres: nada de eso
+ * se ve en la TV, pero cualquiera que abriera la pestaña de red lo leía. Ahora solo sale lo que la
+ * pantalla dibuja: el folio, a qué mostrador pasar, y el operador de cada puesto (personal, no
+ * cliente). Lo que la consola del operador necesita (nombres, montos, canal) vive en sus propios
+ * endpoints, que sí están autenticados con un rol de empleado.
  *
- * No hay urgencia ni tiempo de espera (decisión D13): en mostrador el pedido
- * espera al CLIENTE, no al revés. Marcar como "crítico" un pedido cuyo cliente
- * aún no llega sería ruido.
+ * Es una pantalla "estilo banco" por PUESTOS (como la TV de caja): una tarjeta por mostrador con el
+ * folio que atiende, y la cola de espera. No hay urgencia ni tiempo de espera (decisión D13): en
+ * mostrador el pedido espera al CLIENTE, no al revés.
  */
 
+/** Un folio en la TV. Nada más: ni nombre, ni canal, ni monto. */
 export class MonitorMostradorPedidoDto {
   @ApiProperty() id: number;
   @ApiProperty() numeroPedido: string;
-  @ApiProperty() clienteNombre: string;
-  @ApiProperty({ enum: CanalOrigen }) canalOrigen: CanalOrigen;
-  @ApiProperty() itemsCount: number;
-  @ApiProperty() total: number;
-  @ApiProperty() fechaPedido: string;
-  @ApiProperty({
-    description: 'Minutos desde que el pedido entró a la cola de mostrador',
-  })
-  minutosEnCola: number;
-  @ApiProperty({
-    nullable: true,
-    type: String,
-    description: 'Cuándo avisó llegada el cliente (null = no ha avisado)',
-  })
-  llegadaAnunciadaAt: string | null;
   @ApiProperty({
     nullable: true,
     type: Number,
     description:
-      'Minutos que el cliente lleva esperando en tienda (kiosko: desde la hora del pedido; ' +
-      'web: desde su aviso de llegada)',
-  })
-  esperandoDesdeMin: number | null;
-  @ApiProperty({
-    description:
-      'true si el cliente está esperando en tienda (kiosko, o web que avisó llegada y ' +
-      'no fue descartado)',
-  })
-  clienteEnTienda: boolean;
-  @ApiProperty({
-    nullable: true,
-    type: Number,
-    description:
-      'F22: número del mostrador al que pasa el cliente. Solo en el panel "Atendiendo"; ' +
-      'null si la tienda no tiene mostradores configurados.',
+      'Número del mostrador al que pasa el cliente. Solo en los ya llamados; null en la cola.',
   })
   mostradorNumero: number | null;
-  @ApiProperty({
-    nullable: true,
-    type: String,
-    description: 'F22: operador que lo llamó. Solo en el panel "Atendiendo".',
-  })
-  operadorNombre: string | null;
 }
 
 export class MonitorMostradorContadoresDto {
   @ApiProperty({ description: 'Pedidos en la cola de mostrador' })
   enCola: number;
-  @ApiProperty({
-    description: 'Pedidos que el operador ya mandó a llamar (panel Atendiendo)',
-  })
+  @ApiProperty({ description: 'Pedidos que el operador ya mandó a llamar' })
   atendiendo: number;
-  @ApiProperty({ description: 'De los anteriores, cuántos tienen cliente en tienda' })
-  enTienda: number;
-  @ApiProperty({ description: 'Pedidos pagados esperando entrega al cliente' })
-  listosParaEntregar: number;
-  /**
-   * F16 (§5.4): pedidos listos que NADIE ha venido a recoger.
-   *
-   * El gate de D5 esconde los pedidos web hasta que el cliente avisa llegada,
-   * así que uno sin aviso es invisible en la cola. Si el cliente nunca llega,
-   * se queda ahí para siempre sin que nadie lo note. Este contador es la señal
-   * para perseguirlos.
-   */
-  @ApiProperty({ description: 'Pedidos listos sin cliente en tienda (nadie los ha recogido)' })
-  sinCliente: number;
 }
 
-export class MonitorMostradorSinClienteDto {
-  @ApiProperty() id: number;
-  @ApiProperty() numeroPedido: string;
-  @ApiProperty() clienteNombre: string;
+/**
+ * Oct 2026: UN mostrador (puesto) de la TV, como las ventanillas de la TV de caja: número, quién
+ * lo atiende y los folios que tiene llamados ahora.
+ */
+export class MonitorMostradorPuestoDto {
+  @ApiProperty() mostradorId: number;
+  @ApiProperty() numero: number;
+  @ApiProperty({ nullable: true, type: String }) operadorNombre: string | null;
   @ApiProperty({
-    description: 'Minutos desde que se creó el pedido (antigüedad para priorizar)',
+    description:
+      'Hay un operador con señales de vida en los últimos 15 min. Falso = la TV lo pinta "Cerrado": el cliente no debe caminar a un mostrador sin nadie.',
   })
-  minutosEsperando: number;
+  abierto: boolean;
+  @ApiProperty({ type: [MonitorMostradorPedidoDto] })
+  atendiendo: MonitorMostradorPedidoDto[];
 }
 
 export class MonitorMostradorResponseDto {
@@ -105,15 +63,21 @@ export class MonitorMostradorResponseDto {
   @ApiProperty({
     type: [MonitorMostradorPedidoDto],
     description:
-      'F16: pedidos ya llamados, del más reciente al más viejo. El primero es ' +
-      'el que está enfrente del mostrador ahora mismo.',
+      'Todos los ya llamados, del más reciente al más viejo (el mismo contenido que `mostradores` y ' +
+      '`sinMostrador` juntos; se conserva para una TV con la versión anterior de la pantalla).',
   })
   atendiendo: MonitorMostradorPedidoDto[];
+  @ApiProperty({
+    type: [MonitorMostradorPuestoDto],
+    description: 'Los mostradores de la tienda con lo que atiende cada uno (como la TV de caja).',
+  })
+  mostradores: MonitorMostradorPuestoDto[];
+  @ApiProperty({
+    type: [MonitorMostradorPedidoDto],
+    description:
+      'Llamados sin un mostrador válido (datos anteriores a los puestos, o mostrador borrado): no deben desaparecer de la TV.',
+  })
+  sinMostrador: MonitorMostradorPedidoDto[];
   @ApiProperty({ type: MonitorMostradorContadoresDto })
   contadores: MonitorMostradorContadoresDto;
-  @ApiProperty({
-    type: [MonitorMostradorSinClienteDto],
-    description: 'F16: pedidos listos sin cliente, ordenados por antigüedad.',
-  })
-  sinCliente: MonitorMostradorSinClienteDto[];
 }

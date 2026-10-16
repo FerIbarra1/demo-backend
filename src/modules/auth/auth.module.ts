@@ -6,6 +6,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { MailModule } from '../mail/mail.module';
+import { BodegaPresenciaModule } from '../estaciones/bodega-presencia.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { MailModule } from '../mail/mail.module';
       inject: [ConfigService],
     }),
     MailModule,
+    BodegaPresenciaModule,
   ],
   providers: [AuthService, JwtStrategy],
   controllers: [AuthController],

@@ -204,7 +204,7 @@ describe('MostradorService.ajustar — la propuesta huérfana', () => {
       {
         cargarYValidar: jest.fn().mockResolvedValue({ id: 1, estado: EstadoPedido.REVISADO }),
       } as never,
-      { crearDesdePedido: jest.fn() } as never,
+      { crearDesdePedido: jest.fn(), registrarQuitadasEnMostrador: jest.fn() } as never,
       { emitToTienda: jest.fn() } as never,
       { columnaParaPedido: jest.fn(async () => 'lista1') } as never,
       {} as never,
@@ -216,7 +216,7 @@ describe('MostradorService.ajustar — la propuesta huérfana', () => {
     return { svc, updateMany };
   }
 
-  it('marca SUPERADA la propuesta pendiente antes de mandar el pedido a bodega', async () => {
+  it('marca SUPERADA la propuesta pendiente aunque el ajuste se resuelva sin pasar por bodega', async () => {
     const { svc, updateMany } = crearConAjuste();
 
     await svc.ajustar(1, usuario, 'el cliente quiere 2 menos', [

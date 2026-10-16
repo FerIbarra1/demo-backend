@@ -665,6 +665,7 @@ export class BodegaService {
             cantidad: true,
             cantidadSurtida: true,
             piezasRetiradas: true,
+            piezasBase: true,
             estadoSurtido: true,
             original: true,
             cancelada: true,
@@ -696,8 +697,11 @@ export class BodegaService {
   /**
    * F21 (oct 2026): filtro GRUESO de "este pedido PODRÍA traer trabajo de ajuste".
    *
-   * Tres caminos, y los tres son "hay algo que hacer con la bolsa o el anaquel":
+   * Cuatro caminos, y los cuatro son "hay algo que hacer con la bolsa o el anaquel":
    *
+   *   `piezasBase > 0`   → (oct 2026) una línea a la que se le SUBIÓ la cantidad: bodega
+   *                        tiene que traer las piezas de más, y las que ya están en la
+   *                        bolsa no se tocan.
    *   `original: false`  → hay productos nuevos que traer del anaquel.
    *   `cancelada: true`  → hay líneas que salieron y su mercancía vuelve.
    *   `cantidadSurtida > cantidad` → una línea ACTIVA a la que se le bajó la
@@ -727,6 +731,10 @@ export class BodegaService {
           { original: false },
           { cancelada: true },
           { cantidadSurtida: { gt: this.prisma.itemPedido.fields.cantidad } },
+          // Oct 2026 (decisión 2): una línea que se subió. También la excluye del
+          // surtido por lote: el lote es picking por zona y trata la línea como
+          // "surtir N piezas", sin saber que `piezasBase` ya están en la bolsa.
+          { piezasBase: { gt: 0 } },
         ],
       },
     };
@@ -755,10 +763,17 @@ export class BodegaService {
     cantidad: number;
     cantidadSurtida: number;
     piezasRetiradas: number;
+    piezasBase: number;
     estadoSurtido: EstadoSurtido;
     original: boolean;
   }): boolean {
     if (piezasPendientesDeRetiro(item) > 0) return true;
+    // Oct 2026 (decisión 2): una línea que se subió y bodega aún no verifica. Es
+    // `original: true`, así que el criterio de abajo no la veía y el pedido volvía a
+    // la cola sin aviso de que traía piezas por surtir.
+    if (!item.cancelada && item.piezasBase > 0 && item.estadoSurtido === EstadoSurtido.PENDIENTE) {
+      return true;
+    }
     return !item.cancelada && !item.original && item.estadoSurtido === EstadoSurtido.PENDIENTE;
   }
 

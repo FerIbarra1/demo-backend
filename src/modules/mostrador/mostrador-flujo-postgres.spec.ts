@@ -168,7 +168,7 @@ beforeAll(async () => {
   );
   presencia = new PresenciaService(prisma as never, state, access, realtime as never, llegada);
   presencia.onModuleInit();
-  mostradores = new MostradoresService(prisma as never, realtime as never);
+  mostradores = new MostradoresService(prisma as never, realtime as never, state);
   sinRecoger = new SinRecogerService(
     prisma as never,
     config as never,
@@ -622,5 +622,57 @@ describe('traer a entrega: el cliente enfrente aparece en la cola', () => {
     expect(tras.llegadaAnunciadaAt).not.toBeNull();
     const cola = await consultas.obtenerCola(tiendaId, 1, 100);
     expect(cola.data.map((x) => x.id)).toContain(p.id);
+  });
+});
+
+describe('entregar: quién recoge cuando no es el titular (16-oct)', () => {
+  it('sin nombre: lo recogió el titular — no se guarda nada y el historial queda como siempre', async () => {
+    const p = await crearPedido({ estado: EstadoPedido.PAGADO });
+
+    await mostrador.entregar(p.id, usuarioOp());
+
+    const tras = await leer(p.id);
+    expect(tras.estado).toBe(EstadoPedido.ENTREGADO);
+    expect(tras.recogioNombre).toBeNull();
+    const h = await prisma.historialPedido.findFirstOrThrow({
+      where: { pedidoId: p.id, estadoNuevo: EstadoPedido.ENTREGADO },
+    });
+    expect(h.observacion).toBe('Entregado en mostrador por Ana Mostrador');
+  });
+
+  it('con nombre: se guarda limpio, queda en el historial y el correo lo encuentra YA guardado', async () => {
+    const p = await crearPedido({ estado: EstadoPedido.PAGADO });
+
+    await mostrador.entregar(p.id, usuarioOp(), '  Juan   Pérez (chofer) ');
+    await pausa(); // la notificación se relee después del commit, sin bloquear la respuesta
+
+    expect((await leer(p.id)).recogioNombre).toBe('Juan Pérez (chofer)');
+    const h = await prisma.historialPedido.findFirstOrThrow({
+      where: { pedidoId: p.id, estadoNuevo: EstadoPedido.ENTREGADO },
+    });
+    expect(h.observacion).toContain('lo recogió Juan Pérez (chofer) (no es el titular)');
+    // El correo de "entregado" recibe el pedido con el nombre ya escrito: se escribió en la MISMA
+    // transacción que la transición, no en un `update` aparte que llegara tarde.
+    const [pedidoDelCorreo, tipo] = enviar.mock.calls[0];
+    expect(tipo).toBe(TipoNotificacion.ENTREGADO);
+    expect(pedidoDelCorreo.recogioNombre).toBe('Juan Pérez (chofer)');
+  });
+
+  it('si el nombre es el del titular (sin acentos ni mayúsculas) se trata como "lo recogió el titular"', async () => {
+    const p = await crearPedido({ estado: EstadoPedido.PAGADO });
+
+    await mostrador.entregar(p.id, usuarioOp(), 'CLIENTE flujo');
+
+    const tras = await leer(p.id);
+    expect(tras.estado).toBe(EstadoPedido.ENTREGADO);
+    expect(tras.recogioNombre).toBeNull();
+  });
+
+  it('un nombre de menos de 3 letras se rechaza y el pedido NO se entrega', async () => {
+    const p = await crearPedido({ estado: EstadoPedido.PAGADO });
+
+    await expect(mostrador.entregar(p.id, usuarioOp(), 'Jo')).rejects.toThrow(/nombre completo/i);
+
+    expect((await leer(p.id)).estado).toBe(EstadoPedido.PAGADO);
   });
 });

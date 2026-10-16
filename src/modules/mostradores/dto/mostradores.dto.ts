@@ -1,4 +1,4 @@
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, Max, Min } from 'class-validator';
 
 export class CrearMostradoresDto {
   @IsInt()
@@ -16,6 +16,11 @@ export class RenumerarMostradorDto {
 export class ElegirMostradorDto {
   @IsInt()
   mostradorId!: number;
+
+  /** Tomar el control de un mostrador ocupado por otro (la pantalla lo pide con confirmación). */
+  @IsOptional()
+  @IsBoolean()
+  forzar?: boolean;
 }
 
 export class LiberarMostradorDto {

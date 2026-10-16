@@ -103,7 +103,7 @@ describe('obtenerAjustesEntrega', () => {
    * Se afirma sobre la forma del OR en vez de sobre el objeto completo para que
    * el test siga siendo legible, y se comprueba explícitamente el tercer término.
    */
-  it('el filtro grueso incluye los tres caminos, sobrante incluido', async () => {
+  it('el filtro grueso incluye los cuatro caminos, sobrante y línea subida incluidos', async () => {
     const { svc, findMany } = crearServicio();
     await svc.obtenerAjustesEntrega(5);
 
@@ -111,8 +111,11 @@ describe('obtenerAjustesEntrega', () => {
     expect(or).toContainEqual({ original: false });
     expect(or).toContainEqual({ cancelada: true });
     // Field reference: compara dos columnas del MISMO modelo dentro del `some`.
-    expect(or).toHaveLength(3);
+    expect(or).toHaveLength(4);
     expect(or[2]).toHaveProperty('cantidadSurtida.gt');
+    // Oct 2026 (decisión 2): una línea a la que se le SUBIÓ la cantidad. También la
+    // excluye del surtido por lote, que no sabe que parte de la línea ya está en la bolsa.
+    expect(or).toContainEqual({ piezasBase: { gt: 0 } });
   });
 
   it('devuelve solo los campos que la tarjeta necesita (folio, cliente, canal, motivo)', async () => {

@@ -7,7 +7,8 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RealtimeService } from '../realtime/realtime.service';
-import { RolUsuario } from '@prisma/client';
+import { EstadoPedido, Prisma, RolUsuario } from '@prisma/client';
+import { operadorActivo, ultimaActividad } from '../pedidos/core/estacion.util';
 
 /**
  * Lógica del módulo de ventanillas.
@@ -34,13 +35,24 @@ export class VentanillasService {
   ) {}
 
   async listarPorTienda(tiendaId: number) {
-    return this.prisma.ventanilla.findMany({
+    const ventanillas = await this.prisma.ventanilla.findMany({
       where: { tiendaId },
       include: {
-        cajero: { select: { id: true, nombre: true, apellido: true } },
+        cajero: {
+          select: { id: true, nombre: true, apellido: true, lastLogin: true, ultimoHeartbeat: true },
+        },
       },
       orderBy: { numero: 'asc' },
     });
+    const ahora = new Date();
+    // Oct 2026: el selector muestra desde cuándo no da señales el ocupante, para decidir si tomar el
+    // control (una ventanilla "ocupada" por alguien que cerró la pestaña no debe bloquear el turno).
+    return ventanillas.map(({ cajero, ...v }) => ({
+      ...v,
+      cajero: cajero ? { id: cajero.id, nombre: cajero.nombre, apellido: cajero.apellido } : null,
+      ultimaActividad: ultimaActividad(cajero)?.toISOString() ?? null,
+      ocupanteInactivo: cajero ? !operadorActivo(cajero, ahora) : false,
+    }));
   }
 
   /**
@@ -139,7 +151,7 @@ export class VentanillasService {
    * para cerrar la race check-then-act entre dos cajeros que eligen la misma
    * ventanilla a la vez.
    */
-  async elegir(usuarioId: number, tiendaId: number, ventanillaId: number) {
+  async elegir(usuarioId: number, tiendaId: number, ventanillaId: number, forzar = false) {
     const usuario = await this.prisma.usuario.findUnique({ where: { id: usuarioId } });
     if (!usuario || usuario.tiendaId !== tiendaId) {
       throw new NotFoundException(`Usuario ${usuarioId} no pertenece a tienda ${tiendaId}`);
@@ -156,6 +168,23 @@ export class VentanillasService {
       throw new BadRequestException(`La ventanilla ${v.numero} está inactiva`);
     }
 
+    // Oct 2026: ocupada por OTRA persona. Se puede TOMAR EL CONTROL, pero solo a propósito
+    // (`forzar`, con confirmación en la pantalla): el cajero que se fue sin cerrar sesión no debe
+    // bloquear la ventanilla, y el que sí está atendiendo no debe perderla por un toque.
+    const ocupanteId = v.cajeroId !== null && v.cajeroId !== usuarioId ? v.cajeroId : null;
+    if (ocupanteId !== null && !forzar) {
+      const o = await this.prisma.usuario.findUnique({
+        where: { id: ocupanteId },
+        select: { nombre: true, apellido: true },
+      });
+      throw new ConflictException({
+        statusCode: 409,
+        code: 'VENTANILLA_OCUPADA',
+        message: `La ventanilla ${v.numero} está ocupada por ${o?.nombre ?? 'otro cajero'}. Si ya no está, puedes tomar el control.`,
+      });
+    }
+    let regresados: Array<{ id: number; numeroPedido: string }> = [];
+
     const actualizada = await this.prisma.$transaction(async (tx) => {
       // Liberar ventanilla anterior del usuario (si era de esta tienda).
       const anterior = await tx.ventanilla.findFirst({
@@ -171,6 +200,22 @@ export class VentanillasService {
       // Si ya era la misma, no-op (idempotente).
       if (v.cajeroId === usuarioId) {
         return v;
+      }
+
+      // Tomar el control: quien la tenía deja de tenerla y sus clientes vuelven a la fila.
+      if (ocupanteId !== null) {
+        regresados = await this.regresarPedidosALaFila(tx, ocupanteId, tiendaId, v.numero);
+        const quitada = await tx.ventanilla.updateMany({
+          where: { id: ventanillaId, cajeroId: ocupanteId },
+          data: { cajeroId: usuarioId },
+        });
+        if (quitada.count !== 1) {
+          throw new ConflictException('La ventanilla cambió mientras la tomabas. Inténtalo de nuevo.');
+        }
+        return tx.ventanilla.findUnique({
+          where: { id: ventanillaId },
+          include: { cajero: { select: { id: true, nombre: true, apellido: true } } },
+        });
       }
 
       // Asignación con guarda atómica: sólo si la ventanilla está libre o ya
@@ -199,6 +244,11 @@ export class VentanillasService {
     }
 
     // Emitir realtime fuera de la transacción (no bloquear el commit).
+    if (ocupanteId !== null) {
+      // Al que la tenía se le avisa: su consola pasa a modo observador.
+      this.realtime.emitToUser(ocupanteId, 'ventanilla.perdida', { numero: v.numero });
+      this.avisarPedidosRegresados(tiendaId, regresados);
+    }
     if (v.cajeroId !== usuarioId) {
       this.realtime.emitToTienda(tiendaId, 'ventanilla.asignada', {
         ventanillaId: actualizada.id,
@@ -225,18 +275,98 @@ export class VentanillasService {
     const v = await this.prisma.ventanilla.findFirst({ where });
     if (!v) {
       // No-op: no tenía ventanilla asignada.
-      return { ok: true };
+      return { ok: true, pedidosRegresadosALaFila: 0 };
     }
-    await this.prisma.ventanilla.update({
-      where: { id: v.id },
-      data: { cajeroId: null },
+    // Oct 2026: los clientes que el cajero tenía en su ventanilla vuelven a la fila.
+    //
+    // Sin esto, al soltar la ventanilla esos pedidos seguían asignados al cajero (`cajeroAsignadoId`)
+    // pero la ventanilla ya no tenía cajero, así que la TV dejaba de mostrarlos (solo lista los de
+    // un cajero activo) y la fila tampoco (solo lista los SIN asignar): el cliente que ya estaba
+    // siendo atendido desaparecía de toda pantalla. Vuelven CONSERVANDO su lugar
+    // (`colaCajaDesdeAt` no se toca): no hicieron nada para perder el turno.
+    const regresados = await this.prisma.$transaction(async (tx) => {
+      await tx.ventanilla.update({ where: { id: v.id }, data: { cajeroId: null } });
+      return this.regresarPedidosALaFila(tx, usuarioId, tiendaId, v.numero);
     });
     this.realtime.emitToTienda(tiendaId, 'ventanilla.liberada', {
       ventanillaId: v.id,
       numero: v.numero,
     });
-    this.logger.log(`Ventanilla ${v.numero} liberada por usuario ${usuarioId}`);
-    return { ok: true };
+    this.avisarPedidosRegresados(tiendaId, regresados);
+    this.logger.log(
+      `Ventanilla ${v.numero} liberada por usuario ${usuarioId}` +
+        (regresados.length ? ` (${regresados.length} pedido(s) regresaron a la fila)` : ''),
+    );
+    return { ok: true, pedidosRegresadosALaFila: regresados.length };
+  }
+
+  /**
+   * Devuelve a la fila los pedidos que un cajero tenía asignados (`PENDIENTE_PAGO`). Lo usan soltar
+   * la ventanilla, tomar el control y el barrido de inactividad: los tres dejan al cajero sin
+   * ventanilla y sus clientes no pueden quedarse "asignados" a nadie.
+   */
+  private async regresarPedidosALaFila(
+    tx: Prisma.TransactionClient,
+    cajeroId: number,
+    tiendaId: number,
+    numeroVentanilla: number,
+  ) {
+    const pendientes = await tx.pedido.findMany({
+      where: { cajeroAsignadoId: cajeroId, tiendaId, estado: EstadoPedido.PENDIENTE_PAGO },
+      select: { id: true, numeroPedido: true },
+    });
+    if (pendientes.length === 0) return pendientes;
+    await tx.pedido.updateMany({
+      where: {
+        id: { in: pendientes.map((p) => p.id) },
+        estado: EstadoPedido.PENDIENTE_PAGO,
+        cajeroAsignadoId: cajeroId,
+      },
+      data: { cajeroAsignadoId: null, cajeroAsignadoAt: null },
+    });
+    await tx.historialPedido.createMany({
+      data: pendientes.map((p) => ({
+        pedidoId: p.id,
+        estadoAnterior: EstadoPedido.PENDIENTE_PAGO,
+        estadoNuevo: EstadoPedido.PENDIENTE_PAGO,
+        observacion: `Regresó a la fila: la ventanilla ${numeroVentanilla} quedó sin cajero con el pedido en espera`,
+        usuarioId: cajeroId,
+        usuarioNombre: 'Ventanilla',
+      })),
+    });
+    return pendientes;
+  }
+
+  private avisarPedidosRegresados(
+    tiendaId: number,
+    pedidos: Array<{ id: number; numeroPedido: string }>,
+  ) {
+    for (const p of pedidos) {
+      this.realtime.emitToTienda(tiendaId, 'pedido.cajero-liberado', {
+        id: p.id,
+        numeroPedido: p.numeroPedido,
+      });
+      this.realtime.emitToPedido(p.id, 'pedido.cajero-liberado', { id: p.id });
+    }
+  }
+
+  /**
+   * Barrido de inactividad: suelta las ventanillas cuyo cajero lleva más de 15 min sin señales
+   * (`INACTIVIDAD_ESTACION_MS`) y devuelve a la fila lo que tenían. Sin esto, quien cierra la
+   * pestaña sin cerrar sesión deja la ventanilla "ocupada" hasta que alguien la libere a mano.
+   */
+  async liberarInactivas(ahora: Date = new Date()): Promise<number> {
+    const ocupadas = await this.prisma.ventanilla.findMany({
+      where: { cajeroId: { not: null } },
+      include: { cajero: { select: { lastLogin: true, ultimoHeartbeat: true } } },
+    });
+    let liberadas = 0;
+    for (const v of ocupadas) {
+      if (v.cajeroId === null || operadorActivo(v.cajero, ahora)) continue;
+      await this.liberar(v.cajeroId, v.tiendaId, v.id);
+      liberadas++;
+    }
+    return liberadas;
   }
 
   /** Helper: ventanilla del cajero en una tienda. Null si no tiene. */

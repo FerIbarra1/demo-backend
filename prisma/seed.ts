@@ -149,6 +149,11 @@ async function limpiarDatosTransaccionales() {
   console.log('🗑️  Eliminando datos transaccionales (pedidos, kioskos)...');
 
   // Orden por dependencias FK: primero lo que referencia a pedidos/usuarios.
+  // Pagos por transferencia: primero lo que cuelga del pago, luego el pago (la FK hacia
+  // `pedidos` es Restrict a propósito, así que el pedido no se puede borrar antes).
+  await prisma.pagoTransferenciaEvento.deleteMany({});
+  await prisma.pagoComprobante.deleteMany({});
+  await prisma.pedidoPagoTransferencia.deleteMany({});
   await prisma.notificacion.deleteMany({});
   await prisma.pedidoMensaje.deleteMany({});
   await prisma.pedidoPropuesta.deleteMany({});
@@ -163,6 +168,7 @@ async function limpiarDatosTransaccionales() {
   await prisma.kiosko.deleteMany({});
   // Ventanillas: se recrean abajo (referencian usuarios).
   await prisma.ventanilla.deleteMany({});
+  await prisma.mostrador.deleteMany({});
   await prisma.refreshToken.deleteMany({});
   await prisma.passwordResetToken.deleteMany({});
 
@@ -177,6 +183,7 @@ async function limpiarDatosTransaccionales() {
   await prisma.$executeRaw`ALTER SEQUENCE "pedidos_mensajes_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "notificaciones_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "ventanillas_id_seq" RESTART WITH 1`;
+  await prisma.$executeRaw`ALTER SEQUENCE "mostradores_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "refresh_tokens_id_seq" RESTART WITH 1`;
   await prisma.$executeRaw`ALTER SEQUENCE "password_reset_tokens_id_seq" RESTART WITH 1`;
 
@@ -376,6 +383,31 @@ async function main() {
     tiendaId: tiendaMexicali.id,
   });
 
+  // Oct 2026: Tesorería. Verifica las transferencias de TODAS las tiendas, así que no tiene tienda.
+  await upsertUsuario('tesoreria@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Usuario',
+    apellido: 'Tesorería',
+    rol: RolUsuario.TESORERIA,
+  });
+
+  // Cuenta bancaria GLOBAL de demostración, para poder probar las transferencias en desarrollo.
+  // La CLABE es inventada pero con dígito verificador válido. En producción la da de alta ADMIN
+  // desde el panel (el seed no corre contra producción).
+  const cuentaGlobal = await prisma.cuentaBancaria.findFirst({
+    where: { tiendaId: null, activa: true },
+  });
+  if (!cuentaGlobal) {
+    await prisma.cuentaBancaria.create({
+      data: {
+        tiendaId: null,
+        banco: 'BBVA (DEMO)',
+        titular: 'PUNTO TEXTIL DEMO SA DE CV',
+        clabe: '012180001234567899',
+      },
+    });
+  }
+
   // Usuarios dedicados al monitor de bodega (uno por tienda).
   // Pensados para dejarse logueados en TVs de la bodega.
   // Rol BODEGA_MONITOR: login redirige a /bodega-monitor; no puede tomar pedidos.
@@ -507,24 +539,46 @@ async function main() {
 
   // ========== CREAR VENTANILLAS (F11 ago 2026) ==========
   console.log('🪟 Creando ventanillas...');
-  // Mexicali: 3 ventanillas. La 1 ya está asignada al cajero demo.
-  // `(tiendaId, numero)` es único, así que el upsert es idempotente.
+  // Oct 2026: NINGUNA estación nace asignada. El cajero (y el operador de mostrador) ELIGEN la suya
+  // al iniciar sesión; antes la ventanilla 1 venía ya asignada al cajero demo y "se te asignaba una
+  // caja sola". `(tiendaId, numero)` es único, así que el upsert es idempotente.
   const ventanillas = [
-    { tiendaId: tiendaMexicali.id, numero: 1, cajeroId: usuarioCajero.id },
-    { tiendaId: tiendaMexicali.id, numero: 2, cajeroId: null },
-    { tiendaId: tiendaMexicali.id, numero: 3, cajeroId: null },
-    { tiendaId: tiendaMonterrey.id, numero: 1, cajeroId: null },
-    { tiendaId: tiendaMonterrey.id, numero: 2, cajeroId: null },
+    { tiendaId: tiendaMexicali.id, numero: 1 },
+    { tiendaId: tiendaMexicali.id, numero: 2 },
+    { tiendaId: tiendaMexicali.id, numero: 3 },
+    { tiendaId: tiendaMonterrey.id, numero: 1 },
+    { tiendaId: tiendaMonterrey.id, numero: 2 },
   ];
   for (const v of ventanillas) {
     await prisma.ventanilla.upsert({
       where: { tiendaId_numero: { tiendaId: v.tiendaId, numero: v.numero } },
       update: {},
-      create: { ...v, activa: true },
+      create: { ...v, cajeroId: null, activa: true },
     });
   }
-  console.log(`  ✓ ${tiendaMexicali.nombre}: 3 ventanillas (1 ocupada por ${usuarioCajero.nombre})`);
+  console.log(`  ✓ ${tiendaMexicali.nombre}: 3 ventanillas libres`);
   console.log(`  ✓ ${tiendaMonterrey.nombre}: 2 ventanillas libres\n`);
+
+  // ========== CREAR MOSTRADORES (oct 2026) ==========
+  // El mostrador es la estación que autoriza a atender (igual que la ventanilla del cajero): sin
+  // mostradores configurados el operador solo puede mirar. Mexicali tiene 3, como ventanillas.
+  console.log('🧾 Creando mostradores...');
+  const mostradores = [
+    { tiendaId: tiendaMexicali.id, numero: 1 },
+    { tiendaId: tiendaMexicali.id, numero: 2 },
+    { tiendaId: tiendaMexicali.id, numero: 3 },
+    { tiendaId: tiendaMonterrey.id, numero: 1 },
+    { tiendaId: tiendaMonterrey.id, numero: 2 },
+  ];
+  for (const m of mostradores) {
+    await prisma.mostrador.upsert({
+      where: { tiendaId_numero: { tiendaId: m.tiendaId, numero: m.numero } },
+      update: {},
+      create: { ...m, operadorId: null, activa: true },
+    });
+  }
+  console.log(`  ✓ ${tiendaMexicali.nombre}: 3 mostradores libres`);
+  console.log(`  ✓ ${tiendaMonterrey.nombre}: 2 mostradores libres\n`);
 
   // ========== CREAR CORRIDAS Y TALLAS ==========
   console.log('📏 Creando corridas y tallas...');

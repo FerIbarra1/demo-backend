@@ -226,3 +226,91 @@ describe('construirPropuestaDeBodega — el total que se aprueba es el que se co
     expect(total).toBe(totalQueSeCobra(items));
   });
 });
+
+describe('construirPropuestaDeBodega — "antes de estos cambios" (subtotalOriginal)', () => {
+  /**
+   * Oct 2026: el caso que se reprodujo con las funciones reales.
+   *
+   * Pedido de 12 piezas con la promo ya aplicada (congelada a mayoreo): $707.75.
+   * Bodega encuentra todo en L1, 2 de 5 en L2 y nada en L3. Los tres cambios
+   * hacen que el pedido baje de 12 a 6 piezas y pierda la promo.
+   *
+   * La tarjeta calculaba "Tu pedido original" sumando el `subtotal` de cada
+   * línea: la completa ya traía el precio NUEVO ($240 en vez de $228) y la que no
+   * había traía `subtotal: 0`. Resultado: $548.75 donde el pedido valía $707.75,
+   * y el cliente veía una baja de $178.75 cuando la real era de $337.75.
+   */
+  const MAYOREO_C0200 = new Prisma.Decimal(57);
+  const MAYOREO_C0300 = new Prisma.Decimal(61.75);
+
+  function pedidoCon12PiezasConPromo(): ItemParaPropuesta[] {
+    return [
+      item({
+        id: 1,
+        cantidadPedida: 4,
+        cantidad: 4,
+        cantidadSurtida: 4,
+        estadoSurtido: EstadoSurtido.COMPLETO,
+        precioUnitario: MAYOREO_C0200,
+        precioUnitarioBase: new Prisma.Decimal(60),
+        precioUnitarioMayoreo: MAYOREO_C0200,
+        subtotal: MAYOREO_C0200.mul(4),
+      }),
+      item({
+        id: 2,
+        cantidadPedida: 5,
+        cantidad: 5,
+        cantidadSurtida: 2,
+        estadoSurtido: EstadoSurtido.PARCIAL,
+        precioUnitario: MAYOREO_C0300,
+        precioUnitarioBase: new Prisma.Decimal(65),
+        precioUnitarioMayoreo: MAYOREO_C0300,
+        subtotal: MAYOREO_C0300.mul(5),
+      }),
+      item({
+        id: 3,
+        cantidadPedida: 3,
+        cantidad: 3,
+        cantidadSurtida: 0,
+        estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
+        precioUnitario: MAYOREO_C0200,
+        precioUnitarioBase: new Prisma.Decimal(60),
+        precioUnitarioMayoreo: MAYOREO_C0200,
+        subtotal: MAYOREO_C0200.mul(3),
+      }),
+    ];
+  }
+
+  it('la suma de `subtotalOriginal` es lo que valía el pedido, línea sin existencia incluida', () => {
+    const items = pedidoCon12PiezasConPromo();
+    const valiaElPedido = items.reduce((acc, i) => acc + Number(i.subtotal), 0);
+
+    const { items: snapshot, total } = construirPropuestaDeBodega(items);
+    const antes = snapshot.reduce((acc, it) => acc + (it.subtotalOriginal ?? 0), 0);
+
+    expect(valiaElPedido).toBeCloseTo(707.75, 2);
+    expect(antes).toBeCloseTo(valiaElPedido, 2);
+    // Con el pedido en 6 piezas la promo se revoca: 4 × 60 + 2 × 65.
+    expect(total).toBeCloseTo(370, 2);
+  });
+
+  it('cada rama lo lleva: completo, parcial y no-disponible', () => {
+    const { items: snapshot } = construirPropuestaDeBodega(pedidoCon12PiezasConPromo());
+    const porTipo = Object.fromEntries(snapshot.map((it) => [it.tipo, it.subtotalOriginal]));
+
+    // El precio CONGELADO (con promo), no el re-evaluado de `subtotal`.
+    expect(porTipo['completo']).toBeCloseTo(228, 2);
+    expect(porTipo['parcial']).toBeCloseTo(308.75, 2);
+    expect(porTipo['no-disponible']).toBeCloseTo(171, 2);
+  });
+
+  it('el `subtotal` de la línea sin existencia sigue en 0: no se cobra', () => {
+    const { items: snapshot } = construirPropuestaDeBodega(pedidoCon12PiezasConPromo());
+    const sinExistencia = snapshot.find((it) => it.tipo === 'no-disponible')!;
+
+    // `subtotalOriginal` es otro dato, no reemplaza al `subtotal` que alimenta
+    // el total: si se confundieran, la propuesta volvería a cobrar lo que no hay.
+    expect(sinExistencia.subtotal).toBe(0);
+    expect(sinExistencia.subtotalOriginal).toBeGreaterThan(0);
+  });
+});

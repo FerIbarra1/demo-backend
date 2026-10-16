@@ -214,8 +214,11 @@ describe('F21 — el ajuste que SUBE (llegó mercancía nueva)', () => {
     expect(r.subeLaCantidad).toBe(true);
     expect(r.data.cantidad).toBe(7);
     expect(r.data.estadoSurtido).toBe(EstadoSurtido.PENDIENTE);
-    // Invariante del repo: PENDIENTE ⟹ cantidadSurtida === 0.
-    expect(r.data.cantidadSurtida).toBe(0);
+    // Oct 2026 (decisión 2): la línea se REBASA a lo que hay en la bolsa y bodega
+    // verifica SOLO las 4 de más. Antes se reiniciaba a 0 y re-verificaba las 7,
+    // cuando 3 ya estaban físicamente en la bolsa.
+    expect(r.data.cantidadSurtida).toBe(3);
+    expect(r.data.piezasBase).toBe(3);
     // No hay sobrante: todo lo que se lleva se queda.
     expect(r.piezasSobrantes).toBe(0);
   });
@@ -290,34 +293,24 @@ describe('F21 — el dinero no se contamina con el hallazgo conservado', () => {
 
 describe('F21 — piezasFueraDeLaBolsa: qué vuelve al anaquel', () => {
   it('una línea cancelada devuelve todo lo que había', () => {
-    expect(
-      piezasFueraDeLaBolsa({ cancelada: true, cantidad: 5, cantidadSurtida: 3 }),
-    ).toBe(3);
+    expect(piezasFueraDeLaBolsa({ cancelada: true, cantidad: 5, cantidadSurtida: 3 })).toBe(3);
   });
 
   it('una línea ACTIVA reducida devuelve solo el excedente', () => {
     // El caso que faltaba: bajar de 5 a 1 con 3 en la bolsa deja 2 sobrantes.
-    expect(
-      piezasFueraDeLaBolsa({ cancelada: false, cantidad: 1, cantidadSurtida: 3 }),
-    ).toBe(2);
+    expect(piezasFueraDeLaBolsa({ cancelada: false, cantidad: 1, cantidadSurtida: 3 })).toBe(2);
   });
 
   it('una línea activa sin excedente no devuelve nada', () => {
-    expect(
-      piezasFueraDeLaBolsa({ cancelada: false, cantidad: 3, cantidadSurtida: 3 }),
-    ).toBe(0);
+    expect(piezasFueraDeLaBolsa({ cancelada: false, cantidad: 3, cantidadSurtida: 3 })).toBe(0);
   });
 
   it('una línea que SUBIÓ no devuelve nada: lo que hay se queda', () => {
-    expect(
-      piezasFueraDeLaBolsa({ cancelada: false, cantidad: 7, cantidadSurtida: 3 }),
-    ).toBe(0);
+    expect(piezasFueraDeLaBolsa({ cancelada: false, cantidad: 7, cantidadSurtida: 3 })).toBe(0);
   });
 
   it('una línea sin nada apartado no devuelve nada', () => {
-    expect(
-      piezasFueraDeLaBolsa({ cancelada: true, cantidad: 5, cantidadSurtida: 0 }),
-    ).toBe(0);
+    expect(piezasFueraDeLaBolsa({ cancelada: true, cantidad: 5, cantidadSurtida: 0 })).toBe(0);
   });
 });
 
@@ -419,7 +412,11 @@ describe('oct 2026 — el ajuste cuenta lo que HAY en la bolsa, no lo que se enc
 
     expect(r.subeLaCantidad).toBe(true);
     expect(r.data.estadoSurtido).toBe(EstadoSurtido.PENDIENTE);
-    expect(r.data.cantidadSurtida).toBe(0);
+    // Se rebasa a lo que HAY en la bolsa (5 − 2 = 3), no al hallazgo original: las 2
+    // que salieron ya están en el anaquel y bodega las trae como nuevas (es lo que
+    // son). Bodega verifica 1 pieza, no 4.
+    expect(r.data.cantidadSurtida).toBe(3);
+    expect(r.data.piezasBase).toBe(3);
   });
 
   it('al re-verificar, el conteo de retiros se reinicia con el hallazgo', () => {
@@ -499,5 +496,77 @@ describe('oct 2026 — piezasEnLaBolsa: lo que puede volver al anaquel si se can
   it('sin retiros registrados es todo el hallazgo', () => {
     expect(piezasEnLaBolsa({ cantidadSurtida: 5 })).toBe(5);
     expect(piezasEnLaBolsa({ cantidadSurtida: 5, piezasRetiradas: null })).toBe(5);
+  });
+});
+
+// ------------------------------------------- delta-only (oct 2026, decisión 2)
+
+describe('oct 2026 (decisión 2) — subir deja a bodega verificar SOLO las piezas de más', () => {
+  it('rebasa la línea a lo que hay en la bolsa y fija el piso', () => {
+    // 3 en la bolsa, el cliente quiere 5: bodega verifica 2, no 5.
+    const r = calcularAjusteDeCantidad(
+      { cantidad: 3, cantidadSurtida: 3, estadoSurtido: EstadoSurtido.COMPLETO },
+      5,
+    );
+
+    expect(r.data).toMatchObject({
+      cantidad: 5,
+      estadoSurtido: EstadoSurtido.PENDIENTE,
+      cantidadSurtida: 3,
+      piezasRetiradas: 0,
+      piezasBase: 3,
+    });
+  });
+
+  it('una línea sin nada en la bolsa no tiene piso: es la de siempre', () => {
+    const r = calcularAjusteDeCantidad(
+      { cantidad: 4, cantidadSurtida: 0, estadoSurtido: EstadoSurtido.PENDIENTE },
+      6,
+    );
+
+    expect(r.data).toMatchObject({ cantidadSurtida: 0, piezasBase: 0 });
+  });
+
+  it('subir OTRA vez antes de que bodega marque conserva el mismo piso', () => {
+    // 3 en la bolsa → 5 (piso 3) → 7: sigue habiendo 3 en la bolsa.
+    const trasLaPrimera = {
+      cantidad: 5,
+      cantidadSurtida: 3,
+      piezasRetiradas: 0,
+      estadoSurtido: EstadoSurtido.PENDIENTE,
+    };
+
+    const r = calcularAjusteDeCantidad(trasLaPrimera, 7);
+
+    expect(r.data).toMatchObject({ cantidad: 7, cantidadSurtida: 3, piezasBase: 3 });
+  });
+
+  it('bajar una línea subida (aún sin surtir) la deja COMPLETO y sin piso', () => {
+    // 3 en la bolsa → 5 (PENDIENTE, piso 3) → 3: ya no espera nada de bodega, y un
+    // piso viejo le impediría marcarla más adelante.
+    const subida = {
+      cantidad: 5,
+      cantidadSurtida: 3,
+      piezasRetiradas: 0,
+      estadoSurtido: EstadoSurtido.PENDIENTE,
+    };
+
+    const r = calcularAjusteDeCantidad(subida, 3);
+
+    expect(r.subeLaCantidad).toBe(false);
+    expect(r.data).toMatchObject({
+      cantidad: 3,
+      cantidadSurtida: 3,
+      estadoSurtido: EstadoSurtido.COMPLETO,
+      piezasBase: 0,
+    });
+  });
+
+  it('bajar una línea normal también limpia el piso', () => {
+    const r = calcularAjusteDeCantidad(
+      { cantidad: 5, cantidadSurtida: 5, estadoSurtido: EstadoSurtido.COMPLETO },
+      2,
+    );
+    expect(r.data.piezasBase).toBe(0);
   });
 });

@@ -26,6 +26,7 @@ import { PrismaService } from '../../prisma/prisma.service';
  *     user-{userId}                       privado del usuario
  *     tienda-{tiendaId}                   si tiene tienda (no admin sin tienda)
  *     admin:all                           si rol === ADMIN
+ *     tesoreria                           si rol === TESORERIA o ADMIN
  * - El cliente puede hacer `socket.emit('joinPedido', pedidoId)` y el server lo
  *   une a `pedido-{id}` (validando que el usuario tenga derecho: dueño, asignado,
  *   o admin). Útil para actualizaciones de un pedido concreto (surtido, mensajes).
@@ -130,6 +131,11 @@ export class RealtimeGateway
         await client.join('admin:all');
       } else if (data.tiendaId) {
         await client.join(`tienda-${data.tiendaId}`);
+      }
+      // Oct 2026: Tesorería (y ADMIN, que supervisa) escucha los pagos por transferencia de
+      // todas las tiendas. Va APARTE del bloque de tienda: TESORERIA no tiene `tiendaId`.
+      if (data.rol === RolUsuario.TESORERIA || data.rol === RolUsuario.ADMIN) {
+        await client.join('tesoreria');
       }
       this.logger.debug(
         `WS ${client.id} conectado: user=${data.userId} rol=${data.rol} tienda=${data.tiendaId ?? '-'}`,

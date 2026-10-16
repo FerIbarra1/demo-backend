@@ -1,5 +1,5 @@
 import { EstadoPedido, ModoEntrega } from '@prisma/client';
-import { motivoNoAvisable, evaluarAviso } from './llegada-aviso.util';
+import { motivoNoAvisable, evaluarAviso, avisoDeLlegadaSirve } from './llegada-aviso.util';
 
 /**
  * La regla de "¿se puede registrar el aviso de llegada de este pedido?" vive en
@@ -154,5 +154,40 @@ describe('evaluarAviso — el operador marca la presencia del cliente', () => {
     expect(enCola.message).toMatch(/cola/i);
     expect(enBodega.message).toMatch(/equipo/i);
     expect(enCola.message).not.toBe(enBodega.message);
+  });
+
+  describe('avisoDeLlegadaSirve (lo que la app del cliente ofrece)', () => {
+    it('sirve mientras el pedido sigue antes de pagarse, hasta el área de entrega', () => {
+      for (const estado of [
+        EstadoPedido.SOLICITADO,
+        EstadoPedido.EN_REVISION,
+        EstadoPedido.ESPERANDO_APROBACION,
+        EstadoPedido.EN_ASESORIA,
+        EstadoPedido.REVISADO,
+      ]) {
+        expect(avisoDeLlegadaSirve({ ...base, estado })).toBe(true);
+      }
+    });
+
+    it('NO sirve cuando ya lo están atendiendo, ni del pago en adelante (solo dejaría constancia)', () => {
+      // El servidor ACEPTARÍA el aviso en estos estados, pero ya no cambia nada: el cliente pasó
+      // por mostrador. Mostrarle "Ya llegué" en un pedido por pagar era el síntoma.
+      for (const estado of [
+        EstadoPedido.EN_ATENCION,
+        EstadoPedido.PENDIENTE_PAGO,
+        EstadoPedido.PAGADO,
+        EstadoPedido.ENVIADO,
+        EstadoPedido.ENTREGADO,
+        EstadoPedido.CANCELADO,
+      ]) {
+        expect(avisoDeLlegadaSirve({ ...base, estado })).toBe(false);
+      }
+    });
+
+    it('un pedido a domicilio nunca lo ofrece', () => {
+      expect(
+        avisoDeLlegadaSirve({ estado: EstadoPedido.REVISADO, modoEntrega: ModoEntrega.DOMICILIO }),
+      ).toBe(false);
+    });
   });
 });

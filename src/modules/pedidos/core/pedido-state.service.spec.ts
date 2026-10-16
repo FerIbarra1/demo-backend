@@ -33,6 +33,8 @@ function crearServicio(
       }),
       updateMany,
     },
+    // Oct 2026: la cancelación consulta si el pedido tenía un pago por transferencia (aquí: ninguno).
+    pedidoPagoTransferencia: { findFirst: jest.fn().mockResolvedValue(null) },
     historialPedido: {
       create: jest.fn().mockResolvedValue({}),
       // F22: el correo "listo en tienda" es del PRIMER paso a REVISADO; la máquina
@@ -442,6 +444,44 @@ describe('F22 — esperaClienteDesdeAt mide cuánto lleva la bolsa esperando', (
     const d = await datosDeEspera(desde, hacia);
     expect(d.esperaClienteDesdeAt).toBeNull();
     expect(d.recordatorioRecogerAt).toBeNull();
+  });
+});
+
+/**
+ * Oct 2026: el LUGAR en la fila de caja (`colaCajaDesdeAt`). La fila se ordenaba por
+ * `fechaPedido`; ahora por cuándo mostrador mandó el pedido a pagar.
+ */
+describe('Oct 2026 — colaCajaDesdeAt es el lugar en la fila de caja', () => {
+  async function datosDeCaja(desde: EstadoPedido, hacia: EstadoPedido) {
+    const { svc, tx } = crearServicio(desde);
+    await svc.cambiarEstado(1, { nuevoEstado: hacia } as never, usuario, {
+      asignacion: 'limpiar',
+      encolarFirebird: hacia === EstadoPedido.PENDIENTE_PAGO,
+    } as never);
+    return tx.pedido.updateMany.mock.calls[0][0].data as Record<string, unknown>;
+  }
+
+  it.each([
+    [EstadoPedido.REVISADO, EstadoPedido.PENDIENTE_PAGO],
+    [EstadoPedido.EN_ATENCION, EstadoPedido.PENDIENTE_PAGO],
+    [EstadoPedido.EN_REVISION, EstadoPedido.PENDIENTE_PAGO], // domicilio: salta mostrador
+  ])('arranca al entrar a PENDIENTE_PAGO: %s → %s', async (desde, hacia) => {
+    const d = await datosDeCaja(desde, hacia);
+    expect(d.colaCajaDesdeAt).toBeInstanceOf(Date);
+  });
+
+  it('se limpia al salir de PENDIENTE_PAGO', async () => {
+    const d = await datosDeCaja(EstadoPedido.PENDIENTE_PAGO, EstadoPedido.CANCELADO);
+    expect(d.colaCajaDesdeAt).toBeNull();
+  });
+
+  it.each([
+    [EstadoPedido.EN_REVISION, EstadoPedido.REVISADO],
+    [EstadoPedido.REVISADO, EstadoPedido.EN_ATENCION],
+    [EstadoPedido.REVISADO, EstadoPedido.CANCELADO],
+  ])('no se toca en transiciones que no pasan por la fila: %s → %s', async (desde, hacia) => {
+    const d = await datosDeCaja(desde, hacia);
+    expect(d).not.toHaveProperty('colaCajaDesdeAt');
   });
 });
 

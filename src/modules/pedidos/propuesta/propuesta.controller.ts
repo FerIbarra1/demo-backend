@@ -1,7 +1,10 @@
 import { Controller, Post, Get, Body, Param, ParseIntPipe } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { PropuestaService } from './propuesta.service';
+import { AjusteService } from './ajuste.service';
 import { ResponderPropuestaDto } from './dto/propuesta.dto';
+import { VistaPreviaAjusteDto } from './dto/ajuste.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -24,7 +27,10 @@ import { RolUsuario } from '@prisma/client';
 @ApiBearerAuth()
 @Controller()
 export class PropuestaController {
-  constructor(private readonly propuestaService: PropuestaService) {}
+  constructor(
+    private readonly propuestaService: PropuestaService,
+    private readonly ajusteService: AjusteService,
+  ) {}
 
   // Oct 2026: `POST bodega/pedidos/:id/propuesta` se ELIMINÓ.
   //
@@ -54,6 +60,29 @@ export class PropuestaController {
     @CurrentUser() user: any,
   ) {
     return this.propuestaService.responderPropuesta(id, propuestaId, dto, user);
+  }
+
+  /**
+   * Oct 2026 (3c): el cliente abrió la propuesta. Mostrador lo lee como "el cliente
+   * ya la vio" / "ni siquiera la ha abierto". Solo CLIENTE (no ADMIN): el personal que
+   * mira la propuesta no es el cliente que la vio, y marcarla por él mentiría.
+   *
+   * Idempotente: repetirla no mueve la fecha. La pantalla del cliente la llama en
+   * silencio, sin toast, así que un fallo aquí nunca se le muestra.
+   */
+  @Post('cliente/pedidos/:id/propuesta/:propuestaId/vista')
+  @Roles(RolUsuario.CLIENTE)
+  @ApiOperation({
+    summary:
+      'Oct 2026: el cliente marca que abrió una propuesta pendiente. Idempotente; ' +
+      'la primera apertura fija la fecha.',
+  })
+  async marcarVista(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('propuestaId', ParseIntPipe) propuestaId: number,
+    @CurrentUser() user: any,
+  ) {
+    return this.propuestaService.marcarVista(id, propuestaId, user);
   }
 
   /**
@@ -91,6 +120,36 @@ export class PropuestaController {
   // de escape para el cliente que nunca responde, y el pedido quedaría atorado
   // sin ella. Lo que se quitó fue el ENDPOINT, que no tenía UI en ninguna consola
   // — nadie podía llamarlo. Si vuelve a hacer falta, se reexpone con su pantalla.
+
+  /**
+   * Oct 2026 (Fase 2): lo que el editor muestra mientras el asesor o el operador
+   * arman un ajuste — filas, total, "antes", piezas por surtir y el aviso de
+   * mayoreo condicional.
+   *
+   * Sale de `calcularAjuste`, la MISMA función que arma la propuesta al enviarla
+   * y que aplica el cobro, así que lo que se ve es lo que se envía. Antes el
+   * editor calculaba precios en el navegador con un espejo de la regla del
+   * backend, y las filas no sumaban el total de su propia pantalla.
+   *
+   * Solo lectura. Lleva su propio límite: el editor la llama (con debounce) cada
+   * vez que se toca una cantidad, y el límite global de 100/min por IP se
+   * comparte con toda la tienda.
+   */
+  @Post('pedidos/:id/ajuste/vista-previa')
+  @Roles(RolUsuario.VENTAS, RolUsuario.MOSTRADOR, RolUsuario.ADMIN)
+  @Throttle({ default: { limit: 180, ttl: 60_000 } })
+  @ApiOperation({
+    summary:
+      'Fase 2: calcula el resultado de un ajuste (filas, total, piezas por surtir) ' +
+      'a partir de la intención. No guarda nada.',
+  })
+  async vistaPreviaAjuste(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: VistaPreviaAjusteDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.ajusteService.vistaPrevia(id, dto.intenciones, user);
+  }
 
   @Get('pedidos/:id/propuestas')
   // Oct 2026: se agregó MOSTRADOR. El operador necesita VER la propuesta para

@@ -1,0 +1,21 @@
+-- Oct 2026 (propuestas, decisión 2): `items_pedido.piezas_base` — cuántas piezas de
+-- una línea YA estaban en la bolsa cuando se subió su cantidad, y que bodega no tiene
+-- que volver a verificar.
+--
+-- El problema que arregla: al subir de 3 a 5 con 3 en la bolsa, la línea se
+-- reiniciaba entera (`cantidad_surtida = 0`, PENDIENTE) y bodega re-verificaba las 5,
+-- cuando 3 ya estaban físicamente en la bolsa. El dueño pidió que verifique SOLO las
+-- 2 de más.
+--
+-- Se necesita una columna porque el piso no se puede derivar: en cuanto bodega marca
+-- la línea, `cantidad_surtida` pasa a ser el TOTAL (3 + lo que encontró) y se pierde
+-- cuántas ya estaban. Sin ese dato, un "No hay" por costumbre cancelaría una línea
+-- con piezas dentro de la bolsa, y ni el checklist de retiro ni la reposición
+-- sabrían de ellas.
+--
+-- ADITIVA y con DEFAULT 0: el valor es correcto para todas las filas existentes.
+-- Ninguna línea tiene hoy "piezas ya en la bolsa que bodega no deba verificar": el
+-- mecanismo se está cableando en este mismo cambio. No reinterpreta ni pierde un
+-- solo dato.
+ALTER TABLE "items_pedido"
+    ADD COLUMN "piezas_base" INTEGER NOT NULL DEFAULT 0;

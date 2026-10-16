@@ -127,6 +127,10 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
             bodegaTurnoDesdeAta: null,
           })),
           updateMany: jest.fn(async (args: any) => {
+            // Como Prisma de verdad: con `data: {}` no emite UPDATE y devuelve 0.
+            // Este mock devolvía siempre 1 y por eso escondió el falso "el pedido
+            // cambió" del camino de mismo estado sin asignación ni reloj.
+            if (Object.keys(args.data).length === 0) return { count: 0 };
             // En el camino de "mismo estado" NO se reescribe `estado`: si esta
             // lista crece, es que se escribió un estado que no cambió.
             if (args.data.estado !== undefined) {
@@ -135,6 +139,8 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
             }
             return { count: 1 };
           }),
+          // Con nada que escribir, la máquina verifica el guard de estado con un conteo.
+          count: jest.fn(async () => 1),
         },
         historialPedido: {
           create: jest.fn(async (args: any) => {
@@ -262,6 +268,102 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
       } as never);
 
       expect(escrituras[0]).toHaveProperty('llamadoAt', null);
+    });
+
+    it('NO limpia `llamadoAt` si el pedido sigue en EN_ATENCION (resolver con el cliente enfrente)', async () => {
+      // Oct 2026. El operador llamó al cliente y, ya en el recuento, resuelve una
+      // propuesta o ajusta el pedido SIN sacarlo de EN_ATENCION. No hubo transición:
+      // la llamada sigue en pie. Antes la regla de arriba ("salir de EN_ATENCION
+      // limpia la llamada") también corría en este camino, y el cliente perdía su
+      // "te toca" de la TV en pleno recuento.
+      const escrituras: Array<Record<string, unknown>> = [];
+      const estado = EstadoPedido.EN_ATENCION;
+
+      const tx = {
+        pedido: {
+          findUnique: jest.fn(async () => ({
+            id: 1,
+            tiendaId: 5,
+            usuarioId: 7,
+            estado,
+            modoEntrega: ModoEntrega.KIOSKO,
+            asignadoAId: null,
+            asignadoAt: null,
+            tiempoAtencionBodegaMs: 0,
+            bodegaTurnoDesdeAt: null,
+          })),
+          updateMany: jest.fn(async (args: any) => {
+            escrituras.push(args.data);
+            return { count: Object.keys(args.data).length === 0 ? 0 : 1 };
+          }),
+          count: jest.fn(async () => 1),
+        },
+        historialPedido: {
+          create: jest.fn().mockResolvedValue({}),
+          count: jest.fn().mockResolvedValue(0),
+        },
+        pedidoPendienteEnvio: { findFirst: jest.fn(), create: jest.fn() },
+      };
+
+      const svc = new PedidoStateService(
+        {
+          $transaction: jest.fn(async (fn: any) => fn(tx)),
+          pedido: { findUnique: jest.fn(async () => ({ estado })) },
+        } as never,
+        { enviar: jest.fn().mockResolvedValue(undefined) } as never,
+        { emitToTienda: jest.fn(), emitToPedido: jest.fn() } as never,
+        { cargarYValidar: jest.fn().mockResolvedValue({ id: 1, estado }) } as never,
+        {} as never,
+      );
+
+      await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.EN_ATENCION } as never, operador, {
+        permitirMismoEstado: true,
+      } as never);
+
+      // No se escribe NADA: ni la llamada, ni el estado. (Con `llamadoAt` limpiado
+      // habría un UPDATE con esas tres columnas en null.)
+      expect(escrituras).toEqual([]);
+      // Pero el guard de estado (TOCTOU) se sigue comprobando, con un conteo.
+      expect(tx.pedido.count).toHaveBeenCalledWith({ where: { id: 1, estado } });
+    });
+
+    it('si el pedido cambió mientras tanto, el guard sigue lanzando también sin nada que escribir', async () => {
+      // Sin datos que escribir el guard es un conteo: tiene que seguir abortando.
+      const tx = {
+        pedido: {
+          findUnique: jest.fn(async () => ({
+            id: 1,
+            tiendaId: 5,
+            usuarioId: 7,
+            estado: EstadoPedido.EN_ATENCION,
+            modoEntrega: ModoEntrega.KIOSKO,
+            asignadoAId: null,
+            asignadoAt: null,
+            tiempoAtencionBodegaMs: 0,
+            bodegaTurnoDesdeAt: null,
+          })),
+          updateMany: jest.fn(),
+          count: jest.fn(async () => 0),
+        },
+        historialPedido: { create: jest.fn(), count: jest.fn().mockResolvedValue(0) },
+        pedidoPendienteEnvio: { findFirst: jest.fn(), create: jest.fn() },
+      };
+      const svc = new PedidoStateService(
+        {
+          $transaction: jest.fn(async (fn: any) => fn(tx)),
+          pedido: { findUnique: jest.fn(async () => ({ estado: EstadoPedido.EN_ATENCION })) },
+        } as never,
+        { enviar: jest.fn() } as never,
+        { emitToTienda: jest.fn(), emitToPedido: jest.fn() } as never,
+        { cargarYValidar: jest.fn().mockResolvedValue({ id: 1 }) } as never,
+        {} as never,
+      );
+
+      await expect(
+        svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.EN_ATENCION } as never, operador, {
+          permitirMismoEstado: true,
+        } as never),
+      ).rejects.toThrow(/cambió mientras se procesaba/);
     });
   });
 });

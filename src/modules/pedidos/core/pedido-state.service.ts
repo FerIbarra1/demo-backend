@@ -13,6 +13,13 @@ import { PedidoAccessService } from './pedido-access.service';
 import { asignadoANombre } from './pedido-mapper';
 import { pausarReloj, reanudarReloj } from './atencion.util';
 import { ESTADOS_BOLSA_APARTADA } from './presencia.util';
+import { OFFSET_ID_PEDIDO_NUBE } from './id-pedido-externo.util';
+import {
+  CambioPago,
+  emitirCambioDePago,
+  emitirTransferenciaAlPasarAPago,
+  resolverPagoAlCancelarse,
+} from '../../pagos/transferencia/hooks';
 import { CambiarEstadoDto } from '../admin/dto/cambiar-estado.dto';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, TipoNotificacion, Prisma, RolUsuario } from '@prisma/client';
@@ -309,6 +316,7 @@ export class PedidoStateService {
       sinCambioDeEstado?: boolean;
       bodegueroAsignadoId?: number | null;
       numeroPedido?: string;
+      pago?: CambioPago | null;
     },
   ): void {
     this.dispararEfectos(pedidoId, efectos);
@@ -335,6 +343,8 @@ export class PedidoStateService {
        */
       bodegueroAsignadoId?: number | null;
       numeroPedido?: string;
+      /** Oct 2026: el pago por transferencia que la cancelación movió (si había uno). */
+      pago?: CambioPago | null;
     },
   ): void {
     // Sin cambio real de estado no se emite `pedido.estado`: los clientes
@@ -368,6 +378,10 @@ export class PedidoStateService {
         numeroPedido: e.numeroPedido ?? null,
       });
     }
+
+    // Oct 2026: la cancelación movió un pago por transferencia (cancelado sin dinero, reembolso
+    // pendiente o comprobante por aclarar): las pantallas de Tesorería y de la tienda lo ven.
+    if (e.pago) emitirCambioDePago(this.realtime, e.pago);
 
     // F13: los monitores (bodega/cajeros) no reaccionan a `pedido.estado`;
     // necesitan este evento para recomputar slots y colas.
@@ -474,48 +488,75 @@ export class PedidoStateService {
           : false;
 
       const ahora = new Date();
-      const result = await tx.pedido.updateMany({
-        // El guard de estado se conserva incluso en el camino de "mismo
-        // estado": si el pedido cambió mientras se procesaba, hay que abortar
-        // igual (TOCTOU). Lo que se omite en ese camino es ESCRIBIR el estado,
-        // no la comprobación.
-        where: { id: pedidoId, estado: estadoAnterior },
-        data: {
-          // En el camino de "mismo estado" no se reescribe `estado`: sería un
-          // no-op que ensucia el `updatedAt` y hace creer que hubo un cambio.
-          ...(saltarTransicion ? {} : { estado: estadoNuevo }),
-          ...this.cambiosDeAsignacion(opts.asignacion, usuario, ahora),
-          ...this.cambiosDeReloj(opts.reloj, pedido, ahora),
-          // F17: `llamadoAt` (auditoría de la llamada) solo tiene sentido
-          // mientras el folio está anunciado en la TV, es decir en
-          // REVISADO/EN_ATENCION. Al salir (a pago, a bodega o a cancelado) el
-          // panel "Atendiendo" debe vaciarse solo — si no, un folio ya cobrado
-          // seguiría anunciado como "te toca". Se limpia aquí y no en cada
-          // caller para que ninguna transición futura pueda olvidarlo.
-          //
-          // Oct 2026 — el caso `EN_ATENCION → REVISADO`: el operador resuelve la
-          // propuesta del cliente que tiene enfrente y el pedido vuelve a la
-          // cola. El destino SÍ es REVISADO, así que la regla de arriba no
-          // aplicaba y el `llamadoAt` sobrevivía: el pedido volvía a la lista de
-          // espera pero la TV lo seguía mostrando como "atendido". Salir de
-          // EN_ATENCION significa que la llamada terminó, sin importar a dónde
-          // se vaya.
-          //
-          // F22: con `llamadoAt` se limpian también QUIÉN llamó y a QUÉ mostrador —
-          // son la misma señal ("este folio está anunciado") y no pueden
-          // sobrevivir separadas.
-          ...(estadoNuevo !== EstadoPedido.REVISADO || estadoAnterior === EstadoPedido.EN_ATENCION
-            ? { llamadoAt: null, llamadoPorId: null, llamadoMostradorId: null }
-            : {}),
-          // F22: la antigüedad de la ESPERA. Arranca cuando la bolsa queda apartada
-          // (entra a REVISADO / ESPERANDO_APROBACION / EN_ATENCION desde fuera de
-          // ese grupo) y se limpia al salir. Moverse DENTRO del grupo (llamar,
-          // devolver a la cola, resolver una propuesta) no la reinicia: lo que
-          // importa es cuánto lleva la bolsa esperando, no la última acción.
-          ...(saltarTransicion ? {} : this.cambiosDeEspera(estadoAnterior, estadoNuevo, ahora)),
-        },
-      });
-      if (result.count !== 1) {
+      const datos: Prisma.PedidoUpdateManyMutationInput & Prisma.PedidoUncheckedUpdateManyInput = {
+        // En el camino de "mismo estado" no se reescribe `estado`: sería un
+        // no-op que ensucia el `updatedAt` y hace creer que hubo un cambio.
+        ...(saltarTransicion ? {} : { estado: estadoNuevo }),
+        ...this.cambiosDeAsignacion(opts.asignacion, usuario, ahora),
+        ...this.cambiosDeReloj(opts.reloj, pedido, ahora),
+        // F17: `llamadoAt` (auditoría de la llamada) solo tiene sentido
+        // mientras el folio está anunciado en la TV, es decir en
+        // REVISADO/EN_ATENCION. Al salir (a pago, a bodega o a cancelado) el
+        // panel "Atendiendo" debe vaciarse solo — si no, un folio ya cobrado
+        // seguiría anunciado como "te toca". Se limpia aquí y no en cada
+        // caller para que ninguna transición futura pueda olvidarlo.
+        //
+        // Oct 2026 — el caso `EN_ATENCION → REVISADO`: el operador resuelve la
+        // propuesta del cliente que tiene enfrente y el pedido vuelve a la
+        // cola. El destino SÍ es REVISADO, así que la regla de arriba no
+        // aplicaba y el `llamadoAt` sobrevivía: el pedido volvía a la lista de
+        // espera pero la TV lo seguía mostrando como "atendido". Salir de
+        // EN_ATENCION significa que la llamada terminó, sin importar a dónde
+        // se vaya.
+        //
+        // F22: con `llamadoAt` se limpian también QUIÉN llamó y a QUÉ mostrador —
+        // son la misma señal ("este folio está anunciado") y no pueden
+        // sobrevivir separadas.
+        //
+        // Oct 2026 — y el caso contrario, `EN_ATENCION → EN_ATENCION`
+        // (`permitirMismoEstado`): el operador resuelve una propuesta o un ajuste
+        // CON el cliente enfrente y la llamada sigue en pie. No hubo transición,
+        // así que no hay nada que "terminar": limpiar aquí le quitaba al cliente
+        // el "te toca" de la TV en mitad del recuento.
+        ...(!saltarTransicion &&
+        (estadoNuevo !== EstadoPedido.REVISADO || estadoAnterior === EstadoPedido.EN_ATENCION)
+          ? { llamadoAt: null, llamadoPorId: null, llamadoMostradorId: null }
+          : {}),
+        // F22: la antigüedad de la ESPERA. Arranca cuando la bolsa queda apartada
+        // (entra a REVISADO / ESPERANDO_APROBACION / EN_ATENCION desde fuera de
+        // ese grupo) y se limpia al salir. Moverse DENTRO del grupo (llamar,
+        // devolver a la cola, resolver una propuesta) no la reinicia: lo que
+        // importa es cuánto lleva la bolsa esperando, no la última acción.
+        ...(saltarTransicion ? {} : this.cambiosDeEspera(estadoAnterior, estadoNuevo, ahora)),
+        // Oct 2026: el LUGAR en la fila de caja. Arranca al entrar a PENDIENTE_PAGO y se limpia al
+        // salir; "devolver a la cola" (caja) no pasa por aquí, así que conserva el lugar.
+        ...(saltarTransicion
+          ? {}
+          : estadoNuevo === EstadoPedido.PENDIENTE_PAGO
+            ? { colaCajaDesdeAt: ahora }
+            : estadoAnterior === EstadoPedido.PENDIENTE_PAGO
+              ? // Y la marca de "regresado hasta que se valide" (solo significa algo en la fila).
+                { colaCajaDesdeAt: null, esperaValidacionDesdeAt: null }
+              : {}),
+      };
+
+      // El guard de estado se conserva incluso en el camino de "mismo estado": si el
+      // pedido cambió mientras se procesaba, hay que abortar igual (TOCTOU). Lo que
+      // se omite en ese camino es ESCRIBIR el estado, no la comprobación.
+      const where = { id: pedidoId, estado: estadoAnterior };
+      // Oct 2026: en el camino de "mismo estado" `datos` puede quedar VACÍO (sin
+      // asignación, sin reloj, sin llamada que limpiar). Prisma no emite un UPDATE
+      // con `data: {}` y `updateMany` devuelve `count: 0`, así que el guard de abajo
+      // lanzaba un falso "el pedido cambió" justo cuando NADA cambió. Nadie lo había
+      // visto porque el único caller (`aprobarPropuestaBodega`) siempre pasa
+      // `asignacion` y `reloj`, o sea que `datos` nunca estaba vacío; lo destapó el
+      // ajuste de mostrador que se resuelve en el lugar, que no toca ninguno.
+      // Sin nada que escribir, la comprobación es un conteo.
+      const coincide =
+        Object.keys(datos).length === 0
+          ? (await tx.pedido.count({ where })) === 1
+          : (await tx.pedido.updateMany({ where, data: datos })).count === 1;
+      if (!coincide) {
         throw new ConflictException(
           'El pedido cambió mientras se procesaba. Actualiza la pantalla e inténtalo de nuevo.',
         );
@@ -534,6 +575,31 @@ export class PedidoStateService {
       if (opts.encolarFirebird) {
         await this.encolarEnvioAFirebird(tx, pedidoId);
       }
+
+      // Oct 2026 (pagos por transferencia): un pedido que se cancela no puede dejar un pago
+      // colgado. Va DENTRO de la transacción: si fallara, quedaría un pedido cancelado con una
+      // transferencia (y quizá dinero) sin que nadie sepa qué hacer. Cancelan el cliente, mostrador,
+      // las propuestas y el agente (`SWCANCEL`), y todos pasan por aquí.
+      const pagoAfectado =
+        !saltarTransicion && estadoNuevo === EstadoPedido.CANCELADO
+          ? await resolverPagoAlCancelarse(tx, pedidoId, {
+              id: usuario.userId || null,
+              rol: usuario.rol,
+              nombre: usuario.nombre,
+            })
+          : null;
+
+      // Oct 2026: el cliente que eligió transferencia al hacer su pedido recibe sus datos al
+      // llegar a PENDIENTE_PAGO (ver `emitirTransferenciaAlPasarAPago`). También DENTRO de la
+      // transacción: o hay pedido en pago CON su transferencia, o no hay cambio.
+      const pagoEmitido =
+        !saltarTransicion && estadoNuevo === EstadoPedido.PENDIENTE_PAGO
+          ? await emitirTransferenciaAlPasarAPago(tx, pedidoId, {
+              id: usuario.userId || null,
+              rol: usuario.rol,
+              nombre: usuario.nombre,
+            })
+          : null;
 
       const pedidoActualizado = await tx.pedido.findUnique({
         where: { id: pedidoId },
@@ -598,6 +664,7 @@ export class PedidoStateService {
           // Lectura PREVIA al update: la asignación ya se limpió en la BD.
           bodegueroAsignadoId: pedido.asignadoAId,
           numeroPedido: pedido.numeroPedido,
+          pago: pagoAfectado ?? pagoEmitido,
         },
       };
     }
@@ -708,9 +775,10 @@ export class PedidoStateService {
       data: {
         pedidoId,
         estado: 'PENDIENTE',
-        // Offset 1B: los IDs Firebird típicos son <10M, así que 1B+id nube
-        // evita colisión con IDs locales reales.
-        externalIdPEDIDOS: 1_000_000_000 + pedidoId,
+        // Offset 1B (`OFFSET_ID_PEDIDO_NUBE`): los IDs Firebird típicos son <10M, así
+        // que 1B+id nube evita colisión con IDs locales reales. El handler de pagos
+        // reconoce este rango (`id-pedido-externo.util.ts`).
+        externalIdPEDIDOS: OFFSET_ID_PEDIDO_NUBE + pedidoId,
       },
     });
   }

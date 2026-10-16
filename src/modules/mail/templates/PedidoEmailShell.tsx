@@ -3,7 +3,6 @@ import { Heading, Hr, Section, Text } from '@react-email/components';
 import { EmailLayout } from './Layout';
 import { ItemList, ItemTotal } from './ItemList';
 import { PedidoEmailData, folioVisible } from '../mail.templates';
-import { estadoPedidoLabel } from '../estado-labels';
 
 export interface PedidoEmailShellProps {
   preview: string;
@@ -15,6 +14,11 @@ export interface PedidoEmailShellProps {
   ctaLabel?: string;
   logoUrl: string;
   frontendUrl: string;
+  /**
+   * Oculta la lista de productos. Los correos de pago por transferencia son sobre DINERO (monto,
+   * cuenta, referencia): la lista de productos los alarga y repite el total.
+   */
+  ocultarProductos?: boolean;
 }
 
 // Paleta sincronizada con el Layout y globals.css del front.
@@ -75,6 +79,7 @@ export const PedidoEmailShell = ({
   ctaLabel = 'Ver mi pedido',
   logoUrl,
   frontendUrl,
+  ocultarProductos = false,
 }: PedidoEmailShellProps) => (
   <EmailLayout preview={preview} logoUrl={logoUrl} frontendUrl={frontendUrl}>
     <Heading
@@ -111,14 +116,14 @@ export const PedidoEmailShell = ({
       }}
     >
       <Text style={sectionTitle}>Resumen del pedido</Text>
+      {/* Un solo lugar para el folio (el título y el saludo no lo repiten). Sin fila de "Estado":
+          el título de cada correo ya dice qué pasó, y repetirlo aquí hacía que el mismo dato
+          saliera dos o tres veces. */}
       <Text style={labelValue}>
-        <strong>Número:</strong> {folioVisible(pedido)}
+        <strong>Folio:</strong> {folioVisible(pedido)}
       </Text>
       <Text style={labelValue}>
-        <strong>Estado:</strong> {estadoPedidoLabel(pedido.estado)}
-      </Text>
-      <Text style={labelValue}>
-        <strong>Fecha:</strong> {fmtDate(pedido.fechaPedido)}
+        <strong>Fecha del pedido:</strong> {fmtDate(pedido.fechaPedido)}
       </Text>
       {pedido.tiendaNombre ? (
         <Text style={labelValue}>
@@ -132,7 +137,7 @@ export const PedidoEmailShell = ({
       ) : null}
     </Section>
 
-    {pedido.items && pedido.items.length > 0 ? (
+    {!ocultarProductos && pedido.items && pedido.items.length > 0 ? (
       <Section style={{ margin: '0 0 8px 0' }}>
         <Text style={sectionTitle}>Productos</Text>
         <ItemList items={pedido.items} />

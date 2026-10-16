@@ -1,11 +1,13 @@
 # Tienda de Camisetas - Backend
 
-Backend completo para tienda de camisetas con gestión de pedidos, stock multi-tienda y flujo de trabajo por roles.
+Backend de la tienda de camisetas: catálogo, pedidos con flujo bodega → mostrador → pago, kiosko de tablet y sincronización con el ERP local (Visual FoxPro + Firebird).
+
+> **La referencia viva es [`CLAUDE.md`](./CLAUDE.md)** (estados, invariantes, reglas de la máquina de estados). Este README solo da lo mínimo para levantar el proyecto: el flujo y los endpoints cambiaban tan seguido que lo que se copiaba aquí quedaba obsoleto. Para los endpoints, la fuente es Swagger.
 
 ## Tecnologías
 
 - **NestJS 11** - Framework Node.js
-- **Prisma 7** - ORM para base de datos
+- **Prisma 6** - ORM para base de datos
 - **PostgreSQL 18** - Base de datos
 - **Redis 7** - Cache y sesiones
 - **JWT** - Autenticación
@@ -102,65 +104,47 @@ El servidor estará disponible en:
 | Cajero | cajero@puntotextil.com | 123456 |
 | Mostrador | mostrador@puntotextil.com | 123456 |
 | Ventas | ventas@puntotextil.com | 123456 |
+| Tesorería | tesoreria@puntotextil.com | 123456 |
 | Cliente | cliente@puntotextil.com | 123456 |
 
-> Datos creados por `pnpm prisma:seed`, que es **destructivo** y sólo corre contra
-> una base de datos local.
+> Datos creados por `pnpm prisma:seed`. Actualiza el catálogo y los usuarios por su clave
+> natural (no toca las imágenes de S3 ni el logo de los correos), pero **sí borra los datos
+> transaccionales**: pedidos, kioskos y su rastro. Solo córrelo contra una base de datos local.
 
 ## Flujo de Pedidos
 
 ```
-┌─────────────┐    ┌─────────────┐    ┌──────────────┐    ┌───────────┐
-│  PENDIENTE  │───▶│ EN_BODEGA   │───▶│LISTO_ENTREGA │───▶│ ENTREGADO │
-└─────────────┘    └─────────────┘    └──────────────┘    └───────────┘
-      │
-      │ (pago en tienda) ▲
-      └──────────────────┘
+SOLICITADO → EN_REVISION → REVISADO → EN_ATENCION → PENDIENTE_PAGO → PAGADO → ENTREGADO
+ (cliente)    (bodega)     (plancha)   (mostrador)       (caja)       (VFP)
 ```
 
-### Estados y Roles
+El pedido pasa por **mostrador antes de pagar** y **entra al ERP (Firebird) al pasar a
+`PENDIENTE_PAGO`**. El cobro se registra en VFP; el agente de sincronización lo sube y
+solo entonces el pedido pasa a `PAGADO`. Domicilio: `PAGADO → ENVIADO → ENTREGADO`.
 
-| Estado | Rol Responsable | Acción |
-|--------|-----------------|--------|
-| **PENDIENTE** | Cliente | Crea pedido |
-| | Bodega | Recibe y verifica stock |
-| **EN_BODEGA** | Bodega | Prepara y empaqueta |
-| | Cajero | Verifica pago (transferencia) |
-| **LISTO_PARA_ENTREGA** | Mostrador | Entrega a cliente |
-| **ENTREGADO** | - | Pedido completado |
+El detalle completo —las 3 invariantes, los destinos tras el surtido, el ciclo de ajuste y
+las reglas para tocar la máquina de estados— está en [`CLAUDE.md`](./CLAUDE.md). La
+sincronización con Firebird está en [`SINCRONIZACION-EXPLICACION.md`](./SINCRONIZACION-EXPLICACION.md).
 
-## Endpoints Principales
+### Roles
 
-### Autenticación
-- `POST /api/auth/register` - Registrar usuario
-- `POST /api/auth/login` - Iniciar sesión
-- `GET /api/auth/me` - Perfil del usuario
+| Rol | Qué hace |
+|-----|----------|
+| `CLIENTE` | Crea y sigue sus pedidos; responde propuestas; avisa su llegada |
+| `BODEGA` | Surte los pedidos (cierra el surtido en un solo paso) |
+| `VENTAS` | Asesor: atiende los pedidos escalados y arma contrapropuestas |
+| `MOSTRADOR` | Revisa con el cliente, ajusta, manda a pagar, cancela y entrega |
+| `CAJERO` | Ventanilla **de una tienda**: atiende la cola de `PENDIENTE_PAGO`. **No cobra ni aprueba pagos**: el cobro es de VFP |
+| `TESORERIA` | Multi-tienda (sin tienda asignada): verifica que las transferencias de todas las tiendas llegaron al banco. **No cobra ni marca pagado**: el cobro sigue siendo de VFP. Ver [`PLAN-PAGOS-TRANSFERENCIA.md`](./PLAN-PAGOS-TRANSFERENCIA.md) |
+| `BODEGA_MONITOR` · `CAJERO_MONITOR` · `MOSTRADOR_MONITOR` | TV de pared, solo lectura |
+| `ADMIN` | Gestión completa |
 
-### Catálogo (Público)
-- `GET /api/catalogo?tiendaId=1` - Ver productos
-- `GET /api/catalogo/tienda/1/producto/1` - Detalle producto
-- `POST /api/catalogo/verificar-stock` - Verificar disponibilidad
+## Endpoints
 
-### Pedidos - Cliente
-- `POST /api/pedidos/cliente` - Crear pedido
-- `GET /api/pedidos/cliente/mis-pedidos` - Mis pedidos
-
-### Pedidos - Bodega
-- `GET /api/pedidos/bodega/pendientes` - Ver pendientes
-- `POST /api/pedidos/bodega/:id/en-bodega` - Marcar recibido
-- `POST /api/pedidos/bodega/:id/listo` - Marcar listo
-
-### Pedidos - Cajero
-- `GET /api/pedidos/cajero/pendientes-pago` - Ver pendientes
-- `POST /api/pedidos/cajero/:id/verificar-pago` - Verificar transferencia
-
-### Pedidos - Mostrador
-- `GET /api/pedidos/mostrador/listos` - Ver listos
-- `POST /api/pedidos/mostrador/:id/entregar` - Entregar pedido
-
-### Admin
-- `GET /api/pedidos/admin` - Todos los pedidos
-- `GET /api/pedidos/admin/:id/historial` - Historial de cambios
+La lista completa y actualizada está en Swagger: **http://localhost:3000/api/docs**.
+Prefijos principales: `auth/`, `catalogo/`, `cliente/pedidos/`, `bodega/pedidos/`,
+`ventas/pedidos/`, `pedidos/mostrador/`, `cajero/pedidos/`, `pedidos/consulta/`,
+`admin/*`, `kiosko/`, `sync/agent/` (el agente de Firebird, con `X-Agent-Key`).
 
 ## Comandos Útiles
 
@@ -189,15 +173,17 @@ npm run test              # Ejecutar tests
 - **Producto** - Productos base
 - **Corrida** - Definiciones de tallas
 - **Color** - Colores disponibles
-- **PrecioCO** - Precios específicos por talla/color (con SKU y stock)
+- **PrecioCO** - Variante (talla/color/corrida) de un producto en una tienda, con su precio. El backend **no maneja inventario**: no hay modelo de stock
 - **Pedido** - Pedidos de clientes
 - **ItemPedido** - Líneas de pedido
 - **HistorialPedido** - Auditoría de cambios de estado
+- **PedidoPendienteEnvio** - Cola de pedidos hacia Firebird (la lee el agente)
+- **PedidoPropuesta** / **PedidoMensaje** - Propuestas de ajuste y chat con el asesor
 
 ## Seguridad
 
 - JWT con refresh tokens
-- Guards por rol (CLIENTE, BODEGA, CAJERO, MOSTRADOR, ADMIN)
+- Guards por rol (ver la tabla de roles); ADMIN pasa siempre. Un endpoint sin `@Roles` queda abierto a cualquier rol autenticado: siempre declarar `@Roles` o `@Public`
 - Validación de tienda en headers para clientes
 - Protección contra inyección SQL (Prisma)
 - Helmet para headers de seguridad

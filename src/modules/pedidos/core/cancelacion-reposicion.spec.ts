@@ -47,16 +47,36 @@ function item(over: Partial<Record<string, unknown>> = {}) {
 }
 
 /** ReposicionService con Prisma mockeado. */
-function crearServicio(items: any[], opts: { yaExiste?: boolean } = {}) {
+function crearServicio(
+  items: any[],
+  opts: { yaExiste?: boolean; existente?: Record<string, unknown> } = {},
+) {
   const creada: any[] = [];
   const actualizada: any[] = [];
 
   const tx = {
     itemPedido: {
-      findMany: jest.fn(async () => items),
+      // Honra `id: { in: [...] }` (lo usa `registrarQuitadasEnMostrador`); sin ese
+      // filtro devuelve todo, como antes.
+      findMany: jest.fn(async ({ where }: any = {}) =>
+        where?.id?.in ? items.filter((i) => where.id.in.includes(i.id)) : items,
+      ),
     },
     pedidoReposicion: {
-      findUnique: jest.fn(async () => (opts.yaExiste ? { id: 9, items: [] } : null)),
+      findUnique: jest.fn(async () =>
+        opts.existente
+          ? opts.existente
+          : opts.yaExiste
+            ? // Una cancelación ya fusionada en la fila: lleva la marca.
+              {
+                id: 9,
+                pedidoId: 1,
+                estado: EstadoReposicion.PENDIENTE,
+                items: [{ id: 1, cantidad: 10, deCancelacion: true }],
+                motivo: null,
+              }
+            : null,
+      ),
       create: jest.fn(async ({ data }: any) => {
         creada.push(data);
         return { id: 1, ...data };
@@ -107,13 +127,15 @@ describe('F20 — cancelar un pedido genera la lista de reposición', () => {
     expect(llamadas[0][0].where).toEqual({ pedidoId: 1, cantidadSurtida: { gt: 0 } });
   });
 
-  it('es idempotente: no duplica la lista si ya existe', async () => {
-    // Un segundo rechazo no debería crear una segunda entrada.
-    const { svc, tx, creada } = crearServicio([item()], { yaExiste: true });
+  it('es idempotente: una segunda llamada no suma la bolsa otra vez', async () => {
+    // Un segundo rechazo no debería duplicar la lista. La marca `deCancelacion` de
+    // la fila dice que la cancelación ya se fusionó.
+    const { svc, tx, creada, actualizada } = crearServicio([item()], { yaExiste: true });
 
     await svc.crearDesdePedido(tx as never, 1);
 
     expect(creada).toHaveLength(0);
+    expect(actualizada).toHaveLength(0);
   });
 
   it('un pedido sin items crea la fila ya resuelta', async () => {
@@ -270,13 +292,249 @@ describe('oct 2026 — lo que un ajuste ya sacó NO vuelve a salir en reposició
   });
 });
 
-describe('oct 2026 — un ajuste no genera reposición', () => {
+describe('oct 2026 — un ajuste de ventas no genera reposición', () => {
   it('ReposicionService ya no expone `crearDesdeAjuste`', () => {
-    // La reposición es solo de pedidos cancelados o rechazados. Un ajuste deja
-    // el pedido vivo y las piezas las regresa el bodeguero con el checklist de
-    // retiro. Si alguien recrea el método para "avisarle a bodega", la lista
-    // vuelve a pedirle acomodar lo que ya acomodó.
+    // El ajuste de VENTAS deja el pedido vivo y las piezas las regresa el
+    // bodeguero con el checklist de retiro. Si alguien recrea el método para
+    // "avisarle a bodega", la lista vuelve a pedirle acomodar lo que ya acomodó.
+    //
+    // El ajuste de MOSTRADOR sí repone lo que quita, pero por otro método con
+    // otro nombre (`registrarQuitadasEnMostrador`): ahí las saca el operador y
+    // nadie las regresa al anaquel. Ver el describe de abajo.
     expect((ReposicionService.prototype as any).crearDesdeAjuste).toBeUndefined();
+  });
+});
+
+describe('oct 2026 — lo que el operador de mostrador QUITA pasa a reposición', () => {
+  const piezas = (data: any) =>
+    (data.items as Array<{ id: number; cantidad: number }>).map((i) => [i.id, i.cantidad]);
+
+  it('crea la fila PENDIENTE con el snapshot de la línea y SIN motivo', async () => {
+    // `motivo` es el texto del correo de cancelación: un ajuste no cancela nada, y
+    // si la fila nace con un motivo inventado, una cancelación por otra vía (el ERP
+    // no crea fila) mandaría ese texto al cliente.
+    const { svc, tx, creada } = crearServicio([item({ id: 1 }), item({ id: 2 })]);
+
+    await svc.registrarQuitadasEnMostrador(tx as never, 1, [{ itemId: 1, cantidad: 3 }]);
+
+    expect(creada).toHaveLength(1);
+    expect(creada[0].estado).toBe(EstadoReposicion.PENDIENTE);
+    expect(creada[0].motivo).toBeNull();
+    expect(piezas(creada[0])).toEqual([[1, 3]]);
+    expect(creada[0].items[0]).toMatchObject({ productoNombre: 'X', tallaNombre: 'M' });
+    // No es una cancelación: la marca solo la pone `crearDesdePedido`.
+    expect(creada[0].items[0].deCancelacion).toBeUndefined();
+  });
+
+  it('suma varias piezas de la misma línea en UNA entrada', async () => {
+    const { svc, tx, creada } = crearServicio([item({ id: 1 })]);
+
+    await svc.registrarQuitadasEnMostrador(tx as never, 1, [
+      { itemId: 1, cantidad: 2 },
+      { itemId: 1, cantidad: 1 },
+    ]);
+
+    expect(piezas(creada[0])).toEqual([[1, 3]]);
+  });
+
+  it('ignora cantidades en cero: no crea una fila vacía', async () => {
+    const { svc, tx, creada } = crearServicio([item({ id: 1 })]);
+
+    await svc.registrarQuitadasEnMostrador(tx as never, 1, [{ itemId: 1, cantidad: 0 }]);
+
+    expect(creada).toHaveLength(0);
+  });
+
+  it('una segunda quitada se SUMA a la fila pendiente (pedidoId es único)', async () => {
+    const { svc, tx, creada, actualizada } = crearServicio([item({ id: 1 }), item({ id: 2 })], {
+      existente: {
+        id: 9,
+        pedidoId: 1,
+        estado: EstadoReposicion.PENDIENTE,
+        items: [{ id: 1, cantidad: 2, productoNombre: 'X' }],
+        motivo: null,
+      },
+    });
+
+    await svc.registrarQuitadasEnMostrador(tx as never, 1, [
+      { itemId: 1, cantidad: 3 },
+      { itemId: 2, cantidad: 4 },
+    ]);
+
+    expect(creada).toHaveLength(0);
+    expect(piezas(actualizada[0])).toEqual([
+      [1, 5],
+      [2, 4],
+    ]);
+    expect(actualizada[0].estado).toBe(EstadoReposicion.PENDIENTE);
+  });
+
+  it('una fila ya REPUESTA se reabre con SOLO lo nuevo: lo anterior ya volvió al anaquel', async () => {
+    const { svc, tx, actualizada } = crearServicio([item({ id: 1 })], {
+      existente: {
+        id: 9,
+        pedidoId: 1,
+        estado: EstadoReposicion.REPUESTO,
+        items: [{ id: 1, cantidad: 2 }],
+        motivo: null,
+      },
+    });
+
+    await svc.registrarQuitadasEnMostrador(tx as never, 1, [{ itemId: 1, cantidad: 1 }]);
+
+    // Sumarlo a lo viejo le pediría a bodega devolver las 2 de antes otra vez.
+    expect(piezas(actualizada[0])).toEqual([[1, 1]]);
+    expect(actualizada[0].estado).toBe(EstadoReposicion.PENDIENTE);
+    expect(actualizada[0].repuestoAt).toBeNull();
+    expect(actualizada[0].repuestoPorId).toBeNull();
+    expect(actualizada[0].creadaAt).toBeInstanceOf(Date);
+  });
+
+  it('NO toca `motivo` de una fila existente', async () => {
+    const { svc, tx, actualizada } = crearServicio([item({ id: 1 })], {
+      existente: {
+        id: 9,
+        pedidoId: 1,
+        estado: EstadoReposicion.PENDIENTE,
+        items: [{ id: 1, cantidad: 2 }],
+        motivo: 'Texto del correo de cancelación',
+      },
+    });
+
+    await svc.registrarQuitadasEnMostrador(tx as never, 1, [{ itemId: 1, cantidad: 1 }]);
+
+    expect(actualizada[0]).not.toHaveProperty('motivo');
+  });
+});
+
+describe('oct 2026 — cancelar un pedido al que mostrador ya le quitó piezas', () => {
+  const piezas = (data: any) =>
+    (data.items as Array<{ id: number; cantidad: number; deCancelacion?: boolean }>).map((i) => [
+      i.id,
+      i.cantidad,
+    ]);
+
+  it('FUSIONA la bolsa restante en la fila existente en vez de salir temprano', async () => {
+    // El bug que esto evita: `pedidoId` es único y `crearDesdePedido` salía si ya
+    // había fila. El operador quita 2 (crea la fila) y luego el cliente cancela:
+    // las 8 que quedaban en la bolsa NUNCA volvían al anaquel.
+    const { svc, tx, creada, actualizada } = crearServicio(
+      [item({ id: 1, cantidad: 8, cantidadSurtida: 10, piezasRetiradas: 2 })],
+      {
+        existente: {
+          id: 9,
+          pedidoId: 1,
+          estado: EstadoReposicion.PENDIENTE,
+          items: [{ id: 1, cantidad: 2 }],
+          motivo: null,
+        },
+      },
+    );
+
+    await svc.crearDesdePedido(tx as never, 1, 'Cancelado por el cliente');
+
+    expect(creada).toHaveLength(0);
+    // 2 que quitó el operador + 8 que seguían en la bolsa.
+    expect(piezas(actualizada[0])).toEqual([[1, 10]]);
+    expect(actualizada[0].items[0].deCancelacion).toBe(true);
+    expect(actualizada[0].estado).toBe(EstadoReposicion.PENDIENTE);
+  });
+
+  it('pisa `motivo`: es el texto del correo de cancelación', async () => {
+    const { svc, tx, actualizada } = crearServicio([item({ id: 1 })], {
+      existente: {
+        id: 9,
+        pedidoId: 1,
+        estado: EstadoReposicion.PENDIENTE,
+        items: [{ id: 1, cantidad: 2 }],
+        motivo: null,
+      },
+    });
+
+    await svc.crearDesdePedido(tx as never, 1, 'Ya no lo necesito');
+
+    expect(actualizada[0].motivo).toBe('Ya no lo necesito');
+  });
+
+  it('descuenta lo que el operador ya sacó: no lista dos veces las mismas piezas', async () => {
+    // Las 3 que quitó mostrador están en `piezasRetiradas`, así que la bolsa son 7.
+    const { svc, tx, actualizada } = crearServicio(
+      [item({ id: 1, cantidad: 7, cantidadSurtida: 10, piezasRetiradas: 3 })],
+      {
+        existente: {
+          id: 9,
+          pedidoId: 1,
+          estado: EstadoReposicion.PENDIENTE,
+          items: [{ id: 1, cantidad: 3 }],
+          motivo: null,
+        },
+      },
+    );
+
+    await svc.crearDesdePedido(tx as never, 1);
+
+    expect(piezas(actualizada[0])).toEqual([[1, 10]]);
+  });
+
+  it('sin nada en la bolsa solo actualiza el motivo y deja la fila como estaba', async () => {
+    const { svc, tx, actualizada } = crearServicio(
+      [item({ id: 1, cantidad: 0, cantidadSurtida: 10, piezasRetiradas: 10, cancelada: true })],
+      {
+        existente: {
+          id: 9,
+          pedidoId: 1,
+          estado: EstadoReposicion.PENDIENTE,
+          items: [{ id: 1, cantidad: 10 }],
+          motivo: null,
+        },
+      },
+    );
+
+    await svc.crearDesdePedido(tx as never, 1, 'Cancelado');
+
+    expect(actualizada[0].motivo).toBe('Cancelado');
+    expect(actualizada[0]).not.toHaveProperty('estado');
+    expect(piezas(actualizada[0])).toEqual([[1, 10]]);
+  });
+
+  it('una fila ya REPUESTA se reabre solo si la cancelación trae bolsa por devolver', async () => {
+    const { svc, tx, actualizada } = crearServicio(
+      [item({ id: 1, cantidad: 5, cantidadSurtida: 5 })],
+      {
+        existente: {
+          id: 9,
+          pedidoId: 1,
+          estado: EstadoReposicion.REPUESTO,
+          items: [{ id: 1, cantidad: 4 }],
+          motivo: null,
+        },
+      },
+    );
+
+    await svc.crearDesdePedido(tx as never, 1, 'Cancelado');
+
+    // Lo anterior (las 4) ya volvió al anaquel: solo se pide lo que sigue en la bolsa.
+    expect(piezas(actualizada[0])).toEqual([[1, 5]]);
+    expect(actualizada[0].estado).toBe(EstadoReposicion.PENDIENTE);
+  });
+
+  it('llamarla dos veces no suma la bolsa dos veces', async () => {
+    const { svc, tx, actualizada } = crearServicio(
+      [item({ id: 1, cantidad: 5, cantidadSurtida: 5 })],
+      {
+        existente: {
+          id: 9,
+          pedidoId: 1,
+          estado: EstadoReposicion.PENDIENTE,
+          items: [{ id: 1, cantidad: 5, deCancelacion: true }],
+          motivo: 'Cancelado',
+        },
+      },
+    );
+
+    await svc.crearDesdePedido(tx as never, 1, 'Cancelado');
+
+    expect(actualizada).toHaveLength(0);
   });
 });
 

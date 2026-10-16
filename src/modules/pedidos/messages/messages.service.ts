@@ -5,6 +5,7 @@ import { RolUsuario, TipoNotificacion } from '@prisma/client';
 import { UserContext } from '../../../types/pedido.types';
 import { CrearMensajeDto, CrearMensajeConAdjuntoDto, MarcarLeidoDto } from './dto/mensaje.dto';
 import { PropuestaService } from '../propuesta/propuesta.service';
+import { AjusteService } from '../propuesta/ajuste.service';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { RealtimeService } from '../../realtime/realtime.service';
@@ -37,6 +38,8 @@ export class MessagesService {
      * comentario de `dispararEfectosDeTransicion`.
      */
     private state: PedidoStateService,
+    /** Fase 2: arma la contrapropuesta del asesor a partir de su intención. */
+    private ajuste: AjusteService,
   ) {}
 
   /**
@@ -300,48 +303,17 @@ export class MessagesService {
         | Parameters<PedidoStateService['dispararEfectosDeTransicion']>[1]
         | null = null;
 
-      if (dto.propuestaItems && dto.propuestaItems.length > 0) {
-        // El service de propuestas hace todas las validaciones; nosotros sólo
-        // creamos el `PedidoMensaje` con el id resultante en la misma tx.
+      if (dto.ajuste && dto.ajuste.length > 0) {
+        // Fase 2: el servidor arma la propuesta a partir de la INTENCIÓN del
+        // asesor, DENTRO de esta transacción (lee el mismo estado de items que
+        // guarda). `enviarPropuesta` hace las validaciones de rol y de estado;
+        // nosotros sólo creamos el `PedidoMensaje` con el id resultante.
+        const calculo = await this.ajuste.calcular(pedidoId, dto.ajuste, tx);
         const { propuesta, efectos, propuestaEnviada: avisoPropuesta } = await this.propuesta.enviarPropuesta(
           pedidoId,
-          {
-            items: dto.propuestaItems.map((it) => ({
-              itemId: it.itemId,
-              tipo: it.tipo,
-              producto: it.producto,
-              // Oct 2026: el código viaja al snapshot. Es el dato con el que el
-              // personal identifica la prenda contra su etiqueta física.
-              productoCodigo: it.productoCodigo ?? null,
-              variante: it.variante,
-              // El snapshot es la fuente de verdad de lo que el cliente ve en
-              // la tarjeta del chat, así que se guarda el item COMPLETO: la
-              // imagen, el productoId (para resolver la foto de un `agregado`)
-              // y el "antes" de los tipos `cambio`/`parcial`. Antes este map
-              // los descartaba y la tarjeta no podía mostrar ni la foto ni el
-              // delta.
-              productoImagen: it.productoImagen ?? null,
-              cantidad: it.cantidad,
-              precioUnitario: it.precioUnitario,
-              subtotal: it.subtotal,
-              productoOriginal: it.productoOriginal ?? null,
-              varianteOriginal: it.varianteOriginal ?? null,
-              cantidadOriginal: it.cantidadOriginal ?? null,
-              cantidadDisponible: it.cantidadDisponible ?? null,
-              ajusteExplicito: it.ajusteExplicito ?? false,
-              productoNuevo: it.productoNuevo ?? null,
-              varianteNueva: it.varianteNueva ?? null,
-              cantidadNueva: it.cantidadNueva ?? null,
-              precioUnitarioNuevo: it.precioUnitarioNuevo ?? null,
-              subtotalNuevo: it.subtotalNuevo ?? null,
-              tempId: it.tempId ?? null,
-              productoId: it.productoId ?? null,
-              precioCOId: it.precioCOId ?? null,
-            })),
-            total: dto.total ?? 0,
-            // El texto del mensaje YA es el "comentario" de la propuesta; no
-            // necesitamos un campo `nota` separado en la propuesta.
-          } as any,
+          // El texto del mensaje YA es el "comentario" de la propuesta; no
+          // necesitamos un campo `nota` separado en la propuesta.
+          { calculo },
           usuario,
           tx,
         );

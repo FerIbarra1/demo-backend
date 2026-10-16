@@ -16,7 +16,7 @@ import { recalcularTotalesPedido } from '../core/totales.util';
 import { aplicarPropuestaDeVentas } from '../core/aplicar-propuesta-ventas.util';
 import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
 import { datosDeFaltaDeBodega } from '../core/cancelacion-linea.util';
-import { totalDePropuesta, lineaSobrevive } from '../core/total-propuesta.util';
+import type { ResultadoAjuste } from '../core/calculadora-ajuste.util';
 import { PreciosService } from '../../precios/precios.service';
 import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../../precios/precio-lista.util';
 import { UserContext } from '../../../types/pedido.types';
@@ -31,7 +31,6 @@ import {
   TipoNotificacion,
 } from '@prisma/client';
 import {
-  CrearPropuestaDto,
   ResponderPropuestaDto,
   DecisionPropuesta,
   type ItemPropuestaJson,
@@ -85,6 +84,8 @@ export class PropuestaService {
     [RolUsuario.BODEGA_MONITOR]: [],
     [RolUsuario.CAJERO]: [],
     [RolUsuario.CAJERO_MONITOR]: [],
+    // Tesorería no participa en propuestas (solo verifica transferencias).
+    [RolUsuario.TESORERIA]: [],
     // Oct 2026: MOSTRADOR NO aparece aquí, y es a propósito. Este mapa se indexa
     // por `propuesta.creadaPorRol` — quién CREÓ la propuesta (BODEGA o VENTAS),
     // no quién responde. El mostrador nunca crea propuestas, así que una entrada
@@ -133,19 +134,26 @@ export class PropuestaService {
   ) {}
 
   /**
-   * Envía una propuesta al cliente.
+   * Envía la contrapropuesta del asesor al cliente.
    *
-   * - BODEGA: requiere estar asignado al pedido y que esté en EN_REVISION.
-   * - VENTAS: requiere que el pedido esté en EN_ASESORIA (o ya en
-   *   ESPERANDO_APROBACION re-negociando).
+   * Oct 2026 (Fase 2): recibe el RESULTADO de `calcularAjuste`, no líneas del
+   * cliente de la API. Antes guardaba tal cual el JSON que armaba el navegador
+   * del asesor (nombres, precios, subtotales, "antes" y "después") y solo
+   * recalculaba el total — el cliente decidía viendo un snapshot que nadie había
+   * verificado, y al aprobar se aplicaba otra cosa leída de la BD. El tipo
+   * `ResultadoAjuste` no lo puede construir un body HTTP (ningún DTO lo declara),
+   * así que este método no tiene forma de recibir líneas de un cliente.
    *
-   * El pedido pasa a ESPERANDO_APROBACION y el reloj de atención se
-   * DETIENE (el pedido sale de bodega; antes se pausaba pero seguía asignado).
-   * `asignadoAId` se limpia para liberar el slot del bodeguero.
+   * La propuesta de BODEGA no pasa por aquí: la arma el sistema al cerrar el
+   * surtido (`SurtidoService.confirmarSurtido`).
+   *
+   * Requiere que el pedido esté en EN_ASESORIA (o ya en ESPERANDO_APROBACION,
+   * re-negociando). El pedido pasa a ESPERANDO_APROBACION y el reloj de atención
+   * se DETIENE; `asignadoAId` se limpia.
    *
    * Si ya existe una propuesta PENDIENTE, se rechaza. Además de este chequeo,
    * hay un índice único parcial en BD que cierra la carrera entre dos envíos
-   * concurrentes (ahora posibles: BODEGA y VENTAS pueden proponer).
+   * concurrentes.
    *
    * Oct 2026 — el retorno depende de si se pasó `txExterna`:
    *   - sin tx: la `PedidoPropuesta` (los efectos ya se dispararon aquí).
@@ -155,7 +163,7 @@ export class PropuestaService {
    */
   async enviarPropuesta(
     pedidoId: number,
-    dto: CrearPropuestaDto,
+    entrada: EntradaPropuesta,
     usuario: UserContext,
     txExterna: Prisma.TransactionClient,
   ): Promise<{
@@ -171,13 +179,13 @@ export class PropuestaService {
   }>;
   async enviarPropuesta(
     pedidoId: number,
-    dto: CrearPropuestaDto,
+    entrada: EntradaPropuesta,
     usuario: UserContext,
     txExterna?: undefined,
   ): Promise<PedidoPropuesta>;
   async enviarPropuesta(
     pedidoId: number,
-    dto: CrearPropuestaDto,
+    entrada: EntradaPropuesta,
     usuario: UserContext,
     /**
      * Transacción del caller. Si viene, la propuesta, la transición y las
@@ -196,113 +204,32 @@ export class PropuestaService {
         propuestaEnviada: { pedidoId: number; propuestaId: number; origen: RolUsuario };
       }
   > {
-    const esVentas = usuario.rol === RolUsuario.VENTAS;
-    const esBodega = usuario.rol === RolUsuario.BODEGA;
-
-    if (!esVentas && !esBodega && usuario.rol !== RolUsuario.ADMIN) {
-      throw new BadRequestException('Sólo bodega o el asesor de ventas pueden enviar propuestas.');
+    // ADMIN entra por la misma puerta que VENTAS: su propuesta se aplica como la
+    // de ventas (`creadaPorRol` ≠ BODEGA → `aprobarPropuestaVentas`).
+    if (usuario.rol !== RolUsuario.VENTAS && usuario.rol !== RolUsuario.ADMIN) {
+      throw new BadRequestException('Sólo el asesor de ventas puede enviar propuestas.');
     }
 
-    await this.access.cargarYValidar(pedidoId, usuario, {
-      // El bodeguero solo propone sobre pedidos que él tiene asignados.
-      // El vendedor atiende la cola de su tienda, sin asignación 1:1.
-      requiereAsignacionBodega: esBodega,
-    });
+    await this.access.cargarYValidar(pedidoId, usuario);
 
-    if (dto.items.length === 0) {
-      throw new BadRequestException('La propuesta debe tener al menos un item.');
+    const { calculo } = entrada;
+    // Una propuesta que no cambia nada no le da al cliente nada que decidir, y
+    // lo deja con el pedido detenido esperando una respuesta sin objeto. Para
+    // "el pedido estaba bien" existe devolverlo a bodega.
+    if (calculo.items.length === 0 || !calculo.hayCambios) {
+      throw new BadRequestException(
+        'La propuesta no cambia nada del pedido. Ajusta una cantidad, quita o agrega ' +
+          'un producto; si el pedido estaba bien, devuélvelo a bodega.',
+      );
     }
-
-    // F16 (sep 2026): si la propuesta viene de BODEGA, ningún item del pedido
-    // puede seguir PENDIENTE. Sin este guard, una propuesta puede llegar al
-    // cliente sin que bodega haya marcado cada item, y al aprobarla el pedido
-    // avanza con `cantidadSurtida: 0` en items que nadie verificó (mismo
-    // escenario que el bug original del 400, pero al revés).
-    //
-    // El frontend (`BodegaSurtidoSheet`) ya bloquea el botón, pero la API es
-    // frontera de confianza.
-    if (esBodega) {
-      const itemsPedido = await this.prisma.itemPedido.findMany({
-        where: { pedidoId, cancelada: false },
-        select: { id: true, estadoSurtido: true },
-      });
-      const idsEnPropuesta = new Set(dto.items.filter((i) => i.itemId > 0).map((i) => i.itemId));
-      // Contamos items del pedido que bodega no marcó y que la propuesta
-      // tampoco menciona — esos son los PENDIENTE que quedarían sin surtir.
-      const idsPendientesSinCubrir = itemsPedido
-        .filter((i) => i.estadoSurtido === EstadoSurtido.PENDIENTE && !idsEnPropuesta.has(i.id))
-        .map((i) => i.id);
-      if (idsPendientesSinCubrir.length > 0) {
-        throw new BadRequestException(
-          `Hay ${idsPendientesSinCubrir.length} item(s) sin marcar. Márcalos (Hay todo / Hay menos / No hay) antes de enviar la propuesta.`,
-        );
-      }
-    }
-
-    // F13: el total NUNCA se confía al cliente del API. Ahora que ventas
-    // propone productos con precios, un vendedor podría mandar `total: 0` y el
-    // cliente aprobaría un número distinto al que se le cobra. Se recalcula
-    // desde los items.
-    //
-    // F20 (oct 2026): el recálculo pasa por `totalDePropuesta`, que es la misma
-    // regla que el cobro. Antes era un `reduce` crudo sobre
-    // `subtotalNuevo ?? subtotal`, y tenía dos bugs de dinero:
-    //
-    //   1. Sumaba los `no-disponible`, que se cancelan y no se cobran. Un item
-    //      agotado trae el subtotal de la cantidad PEDIDA, así que inflaba el
-    //      total: en un pedido de $1000 con un producto agotado de $300, la
-    //      propuesta decía $1300 y se cobraban $1000.
-    //
-    //   2. Usaba el precio CONGELADO en el item, pero el cobro lo re-evalúa
-    //      (`aplicarPromoVolumen`). Un pedido de 12 piezas que la propuesta deja
-    //      en 10 mostraba $800 y se cobraban $1000: la promo se revoca al bajar
-    //      del umbral.
-    //
-    // Las líneas se arman con el par de precios CONGELADO del item, que es lo
-    // que permite re-evaluar la promo sin releer `PrecioCO`.
-    const itemsActualesParaTotal = await this.prisma.itemPedido.findMany({
-      where: { pedidoId, cancelada: false },
-      select: {
-        id: true,
-        precioUnitario: true,
-        precioUnitarioBase: true,
-        precioUnitarioMayoreo: true,
-      },
-    });
-    const porItemId = new Map(itemsActualesParaTotal.map((i) => [i.id, i]));
-
-    const totalCalculado = totalDePropuesta(
-      dto.items.map((it) => {
-        const actual = porItemId.get(it.itemId);
-        // Una línea que sale del pedido no se cobra. `no-disponible` es el
-        // único tipo que la saca sin reemplazo (`cambio` crea su propia línea).
-        if (!lineaSobrevive(it.tipo)) {
-          return {
-            cantidad: 0,
-            base: actual?.precioUnitarioBase ?? null,
-            mayoreo: actual?.precioUnitarioMayoreo ?? null,
-            precioUnitario: actual?.precioUnitario ?? it.precioUnitario,
-          };
-        }
-        return {
-          cantidad: Math.max(0, it.cantidadNueva ?? it.cantidad),
-          // Un item AGREGADO no existe en el pedido: no tiene par congelado, y
-          // su precio ya viene resuelto por el frontend desde la lista del
-          // cliente. Se usa tal cual (sin promo) — mismo criterio que
-          // `construirItemPedido` cuando no conoce el total final.
-          base: actual?.precioUnitarioBase ?? null,
-          mayoreo: actual?.precioUnitarioMayoreo ?? null,
-          precioUnitario: actual?.precioUnitario ?? it.precioUnitarioNuevo ?? it.precioUnitario,
-        };
-      }),
-    );
 
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
-    const estadosPermitidos: EstadoPedido[] = esVentas
-      ? [EstadoPedido.EN_ASESORIA, EstadoPedido.ESPERANDO_APROBACION]
-      : [EstadoPedido.EN_REVISION];
+    const estadosPermitidos: EstadoPedido[] = [
+      EstadoPedido.EN_ASESORIA,
+      EstadoPedido.ESPERANDO_APROBACION,
+    ];
     if (!estadosPermitidos.includes(pedido.estado)) {
       throw new BadRequestException(
         `No se puede enviar una propuesta desde el estado ${pedido.estado}.`,
@@ -320,9 +247,10 @@ export class PropuestaService {
     }
 
     // Sin tx externa abrimos la nuestra: la propuesta y la transición a
-    // WAITING_CUSTOMER_APPROVAL deben ser atómicas. Antes la propuesta se
-    // creaba suelta y, si la transición fallaba, quedaba una propuesta
-    // PENDIENTE que bloqueaba el siguiente envío por el índice único parcial.
+    // ESPERANDO_APROBACION deben ser atómicas. Antes la propuesta se creaba
+    // suelta y, si la transición fallaba, quedaba una propuesta PENDIENTE que
+    // bloqueaba el siguiente envío por el índice único parcial.
+    //
     // Los efectos de la transición (realtime + correo al cliente). Cuando la
     // transición corre dentro de una tx del caller (`txExterna`), el caller es
     // quien debe dispararlos tras su commit — ver `dispararEfectosDeTransicion`.
@@ -334,9 +262,11 @@ export class PropuestaService {
         data: {
           pedidoId,
           estado: EstadoPropuesta.PENDIENTE,
-          items: dto.items as unknown as Prisma.InputJsonValue,
-          total: new Prisma.Decimal(totalCalculado),
-          nota: dto.nota ?? null,
+          // El snapshot y el total salen del MISMO cálculo: no hay un segundo
+          // número que pueda diferir.
+          items: calculo.items as unknown as Prisma.InputJsonValue,
+          total: new Prisma.Decimal(calculo.total),
+          nota: entrada.nota ?? null,
           creadaPorId: usuario.userId,
           creadaPorRol: usuario.rol,
         },
@@ -352,9 +282,7 @@ export class PropuestaService {
         pedidoId,
         {
           nuevoEstado: EstadoPedido.ESPERANDO_APROBACION,
-          observacion: esVentas
-            ? `Propuesta del asesor de ventas enviada al cliente (${dto.items.length} item(s))`
-            : `Propuesta de bodega enviada al cliente (${dto.items.length} item(s))`,
+          observacion: `Propuesta del asesor de ventas enviada al cliente (${calculo.items.length} item(s))`,
         },
         usuario,
         {
@@ -376,11 +304,10 @@ export class PropuestaService {
     // Oct 2026: el correo al cliente.
     //
     // `REVISION_PROPUESTA` lo deduce todo del pedido y de la propuesta PENDIENTE
-    // más reciente (incluido el origen bodega/ventas), así que sirve para las
-    // dos ramas. Antes esto solo funcionaba si la transición corría por su
-    // cuenta: `MessagesService.crearConAdjunto` pasa su propia tx, y en esa
-    // rama los efectos se quedaban sin disparar — el cliente recibía la
-    // contrapropuesta en el chat pero NUNCA el correo.
+    // más reciente (incluido el origen bodega/ventas). Antes esto solo funcionaba
+    // si la transición corría por su cuenta: `MessagesService.crearConAdjunto`
+    // pasa su propia tx, y en esa rama los efectos se quedaban sin disparar — el
+    // cliente recibía la contrapropuesta en el chat pero NUNCA el correo.
     //
     // Con tx externa los dispara el caller (que es quien sabe cuándo
     // confirmó); aquí solo se atiende la rama sin tx.
@@ -687,6 +614,23 @@ export class PropuestaService {
       // conservar (no hay piezas apartadas que declarar).
       await this.prisma.$transaction(async (tx) => {
         for (const it of itemsPendientesResidual) {
+          // Oct 2026 (decisión 2): una línea PENDIENTE con piezas en la bolsa es una
+          // que se SUBIÓ y bodega no alcanzó a verificar lo de más. Cancelarla como
+          // si nadie la hubiera marcado dejaría `piezasBase` piezas dentro de la bolsa
+          // sin dueño (`datosDeFaltaDeBodega` limpia el hallazgo). Se liquida a lo que
+          // ya está en la bolsa, que es lo único verificado.
+          if (it.cantidadSurtida > 0) {
+            await tx.itemPedido.update({
+              where: { id: it.id },
+              data: {
+                cantidad: it.cantidadSurtida,
+                subtotal: new Prisma.Decimal(it.precioUnitario).mul(it.cantidadSurtida),
+                estadoSurtido: EstadoSurtido.COMPLETO,
+                piezasBase: 0,
+              },
+            });
+            continue;
+          }
           await tx.itemPedido.update({
             where: { id: it.id },
             data: datosDeFaltaDeBodega(),
@@ -755,7 +699,22 @@ export class PropuestaService {
     // domicilio NO pasa por mostrador (el cliente no está en tienda): va
     // directo a pago con encolado inmediato a Firebird. Uno de tienda se
     // aparta en REVISADO y entra al ERP cuando mostrador lo libere.
-    const destino = destinoTrasSurtido(pedidoCompleto.modoEntrega);
+    //
+    // Oct 2026 — EN_ATENCION: si el operador ya llamó al cliente, el pedido SE
+    // QUEDA en EN_ATENCION. `destinoTrasSurtido` devuelve REVISADO (el destino de un
+    // pedido que sale de bodega), y `EN_ATENCION → REVISADO` es la transición de
+    // "deshacer la llamada": limpiaba `llamadoAt` y el cliente que estaba en pleno
+    // recuento perdía su "te toca" en la TV, justo por haber resuelto el faltante
+    // que el operador tenía en la mano. Resolver una propuesta no es dejar de
+    // atender al cliente.
+    const destinoBase = destinoTrasSurtido(pedidoCompleto.modoEntrega);
+    const destino =
+      pedidoCompleto.estado === EstadoPedido.EN_ATENCION &&
+      destinoBase.estado === EstadoPedido.REVISADO
+        ? { ...destinoBase, estado: EstadoPedido.EN_ATENCION }
+        : destinoBase;
+    const enAreaDeEntrega =
+      destino.estado === EstadoPedido.REVISADO || destino.estado === EstadoPedido.EN_ATENCION;
 
     // Oct 2026: el caso "el destino es el estado actual".
     //
@@ -775,10 +734,9 @@ export class PropuestaService {
       pedido.id,
       {
         nuevoEstado: destino.estado,
-        observacion:
-          destino.estado === EstadoPedido.REVISADO
-            ? `Cliente aprobó la propuesta #${propuesta.id} de bodega — pasa a mostrador`
-            : `Cliente aprobó la propuesta #${propuesta.id} de bodega — pendiente de pago`,
+        observacion: enAreaDeEntrega
+          ? `Cliente aprobó la propuesta #${propuesta.id} de bodega — pasa a mostrador`
+          : `Cliente aprobó la propuesta #${propuesta.id} de bodega — pendiente de pago`,
       },
       usuario,
       {
@@ -830,10 +788,9 @@ export class PropuestaService {
     );
 
     return {
-      mensaje:
-        destino.estado === EstadoPedido.REVISADO
-          ? 'Propuesta aprobada. Pasa a mostrador a revisar tu pedido.'
-          : 'Propuesta aprobada. Tu pedido pasa a pago.',
+      mensaje: enAreaDeEntrega
+        ? 'Propuesta aprobada. Pasa a mostrador a revisar tu pedido.'
+        : 'Propuesta aprobada. Tu pedido pasa a pago.',
       estado: destino.estado,
       propuestaId: propuesta.id,
       cambiosAplicados: cambios.length,
@@ -1518,6 +1475,38 @@ export class PropuestaService {
   /**
    * Lista las propuestas de un pedido (para el historial y la UI).
    */
+  /**
+   * Oct 2026 (3c): el cliente ABRIÓ la propuesta. Es la marca que le faltaba a
+   * mostrador para distinguir "no contestó" de "ni siquiera la abrió".
+   *
+   * Solo cuenta:
+   *   - el CLIENTE dueño del pedido (`cargarYValidar` ya lo garantiza; el personal que
+   *     lee la propuesta no es "el cliente que la vio"), y
+   *   - mientras la propuesta está PENDIENTE: una ya resuelta no tiene nada que avisar.
+   *
+   * Idempotente y sin carrera: el `updateMany` solo escribe si `vistaAt` es NULL, así
+   * que la PRIMERA apertura gana y las demás no mueven la fecha ni emiten nada (la
+   * pantalla del cliente la llama en cada render hasta que sabe que ya se marcó).
+   *
+   * El aviso va DESPUÉS del update, y solo cuando de verdad se marcó: mostrador
+   * recarga el pedido para pintar "el cliente la abrió hace N min".
+   */
+  async marcarVista(pedidoId: number, propuestaId: number, usuario: UserContext) {
+    const pedido = await this.access.cargarYValidar(pedidoId, usuario);
+
+    const { count } = await this.prisma.pedidoPropuesta.updateMany({
+      where: { id: propuestaId, pedidoId, estado: EstadoPropuesta.PENDIENTE, vistaAt: null },
+      data: { vistaAt: new Date() },
+    });
+
+    if (count === 1) {
+      const payload = { pedidoId, propuestaId };
+      this.realtime.emitToTienda(pedido.tiendaId, 'propuesta.vista', payload);
+      this.realtime.emitToPedido(pedidoId, 'propuesta.vista', payload);
+    }
+    return { ok: true as const, marcada: count === 1 };
+  }
+
   async listarPropuestas(pedidoId: number, usuario: UserContext) {
     await this.access.cargarYValidar(pedidoId, usuario);
     return this.prisma.pedidoPropuesta.findMany({
@@ -1529,6 +1518,17 @@ export class PropuestaService {
       },
     });
   }
+}
+
+/**
+ * Lo que `enviarPropuesta` necesita. `calculo` lo arma el SERVIDOR con
+ * `AjusteService.calcular`; no existe un DTO de entrada que lo pueda producir, a
+ * propósito: así ningún controller puede pasarle líneas que mandó un cliente.
+ */
+export interface EntradaPropuesta {
+  calculo: ResultadoAjuste;
+  /** Nota libre del autor que acompaña la propuesta. */
+  nota?: string;
 }
 
 /**

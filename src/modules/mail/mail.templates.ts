@@ -19,6 +19,13 @@ import { PedidoRecibido } from './templates/PedidoRecibido';
 import { PedidoRecordatorioRecoger } from './templates/PedidoRecordatorioRecoger';
 import { ResetPassword } from './templates/ResetPassword';
 import { RevisionPropuesta, type OrigenPropuesta } from './templates/RevisionPropuesta';
+import {
+  TransferenciaPago,
+  type LineaCorreo,
+  type VarianteTransferencia,
+} from './templates/TransferenciaPago';
+
+export type { LineaCorreo, VarianteTransferencia };
 
 export interface ItemPedidoSnapshot {
   productoNombre: string;
@@ -44,6 +51,18 @@ export interface PedidoEmailData {
   motivoCancelacion?: string | null;
   tiendaNombre?: string;
   tiendaTelefono?: string;
+  /** "Calle y número, ciudad": dónde recoger. Sin ella no se pinta la tarjeta de ubicación. */
+  tiendaDireccion?: string;
+  /**
+   * El cliente eligió pagar por transferencia. Cambia lo que dicen los correos de "recibido" y de
+   * "listo para pagar": a quien transfiere no se le dice "presenta tu folio en caja".
+   */
+  pagoPorTransferencia?: boolean;
+  /**
+   * Quién recogió el pedido cuando NO fue el titular (lo captura el operador al entregar). Solo el
+   * correo de "entregado" lo pinta: el titular se entera, y puede avisar si no reconoce a esa persona.
+   */
+  recogioNombre?: string | null;
   // Folio VFP (externalFolio). El folio visible es este; numeroPedido es interno.
   externalFolio?: string | null;
   // Data URL del QR del folio VFP (solo en el email "listo para pagar").
@@ -148,6 +167,17 @@ export const mailTemplates = {
       nombreBodeguero: string;
     } & MailContext,
   ): ReactElement => MensajeBodeguero(props),
+  // Oct 2026: una sola plantilla para los 6 correos del pago por transferencia.
+  TransferenciaPago: (
+    props: {
+      variante: VarianteTransferencia;
+      pedido: PedidoEmailData;
+      pedidoUrl: string;
+      lineas?: LineaCorreo[];
+      notas?: string[];
+      detalle?: string;
+    } & MailContext,
+  ): ReactElement => TransferenciaPago(props),
 };
 
 export const mailSubjects = {
@@ -173,4 +203,12 @@ export const mailSubjects = {
   ASESOR_SOLICITADO: (n: string) => `Un asesor de ventas atenderá tu pedido ${n}`,
   // F13: el asesor envió una contrapropuesta.
   PROPUESTA_VENTAS: (n: string) => `Tu asesor de ventas tiene una propuesta para el pedido ${n}`,
+  // Oct 2026: pago por transferencia.
+  TRANSFERENCIA_INSTRUCCIONES: (n: string) => `Datos para pagar tu pedido ${n} por transferencia`,
+  TRANSFERENCIA_COMPROBANTE_RECIBIDO: (n: string) => `Recibimos tu comprobante del pedido ${n}`,
+  TRANSFERENCIA_VERIFICADA: (n: string) => `Recibimos tu transferencia del pedido ${n}`,
+  TRANSFERENCIA_RECHAZADA: (n: string) => `No pudimos validar tu comprobante del pedido ${n}`,
+  TRANSFERENCIA_POR_VENCER: (n: string) =>
+    `Tus datos de transferencia del pedido ${n} están por vencer`,
+  TRANSFERENCIA_REEMBOLSADA: (n: string) => `Te devolvimos tu transferencia del pedido ${n}`,
 };

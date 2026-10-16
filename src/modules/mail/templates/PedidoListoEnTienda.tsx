@@ -28,7 +28,7 @@ export const PedidoListoEnTienda = ({
   <PedidoEmailShell
     preview={`Tu pedido ${folioVisible(pedido)} ya está listo en tienda`}
     title="Tu pedido ya está listo en tienda"
-    greeting={`Hola, ${pedido.clienteNombre}. Apartamos tu pedido ${folioVisible(pedido)} en tienda y está listo para que lo revises antes de pagar.`}
+    greeting={`Hola, ${pedido.clienteNombre}. Ya apartamos tu pedido en tienda: pasa al mostrador para revisarlo antes de pagar.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     ctaLabel="Revisar mi pedido"
@@ -36,10 +36,11 @@ export const PedidoListoEnTienda = ({
     frontendUrl={frontendUrl}
     bodyExtras={
       <>
-        {pedido.tiendaNombre ? (
-          <Callout variant="info" label="Te esperamos en">
-            {pedido.tiendaNombre}
-            {pedido.tiendaTelefono ? `\nTel. ${pedido.tiendaTelefono}` : ''}
+        {/* Solo la DIRECCIÓN: el nombre de la tienda ya va en el resumen y el teléfono en el pie.
+            Antes esta tarjeta repetía las dos cosas. */}
+        {pedido.tiendaDireccion ? (
+          <Callout variant="info" label="Dónde">
+            {pedido.tiendaDireccion}
           </Callout>
         ) : null}
         <Text
@@ -50,9 +51,8 @@ export const PedidoListoEnTienda = ({
             lineHeight: '1.6',
           }}
         >
-          Revisa las piezas en el mostrador: si todo está como lo pediste, confírmalo y pasa a
-          pagar. Si algo no te convence, puedes ajustarlo ahí mismo o responder desde el chat del
-          pedido.
+          En el mostrador te ayudan a revisar las piezas. Si todo está bien, te mandan a pagar; si
+          algo no te convence, lo ajustan ahí mismo.
         </Text>
       </>
     }

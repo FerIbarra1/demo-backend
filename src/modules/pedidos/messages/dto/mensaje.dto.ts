@@ -3,18 +3,18 @@ import {
   IsOptional,
   IsBoolean,
   IsInt,
-  IsNumber,
   MaxLength,
   IsArray,
   ValidateNested,
   ArrayMinSize,
-  IsIn,
+  ArrayMaxSize,
   Min,
   IsNotEmpty,
   ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IntencionAjusteDto } from '../../propuesta/dto/ajuste.dto';
 
 /**
  * F15 (sep 2026): marca de agua de lectura del chat (modelo WhatsApp/Telegram).
@@ -58,136 +58,16 @@ export class CrearMensajeDto {
 }
 
 /**
- * F13 (sep 2026): un item dentro de la propuesta adjunta al mensaje.
- * Mismo shape que `PropuestaItemDto` en propuesta.dto.ts pero revalidado acá
- * para que el chat-controller no dependa del controller de propuestas.
- *
- * Los campos opcionales no son decorativos: el editor del frontend los manda
- * para los items `agregado` (producto nuevo) y para los `cambio`/`parcial`
- * (que necesitan el "antes"). Como el ValidationPipe global corre con
- * `forbidNonWhitelisted`, cualquier campo que no se declare aquí hace que el
- * request entero falle con 400 antes de llegar al servicio.
- */
-export class PropuestaAdjuntaItemDto {
-  @ApiProperty()
-  @IsInt()
-  itemId: number;
-
-  @ApiProperty({ enum: ['completo', 'parcial', 'no-disponible', 'cambio', 'agregado'] })
-  @IsIn(['completo', 'parcial', 'no-disponible', 'cambio', 'agregado'])
-  tipo: 'completo' | 'parcial' | 'no-disponible' | 'cambio' | 'agregado';
-
-  @ApiProperty()
-  @IsString()
-  producto: string;
-
-  @ApiPropertyOptional({
-    description:
-      'Oct 2026: código del producto (ej. "C0200"). Va en el snapshot porque es ' +
-      'lo que el personal compara contra la etiqueta física de la prenda.',
-  })
-  @IsOptional()
-  @IsString()
-  productoCodigo?: string | null;
-
-  @ApiProperty()
-  @IsString()
-  variante: string;
-
-  @ApiPropertyOptional({
-    description:
-      'Imagen del producto (del color pedido). Se guarda en el snapshot para ' +
-      'que la tarjeta del cliente pueda mostrarla sin resolver el catálogo.',
-  })
-  @IsOptional()
-  @IsString()
-  productoImagen?: string | null;
-
-  @ApiProperty()
-  @IsInt()
-  cantidad: number;
-
-  @ApiProperty()
-  @IsNumber()
-  precioUnitario: number;
-
-  @ApiProperty()
-  @IsNumber()
-  subtotal: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  productoOriginal?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  varianteOriginal?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  cantidadOriginal?: number;
-
-  /** Lo que bodega encontró físicamente; 0 es un valor válido. */
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  cantidadDisponible?: number;
-
-  /** true solo si ventas/mostrador editó explícitamente esta línea. */
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  ajusteExplicito?: boolean;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  productoNuevo?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsString()
-  varianteNueva?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  cantidadNueva?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsNumber()
-  precioUnitarioNuevo?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsNumber()
-  subtotalNuevo?: number;
-
-  @ApiPropertyOptional({ description: 'tempId negativo del item agregado (aún no existe en BD).' })
-  @IsOptional()
-  @IsInt()
-  tempId?: number;
-
-  @ApiPropertyOptional({ description: 'Producto del catálogo (para tipo=agregado).' })
-  @IsOptional()
-  @IsInt()
-  productoId?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsInt()
-  precioCOId?: number;
-}
-
-/**
  * F13 (sep 2026): endpoint unificado para mandar un mensaje que opcionalmente
- * adjunta una propuesta. Si `propuestaItems` viene, se crea la propuesta en la
- * misma transacción y el mensaje lleva su id en `adjunto`.
+ * adjunta una propuesta. Si `ajuste` viene, se crea la propuesta en la misma
+ * transacción y el mensaje lleva su id en `adjunto`.
+ *
+ * Oct 2026 (Fase 2): la propuesta ya NO viaja como líneas armadas por el
+ * navegador (`propuestaItems`, con nombres, precios y subtotales). Viaja la
+ * INTENCIÓN del asesor (`ajuste`: "esta línea a 3", "quita esta", "agrega esta
+ * variante") y el servidor calcula todo lo demás con `calcularAjuste`. Por eso
+ * este DTO ya no tiene `total` ni precios: el `ValidationPipe` global corre con
+ * `forbidNonWhitelisted`, así que un cliente que los mande recibe 400.
  */
 export class CrearMensajeConAdjuntoDto {
   // Oct 2026: el texto es OBLIGATORIO cuando NO se adjunta propuesta, pero
@@ -197,22 +77,18 @@ export class CrearMensajeConAdjuntoDto {
   @ApiProperty()
   @IsString()
   @MaxLength(4000)
-  @ValidateIf((o) => !o.propuestaItems || o.propuestaItems.length === 0)
+  @ValidateIf((o) => !o.ajuste || o.ajuste.length === 0)
   @IsNotEmpty({
     message: 'El texto del mensaje es obligatorio cuando no se adjunta una propuesta.',
   })
   contenido: string;
 
-  @ApiPropertyOptional({ type: [PropuestaAdjuntaItemDto] })
+  @ApiPropertyOptional({ type: [IntencionAjusteDto] })
   @IsOptional()
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(200)
   @ValidateNested({ each: true })
-  @Type(() => PropuestaAdjuntaItemDto)
-  propuestaItems?: PropuestaAdjuntaItemDto[];
-
-  @ApiPropertyOptional({ description: 'Total propuesto; el backend lo recalcula y no confía en este valor.' })
-  @IsOptional()
-  @IsNumber()
-  total?: number;
+  @Type(() => IntencionAjusteDto)
+  ajuste?: IntencionAjusteDto[];
 }

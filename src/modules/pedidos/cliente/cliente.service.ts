@@ -13,7 +13,7 @@ import { PedidoStateService } from '../core/pedido-state.service';
 import { ReposicionService } from '../reposicion/reposicion.service';
 import { bolsaEnManosDeBodega } from '../core/bolsa-en-bodega.util';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
-import { motivoNoAvisable } from '../core/llegada-aviso.util';
+import { avisoDeLlegadaSirve, motivoNoAvisable } from '../core/llegada-aviso.util';
 import { construirItemPedido } from '../core/item-pedido.util';
 import { contarMensajesNoLeidos } from '../core/mensajes-no-leidos.util';
 import { PreciosService } from '../../precios/precios.service';
@@ -25,6 +25,7 @@ import {
 import { KioskoService } from '../../kiosko/kiosko.service';
 import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
 import { PresenciaService } from '../core/presencia.service';
+import { pagoBloqueaCancelacion } from '../../pagos/transferencia/hooks';
 import { SinRecogerService } from '../core/sin-recoger.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
 import { UserContext } from '../../../types/pedido.types';
@@ -237,6 +238,10 @@ export class ClienteService {
             canalOrigen: canalOrigenFinal,
             kioskoId: kioskoIdFinal,
             modoEntrega: modoEntregaFinal,
+            // Preferencia NO vinculante (ver `Pedido.metodoPagoPreferido`). En domicilio no aplica
+            // todavía: se guarda null para no prometer algo que ese flujo no puede cumplir.
+            metodoPagoPreferido:
+              modoEntregaFinal === ModoEntrega.DOMICILIO ? null : (dto.metodoPagoPreferido ?? null),
             // F22: un pedido de kiosko se hace con el cliente EN la tienda, así que
             // su lugar en la cola de mostrador cuenta desde ahora. (Un web empieza
             // sin lugar: lo toma cuando avisa su llegada.) Es la llave de orden de
@@ -384,6 +389,11 @@ export class ClienteService {
         historial: { orderBy: { createdAt: 'asc' } },
         mensajes: { where: { visibleParaCliente: true }, orderBy: { createdAt: 'asc' } },
         cajeroAsignado: { select: { id: true, nombre: true, apellido: true } },
+        // Oct 2026: el folio del Sistema Comercial (el del ticket y del correo) y el QR con el que el
+        // cliente se identifica en caja. La pantalla ya los pintaba pero este include nunca lo
+        // pedía, así que no se veían NUNCA. Solo el folio: el resto de la fila es del agente
+        // (intentos, errores, leases) y no es del cliente.
+        pendienteEnvio: { select: { externalFolio: true } },
         // F12: propuestas de ajuste para que el cliente vea y responda.
         propuestas: {
           orderBy: { enviadaAt: 'asc' },
@@ -411,7 +421,9 @@ export class ClienteService {
         ),
       };
     }) as any;
-    return pedido;
+    // Oct 2026: el servidor dice si la tarjeta "¿Ya estás en la tienda?" tiene sentido en este estado
+    // (ver `avisoDeLlegadaSirve`); la pantalla no deduce a mano en qué estados mostrarla.
+    return { ...pedido, puedeAvisarLlegada: avisoDeLlegadaSirve(pedido) };
   }
 
   /**
@@ -469,6 +481,19 @@ export class ClienteService {
           ? 'Tu pedido ya fue pagado, así que no se puede cancelar desde aquí. ' +
               'Acércate a mostrador para cualquier cambio.'
           : `No se puede cancelar un pedido en estado ${pedido.estado}.`,
+      );
+    }
+
+    // Oct 2026 (pagos por transferencia): con un comprobante en revisión o dinero ya verificado,
+    // cancelar deja un dinero sin dueño. Primero se resuelve el dinero (Tesorería / mostrador).
+    // Si el comprobante llega justo después de esta lectura, la cancelación pasa y el hook de la
+    // máquina de estados deja el pago marcado para que Tesorería lo resuelva: nunca se pierde.
+    const pagoEnCurso = await pagoBloqueaCancelacion(this.prisma, pedidoId);
+    if (pagoEnCurso) {
+      throw new ConflictException(
+        pagoEnCurso.estado === 'VERIFICADO'
+          ? 'Tu transferencia ya fue verificada, así que no puedes cancelar el pedido desde aquí. Acércate a mostrador.'
+          : 'Ya enviaste un comprobante de transferencia y lo estamos revisando. Espera a que lo confirmemos, o contacta a la tienda.',
       );
     }
 

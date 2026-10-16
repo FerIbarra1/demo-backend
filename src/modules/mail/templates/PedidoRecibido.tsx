@@ -18,8 +18,8 @@ export const PedidoRecibido = ({
 }: PedidoRecibidoProps) => (
   <PedidoEmailShell
     preview={`Recibimos tu pedido ${folioVisible(pedido)}`}
-    title={`¡Recibimos tu pedido ${folioVisible(pedido)}!`}
-    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido entró a nuestra cola y en breve un bodeguero lo revisará para confirmar disponibilidad y precio.`}
+    title="¡Recibimos tu pedido!"
+    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido ya está en la cola de bodega: en breve nuestro equipo lo revisará para confirmar que tenemos todas las piezas.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     logoUrl={logoUrl}
@@ -33,8 +33,11 @@ export const PedidoRecibido = ({
           lineHeight: '1.6',
         }}
       >
-        Te avisaremos por correo cada vez que tu pedido avance: propuesta del bodeguero, listo para
-        revisar en tienda, pago confirmado y entrega.
+        {pedido.pagoPorTransferencia
+          ? 'Elegiste pagar por transferencia: cuando tu pedido esté listo para pagar verás los datos en tu pedido. '
+          : ''}
+        Te avisaremos por correo en cada paso: si hay cambios en tu pedido, cuando esté listo para
+        revisar en tienda, al confirmarse el pago y en la entrega.
       </Text>
     }
   />

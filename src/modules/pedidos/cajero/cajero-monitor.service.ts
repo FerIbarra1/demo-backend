@@ -1,7 +1,8 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { EstadoPedido, ModoEntrega } from '@prisma/client';
-import { minutosEntre } from '../core/urgencia.util';
+import { operadorActivo } from '../core/estacion.util';
+import { SELECT_ORDEN_COLA_CAJA, ordenarFilaDeCaja, whereFilaDeCaja } from '../core/cola-caja.util';
 
 /**
  * Monitor de ventanillas (jun 2026): snapshot por VENTANILLA (1, 2, 3…)
@@ -23,6 +24,13 @@ import { minutosEntre } from '../core/urgencia.util';
  *      llega es ruido. Los relojes de urgencia viven solo en bodega.
  *
  * El TV consume este endpoint cada 5s y muestra ventanillas + cola.
+ *
+ * Oct 2026 (16-oct, §9.4): REDUCIDO A FOLIO + NÚMEROS. La TV es una pantalla PÚBLICA y este payload
+ * viaja hasta su navegador. Cada pedido traía además la hora en que se asignó, los minutos en cola
+ * y el nombre del cajero —y cada ventanilla el id del usuario—: la TV no pinta nada de eso. Ahora
+ * sale solo el folio y los números de ventanilla; el cajero de la ventanilla (personal, no cliente)
+ * es lo único con nombre, porque la tarjeta lo muestra. Los minutos en cola y demás viven en la
+ * consola de caja, autenticada.
  */
 @Injectable()
 export class CajeroMonitorService {
@@ -55,21 +63,20 @@ export class CajeroMonitorService {
             nombre: true,
             apellido: true,
             lastLogin: true,
+            ultimoHeartbeat: true,
           },
         },
       },
       orderBy: { numero: 'asc' },
     });
 
-    const ventanaLogueoMs = 12 * 60 * 60 * 1000;
-    const limiteLogueo = new Date(ahora.getTime() - ventanaLogueoMs);
-
     const ventanillas = await Promise.all(
       ventanillasRaw.map(async (v) => {
-        // Sólo se listan los pedidos del cajero si está "activo" (logueado en
-        // las últimas 12h). Si está libre o inactivo, la sección aparece vacía.
-        const cajeroActivo =
-          v.cajero !== null && v.cajero.lastLogin !== null && v.cajero.lastLogin >= limiteLogueo;
+        // Sólo se listan los pedidos del cajero si está "activo": con señal de vida (sesión o
+        // latido) en los últimos 15 min (`core/estacion.util.ts`). Oct 2026: antes eran 12 HORAS, y
+        // una ventanilla cuyo cajero cerró la pestaña se quedaba "Esperando cliente" medio día.
+        // Si está libre o inactivo, la sección aparece vacía (la TV la pinta "Cerrada").
+        const cajeroActivo = operadorActivo(v.cajero, ahora);
         const pedidosRaw = cajeroActivo
           ? await this.prisma.pedido.findMany({
               where: {
@@ -78,37 +85,16 @@ export class CajeroMonitorService {
                 // F16: sin filtro de canal (los web también se cobran aquí).
                 modoEntrega: { not: ModoEntrega.DOMICILIO },
               },
-              select: {
-                id: true,
-                numeroPedido: true,
-                cajeroAsignadoAt: true,
-                fechaPedido: true,
-              },
+              select: { id: true, numeroPedido: true },
               orderBy: { cajeroAsignadoAt: 'asc' },
             })
           : [];
 
-        const detallePedidos = pedidosRaw.map((p) => {
-          const minutosAsignado = p.cajeroAsignadoAt
-            ? minutosEntre(p.cajeroAsignadoAt, ahora)
-            : null;
-          const minutos = minutosAsignado ?? minutosEntre(p.fechaPedido, ahora);
-          return {
-            id: p.id,
-            numeroPedido: p.numeroPedido,
-            cajeroAsignadoAt: p.cajeroAsignadoAt ? p.cajeroAsignadoAt.toISOString() : null,
-            // Dato informativo, NO urgencia (decisión D13).
-            minutosEnCola: minutos,
-            cajeroAsignadoNombre: v.cajero
-              ? `${v.cajero.nombre}${v.cajero.apellido ? ' ' + v.cajero.apellido : ''}`
-              : null,
-          };
-        });
+        const detallePedidos = pedidosRaw.map((p) => ({ id: p.id, numeroPedido: p.numeroPedido }));
 
         return {
           ventanillaId: v.id,
           numero: v.numero,
-          cajeroId: v.cajeroId,
           cajeroNombre: v.cajero
             ? `${v.cajero.nombre}${v.cajero.apellido ? ' ' + v.cajero.apellido : ''}`
             : null,
@@ -122,32 +108,25 @@ export class CajeroMonitorService {
     // 2) Cola sin asignar (PENDIENTE_PAGO + cajeroAsignadoId null).
     // F16: sin filtro de canal; se excluyen los domicilio (no se cobran en
     // ventanilla).
+    //
+    // Oct 2026: es la MISMA fila y el MISMO orden de turno que la consola (`cola-caja.util.ts`): las
+    // transferencias ya verificadas primero, luego quien llegó antes a caja. Antes se listaban por
+    // `fechaPedido`, así que la TV mostraba un orden distinto al que seguía la cajera.
+    //
+    // Y aparecen TODOS los de tienda en PENDIENTE_PAGO, de inmediato, paguen en caja o por
+    // transferencia y esté o no validada (decisión del dueño, 16-oct; sin `WHERE_COBRABLE`). Una
+    // primera versión ocultaba a quien esperaba a Tesorería, y el cliente que mostrador acababa de
+    // mandar a pagar no se veía en la pared: no sabía si su turno había entrado. La TV es pública:
+    // no distingue cómo paga cada quien, solo el folio. Domicilio nunca (`whereFilaDeCaja`).
     const colaRaw = await this.prisma.pedido.findMany({
-      where: {
-        tiendaId,
-        estado: EstadoPedido.PENDIENTE_PAGO,
-        modoEntrega: { not: ModoEntrega.DOMICILIO },
-        cajeroAsignadoId: null,
-      },
-      select: {
-        id: true,
-        numeroPedido: true,
-        fechaPedido: true,
-      },
-      orderBy: { fechaPedido: 'asc' },
+      where: whereFilaDeCaja(tiendaId),
+      select: { ...SELECT_ORDEN_COLA_CAJA, numeroPedido: true },
     });
 
-    const colaSinAsignar = colaRaw.map((p) => {
-      const minutos = minutosEntre(p.fechaPedido, ahora);
-      return {
-        id: p.id,
-        numeroPedido: p.numeroPedido,
-        cajeroAsignadoAt: null,
-        // Dato informativo, NO urgencia (decisión D13).
-        minutosEnCola: minutos,
-        cajeroAsignadoNombre: null,
-      };
-    });
+    const colaSinAsignar = ordenarFilaDeCaja(colaRaw).map((p) => ({
+      id: p.id,
+      numeroPedido: p.numeroPedido,
+    }));
 
     const totalEnCaja = ventanillas.reduce((acc, v) => acc + v.pedidosAsignados, 0);
 

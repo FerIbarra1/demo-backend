@@ -34,7 +34,20 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     ]);
 
     if (isApiKeyAuth) {
-      return true;
+      // Con `X-Agent-Key` es el agente: lo autoriza `ApiKeyGuard` y aquí no hay nada que hacer.
+      //
+      // Sin ella, el único otro camino que acepta `ApiKeyGuard` es un ADMIN con JWT (soporte
+      // manual, p. ej. "Marcar como pagado" desde el panel), y para eso hay que AUTENTICAR el
+      // token: `ApiKeyGuard` lee `request.user`, que solo existe si este guard lo puebla. Antes
+      // se devolvía `true` para toda ruta de API key, `request.user` quedaba vacío y un admin con
+      // sesión válida recibía 401 "requiere X-Agent-Key válida o JWT de ADMIN": el botón del
+      // panel no funcionaba desde que se separó la auth del agente. El rol ADMIN lo sigue
+      // exigiendo `ApiKeyGuard`; esto no abre la ruta a nadie más.
+      const request = context.switchToHttp().getRequest();
+      if (request?.headers?.['x-agent-key']) {
+        return true;
+      }
+      return super.canActivate(context);
     }
 
     return super.canActivate(context);

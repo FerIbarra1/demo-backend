@@ -19,11 +19,10 @@ export const PedidoCancelado = ({
 }: PedidoCanceladoProps) => (
   <PedidoEmailShell
     preview={`Tu pedido ${folioVisible(pedido)} fue cancelado`}
-    title={`Tu pedido ${folioVisible(pedido)} fue cancelado`}
-    greeting={`Hola, ${pedido.clienteNombre}. Te informamos que tu pedido ${folioVisible(pedido)} quedó cancelado.`}
+    title="Tu pedido fue cancelado"
+    greeting={`Hola, ${pedido.clienteNombre}. Te avisamos que tu pedido quedó cancelado.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
-    ctaLabel="Ver detalle"
     logoUrl={logoUrl}
     frontendUrl={frontendUrl}
     bodyExtras={
@@ -42,8 +41,8 @@ export const PedidoCancelado = ({
             lineHeight: '1.6',
           }}
         >
-          Si ya habías pagado, tu asesor de ventas te contactará para coordinar el reembolso o
-          dejarlo como saldo a favor en tu próxima compra.
+          Si ya habías pagado, nos pondremos en contacto contigo para coordinar la devolución de tu
+          dinero.
         </Text>
       </>
     }

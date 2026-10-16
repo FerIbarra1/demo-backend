@@ -21,6 +21,7 @@ function crearServicio(
     mostradores?: Mostrador[];
     usuario?: Record<string, unknown> | null;
     asignacionCount?: number;
+    llamados?: Array<{ id: number }>;
   } = {},
 ) {
   const mostradores = opts.mostradores ?? [];
@@ -48,7 +49,13 @@ function crearServicio(
     },
   };
 
+  const llamados = opts.llamados ?? [];
   const prisma = {
+    // Pedidos que el operador tenía LLAMADOS desde el mostrador que se suelta.
+    pedido: {
+      findMany: jest.fn().mockResolvedValue(llamados),
+      count: jest.fn().mockResolvedValue(llamados.length),
+    },
     usuario: { findUnique: jest.fn().mockResolvedValue(usuario) },
     tienda: { findUnique: jest.fn().mockResolvedValue({ id: 5 }) },
     mostrador: {
@@ -94,10 +101,11 @@ function crearServicio(
       typeof arg === 'function' ? arg(tx) : Promise.all(arg),
     ),
   };
-  const realtime = { emitToTienda: jest.fn() };
+  const realtime = { emitToTienda: jest.fn(), emitToUser: jest.fn() };
 
-  const svc = new MostradoresService(prisma as never, realtime as never);
-  return { svc, prisma, tx, realtime };
+  const estado = { cambiarEstado: jest.fn().mockResolvedValue({}) };
+  const svc = new MostradoresService(prisma as never, realtime as never, estado as never);
+  return { svc, prisma, tx, realtime, estado };
 }
 
 const m = (
@@ -261,13 +269,62 @@ describe('MostradoresService.liberar', () => {
   it('sin mostrador asignado es un no-op (cerrar sesión no debe fallar)', async () => {
     const { svc, prisma, realtime } = crearServicio({ mostradores: [m(1, 1)] });
 
-    await expect(svc.liberar(3, 5)).resolves.toEqual({ ok: true });
+    await expect(svc.liberar(3, 5)).resolves.toEqual({ ok: true, clientesRegresadosALaCola: 0 });
     expect(prisma.mostrador.update).not.toHaveBeenCalled();
     expect(realtime.emitToTienda).not.toHaveBeenCalled();
   });
+
+  it('el cliente que tenía LLAMADO vuelve a la cola por la máquina de estados (la TV no lo deja anunciado)', async () => {
+    const { svc, estado } = crearServicio({
+      mostradores: [m(1, 1, 3)],
+      llamados: [{ id: 70 }, { id: 71 }],
+    });
+
+    const r = await svc.liberar(3, 5);
+
+    expect(r.clientesRegresadosALaCola).toBe(2);
+    expect(estado.cambiarEstado).toHaveBeenCalledTimes(2);
+    expect(estado.cambiarEstado.mock.calls[0][0]).toBe(70);
+    expect(estado.cambiarEstado.mock.calls[0][1]).toMatchObject({ nuevoEstado: 'REVISADO' });
+    // Sin correo ("tu pedido ya está listo") para quien está de pie en la tienda.
+    expect(estado.cambiarEstado.mock.calls[0][3]).toMatchObject({ sinNotificar: true });
+  });
+
+  it('un pedido que ya cambió de estado no tumba la liberación', async () => {
+    const { svc, estado } = crearServicio({
+      mostradores: [m(1, 1, 3)],
+      llamados: [{ id: 70 }, { id: 71 }],
+    });
+    estado.cambiarEstado.mockRejectedValueOnce(new Error('Transición no permitida'));
+
+    const r = await svc.liberar(3, 5);
+
+    expect(r.clientesRegresadosALaCola).toBe(1);
+  });
 });
 
-describe('MostradoresService.resolverParaLlamar', () => {
+describe('MostradoresService.elegir — ocupado por otro', () => {
+  it('sin confirmación: 409 con un código que la pantalla reconoce y dice quién lo tiene', async () => {
+    const { svc } = crearServicio({ mostradores: [m(1, 1, 9)] });
+    await expect(svc.elegir(3, 5, 1)).rejects.toMatchObject({
+      response: { code: 'MOSTRADOR_OCUPADO' },
+    });
+  });
+
+  it('con `forzar` toma el control, avisa al que lo tenía y le devuelve a su cliente llamado', async () => {
+    const { svc, realtime, estado } = crearServicio({
+      mostradores: [m(1, 1, 9)],
+      llamados: [{ id: 70 }],
+    });
+
+    await svc.elegir(3, 5, 1, true);
+
+    expect(realtime.emitToUser).toHaveBeenCalledWith(9, 'mostrador.perdido', { numero: 1 });
+    expect(estado.cambiarEstado).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('MostradoresService.resolverParaLlamar — sin modo genérico', () => {
   it('devuelve el mostrador donde trabaja el operador', async () => {
     const { svc } = crearServicio({ mostradores: [m(1, 1), m(2, 2, 3)] });
     await expect(svc.resolverParaLlamar(3, 5)).resolves.toMatchObject({ id: 2, numero: 2 });
@@ -278,15 +335,43 @@ describe('MostradoresService.resolverParaLlamar', () => {
     await expect(svc.resolverParaLlamar(3, 5)).rejects.toThrow(/elige tu mostrador/i);
   });
 
-  it('en una tienda SIN mostradores devuelve null: llamar sigue funcionando como antes', async () => {
-    // Exigir al admin configurar un mostrador solo para poder usar "Llamar" rompería
-    // lo que ya funcionaba en una tienda de una sola mesa.
+  it('en una tienda SIN mostradores ya NO llama "sin número": pide al admin crearlos', async () => {
+    // Antes devolvía null y el operador trabajaba genérico. Ahora el mostrador es la estación que
+    // autoriza a atender, igual que la ventanilla del cajero.
     const { svc } = crearServicio();
-    await expect(svc.resolverParaLlamar(3, 5)).resolves.toBeNull();
+    await expect(svc.resolverParaLlamar(3, 5)).rejects.toThrow(/no tiene mostradores/i);
   });
 
   it('los mostradores inactivos no cuentan como configurados', async () => {
     const { svc } = crearServicio({ mostradores: [m(1, 1, null, false)] });
-    await expect(svc.resolverParaLlamar(3, 5)).resolves.toBeNull();
+    await expect(svc.resolverParaLlamar(3, 5)).rejects.toThrow(/no tiene mostradores/i);
+  });
+
+  it('el ADMIN queda exento: sin mostrador llama sin número', async () => {
+    const { svc } = crearServicio();
+    await expect(svc.resolverParaLlamar(3, 5, true)).resolves.toBeNull();
+  });
+});
+
+describe('MostradoresService.delOperadorConCarga — cuántos clientes regresarían al soltarlo', () => {
+  it('cuenta los clientes que el operador tiene llamados desde su mostrador', async () => {
+    const { svc, prisma } = crearServicio({
+      mostradores: [m(2, 2, 3)],
+      llamados: [{ id: 10 }, { id: 11 }],
+    });
+    await expect(svc.delOperadorConCarga(3, 5)).resolves.toMatchObject({
+      id: 2,
+      numero: 2,
+      clientesEnCurso: 2,
+    });
+    // Solo los EN_ATENCION de ESE mostrador: la misma regla con la que `liberar` los regresa.
+    expect(prisma.pedido.count).toHaveBeenCalledWith({
+      where: { estado: 'EN_ATENCION', llamadoMostradorId: 2 },
+    });
+  });
+
+  it('sin mostrador asignado es null (la consola entra como observador)', async () => {
+    const { svc } = crearServicio({ mostradores: [m(1, 1)] });
+    await expect(svc.delOperadorConCarga(3, 5)).resolves.toBeNull();
   });
 });

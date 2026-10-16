@@ -1,19 +1,13 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { EstadoPedido, CanalOrigen, Prisma } from '@prisma/client';
-import { minutosEntre } from '../pedidos/core/urgencia.util';
-import {
-  ESTADOS_ESPERA_CLIENTE,
-  ORDEN_COLA,
-  clientePresenteEnTienda,
-  minutosEsperando,
-  whereAusente,
-  wherePresente,
-} from '../pedidos/core/presencia.util';
+import { EstadoPedido, Prisma } from '@prisma/client';
+import { ORDEN_COLA, wherePresente } from '../pedidos/core/presencia.util';
 import {
   MonitorMostradorResponseDto,
   MonitorMostradorPedidoDto,
+  MonitorMostradorPuestoDto,
 } from './dto/monitor-mostrador.dto';
+import { operadorActivo } from '../pedidos/core/estacion.util';
 
 /**
  * F16 (sep 2026): monitor de mostrador (TV de la pared).
@@ -29,8 +23,12 @@ import {
  *   - WEB    → solo si el cliente avisó llegada (si no, podría estar en casa).
  *
  * NO calcula urgencia (decisión D13): en mostrador el pedido espera al CLIENTE.
- * Los pedidos ya liberados y pagados aparecen en `listosParaEntregar`, que es
- * informativo — el operador los ve para saber que hay entregas pendientes.
+ *
+ * Oct 2026: por PUESTOS (una tarjeta por mostrador, como la TV de caja) y reducido a folio +
+ * números (ver `monitor-mostrador.dto.ts`). Se quitaron los contadores `listosParaEntregar` y
+ * `sinCliente` y la lista de "sin recoger": la TV nunca los pintó, y llevaban nombres de clientes
+ * a una pantalla pública. La consola del operador los obtiene de sus propios endpoints
+ * (`/pedidos/mostrador/listos` y `/sin-aviso`).
  */
 @Injectable()
 export class MostradorMonitorService {
@@ -86,23 +84,14 @@ export class MostradorMonitorService {
       ...wherePresente(),
     };
 
-    const [colaRaw, atendiendoRaw, listosParaEntregar, sinClienteRaw] = await Promise.all([
+    // Oct 2026 (§9.4): la TV es PÚBLICA, así que cada consulta trae SOLO lo que la pantalla
+    // dibuja —el folio y a qué mostrador pasar—, no nombre, canal, monto ni fechas del cliente.
+    const [colaRaw, atendiendoRaw, mostradoresRaw] = await Promise.all([
       this.prisma.pedido.findMany({
         // La cola es solo REVISADO: un pedido ya llamado está en EN_ATENCION,
         // así que el estado por sí solo lo excluye.
         where: whereCola,
-        select: {
-          id: true,
-          numeroPedido: true,
-          clienteNombre: true,
-          canalOrigen: true,
-          total: true,
-          fechaPedido: true,
-          llegadaAnunciadaAt: true,
-          llegadaDescartadaAt: true,
-          presenteDesdeAt: true,
-          _count: { select: { items: true } },
-        },
+        select: { id: true, numeroPedido: true },
         // F22: "primero llegado, primero atendido" — el orden de llamada es el de
         // `ORDEN_COLA`, el MISMO de la consola y de `llamarSiguiente`.
         orderBy: ORDEN_COLA,
@@ -114,59 +103,59 @@ export class MostradorMonitorService {
         select: {
           id: true,
           numeroPedido: true,
-          clienteNombre: true,
-          canalOrigen: true,
-          total: true,
-          fechaPedido: true,
-          llegadaAnunciadaAt: true,
-          llegadaDescartadaAt: true,
-          presenteDesdeAt: true,
-          llamadoAt: true,
-          // F22: a qué mostrador pasa el cliente, y quién lo atiende.
+          llamadoMostradorId: true,
+          // F22: a qué mostrador pasa el cliente.
           llamadoMostrador: { select: { numero: true } },
-          llamadoPor: { select: { nombre: true, apellido: true } },
-          _count: { select: { items: true } },
         },
         orderBy: [{ llamadoAt: 'desc' }, { id: 'desc' }],
       }),
-      this.prisma.pedido.count({
-        where: {
-          tiendaId,
-          estado: { in: [EstadoPedido.PAGADO, EstadoPedido.ENVIADO] },
+      // Oct 2026: los puestos de la tienda (la TV es como la de caja: una tarjeta por mostrador).
+      this.prisma.mostrador.findMany({
+        where: { tiendaId, activa: true },
+        include: {
+          operador: {
+            select: { nombre: true, apellido: true, lastLogin: true, ultimoHeartbeat: true },
+          },
         },
-      }),
-      // F16 (§5.4 del plan): pedidos listos que NADIE va a recoger.
-      //
-      // El gate de D5 esconde los pedidos web hasta que el cliente avisa
-      // llegada, así que un pedido web en REVISADO sin aviso es invisible
-      // en la cola — y si el cliente nunca llega, se queda ahí para siempre sin
-      // que nadie lo note. Este contador es la señal para que el operador (o el
-      // admin) los persiga.
-      //
-      // Se cuentan con antigüedad para poder priorizar: los más viejos primero.
-      this.prisma.pedido.findMany({
-        // F22: incluye `ESPERANDO_APROBACION` (la bolsa también está apartada) y los
-        // de kiosko cuyo cliente se fue. Es el mismo predicado que la lista "Sin
-        // aviso" de la consola (`obtenerSinAviso`).
-        where: {
-          tiendaId,
-          estado: { in: ESTADOS_ESPERA_CLIENTE },
-          ...whereAusente(),
-        },
-        select: { id: true, numeroPedido: true, clienteNombre: true, fechaPedido: true },
-        orderBy: { fechaPedido: 'asc' },
+        orderBy: { numero: 'asc' },
       }),
     ]);
 
-    const cola: MonitorMostradorPedidoDto[] = colaRaw.map((p) => this.aDto(p, ahora));
-    const atendiendo: MonitorMostradorPedidoDto[] = atendiendoRaw.map((p) => this.aDto(p, ahora));
-
-    // F16 (§5.4): antigüedad de los pedidos que nadie va a recoger.
-    const sinCliente = sinClienteRaw.map((p) => ({
+    const cola: MonitorMostradorPedidoDto[] = colaRaw.map((p) => ({
       id: p.id,
       numeroPedido: p.numeroPedido,
-      clienteNombre: p.clienteNombre,
-      minutosEsperando: minutosEntre(p.fechaPedido, ahora),
+      mostradorNumero: null,
+    }));
+    const atendiendo: MonitorMostradorPedidoDto[] = atendiendoRaw.map((p) => ({
+      id: p.id,
+      numeroPedido: p.numeroPedido,
+      mostradorNumero: p.llamadoMostrador?.numero ?? null,
+    }));
+
+    // Oct 2026: lo llamado se reparte por mostrador. Quien tiene el folio es el puesto desde el que
+    // se llamó; un llamado sin puesto válido va aparte (`sinMostrador`) para no desaparecer.
+    const porPuesto = new Map<number, MonitorMostradorPedidoDto[]>();
+    const sinMostrador: MonitorMostradorPedidoDto[] = [];
+    const ids = new Set(mostradoresRaw.map((m) => m.id));
+    atendiendoRaw.forEach((raw, i) => {
+      const dto = atendiendo[i];
+      if (raw.llamadoMostradorId !== null && ids.has(raw.llamadoMostradorId)) {
+        const lista = porPuesto.get(raw.llamadoMostradorId) ?? [];
+        lista.push(dto);
+        porPuesto.set(raw.llamadoMostradorId, lista);
+      } else {
+        sinMostrador.push(dto);
+      }
+    });
+    const mostradores: MonitorMostradorPuestoDto[] = mostradoresRaw.map((m) => ({
+      mostradorId: m.id,
+      numero: m.numero,
+      operadorNombre: m.operador
+        ? `${m.operador.nombre}${m.operador.apellido ? ' ' + m.operador.apellido : ''}`
+        : null,
+      // "Abierto" = operador con señales de vida en los últimos 15 min (`core/estacion.util.ts`).
+      abierto: operadorActivo(m.operador, ahora),
+      atendiendo: porPuesto.get(m.id) ?? [],
     }));
 
     return {
@@ -175,60 +164,9 @@ export class MostradorMonitorService {
       tiendaNombre: tienda.nombre,
       cola,
       atendiendo,
-      contadores: {
-        enCola: cola.length,
-        atendiendo: atendiendo.length,
-        enTienda: cola.filter((c) => c.clienteEnTienda).length,
-        listosParaEntregar,
-        // F16: pedidos listos que nadie ha venido a recoger. Si este número
-        // crece, hay pedidos atorados que el gate de llegada está escondiendo.
-        sinCliente: sinCliente.length,
-      },
-      sinCliente,
-    };
-  }
-
-  /**
-   * Fila de la TV a partir de un pedido. La comparten la cola y el panel
-   * "Atendiendo" — si divergieran, el mismo pedido se vería distinto según en
-   * qué panel esté.
-   */
-  private aDto(
-    p: {
-      id: number;
-      numeroPedido: string;
-      clienteNombre: string;
-      canalOrigen: CanalOrigen;
-      total: Prisma.Decimal;
-      fechaPedido: Date;
-      llegadaAnunciadaAt: Date | null;
-      llegadaDescartadaAt: Date | null;
-      presenteDesdeAt: Date | null;
-      llamadoMostrador?: { numero: number } | null;
-      llamadoPor?: { nombre: string; apellido: string | null } | null;
-      _count: { items: number };
-    },
-    ahora: Date,
-  ): MonitorMostradorPedidoDto {
-    return {
-      id: p.id,
-      numeroPedido: p.numeroPedido,
-      clienteNombre: p.clienteNombre,
-      canalOrigen: p.canalOrigen,
-      itemsCount: p._count.items,
-      total: Number(p.total),
-      fechaPedido: p.fechaPedido.toISOString(),
-      minutosEnCola: minutosEntre(p.fechaPedido, ahora),
-      llegadaAnunciadaAt: p.llegadaAnunciadaAt ? p.llegadaAnunciadaAt.toISOString() : null,
-      // F22: minutos desde que el cliente está esperando EN la tienda (hora del
-      // pedido para kiosko, del aviso para web), no desde que el pedido existe.
-      esperandoDesdeMin: minutosEsperando(p, ahora.getTime()),
-      clienteEnTienda: clientePresenteEnTienda(p),
-      // F22: solo en el panel "Atendiendo". La TV dice "Pasa al mostrador N".
-      mostradorNumero: p.llamadoMostrador?.numero ?? null,
-      operadorNombre: p.llamadoPor
-        ? `${p.llamadoPor.nombre}${p.llamadoPor.apellido ? ' ' + p.llamadoPor.apellido : ''}`
-        : null,
+      mostradores,
+      sinMostrador,
+      contadores: { enCola: cola.length, atendiendo: atendiendo.length },
     };
   }
 }

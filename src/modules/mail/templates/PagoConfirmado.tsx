@@ -19,7 +19,7 @@ export const PagoConfirmado = ({
   <PedidoEmailShell
     preview={`Pago confirmado de tu pedido ${folioVisible(pedido)}`}
     title={`¡Pago confirmado!`}
-    greeting={`Hola, ${pedido.clienteNombre}. Recibimos el pago de tu pedido ${folioVisible(pedido)}.`}
+    greeting={`Hola, ${pedido.clienteNombre}. Ya registramos el pago de tu pedido.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     logoUrl={logoUrl}

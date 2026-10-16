@@ -1,5 +1,5 @@
 import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
-import { Prisma, EstadoPedido, EstadoPropuesta, RolUsuario } from '@prisma/client';
+import { Prisma, EstadoPedido, EstadoPropuesta, EstadoSurtido, RolUsuario } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PedidoStateService } from '../pedidos/core/pedido-state.service';
 import { PedidoAccessService } from '../pedidos/core/pedido-access.service';
@@ -7,14 +7,23 @@ import { ReposicionService } from '../pedidos/reposicion/reposicion.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import { recalcularTotalesPedido } from '../pedidos/core/totales.util';
 import { construirItemPedido } from '../pedidos/core/item-pedido.util';
-import { datosDeRetiroPorDecision } from '../pedidos/core/cancelacion-linea.util';
-import { calcularAjusteDeCantidad } from '../pedidos/core/ajuste-cantidad.util';
+import {
+  datosDeReposicion,
+  datosDeRetiroPorDecision,
+  sePuedeReponer,
+} from '../pedidos/core/cancelacion-linea.util';
+import {
+  ajusteNecesitaBodega,
+  calcularAjusteDeCantidad,
+  piezasEnLaBolsa,
+} from '../pedidos/core/ajuste-cantidad.util';
 import { PreciosService } from '../precios/precios.service';
 import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../precios/precio-lista.util';
 import { ItemAjusteDto } from './dto/accion-mostrador.dto';
 import { KioskoLlegadaService } from '../kiosko/kiosko-llegada.service';
 import { PresenciaService } from '../pedidos/core/presencia.service';
 import { MostradoresService } from '../mostradores/mostradores.service';
+import { ESTADOS_ACTIVOS } from '../pagos/transferencia/reglas';
 import {
   ESTADOS_ESPERA_CLIENTE,
   ORDEN_COLA,
@@ -100,7 +109,13 @@ export class MostradorService {
     // auditar cuántas veces se salta el gate.
     const completo = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      select: { canalOrigen: true, llegadaAnunciadaAt: true, llegadaDescartadaAt: true },
+      select: {
+        numeroPedido: true,
+        tiendaId: true,
+        canalOrigen: true,
+        llegadaAnunciadaAt: true,
+        llegadaDescartadaAt: true,
+      },
     });
 
     // F18 (oct 2026): GUARD de propuesta pendiente.
@@ -131,7 +146,7 @@ export class MostradorService {
     const sufijoAviso = clientePresente ? '' : ' (sin aviso de llegada del cliente)';
     const sufijoNota = nota ? ` — ${nota}` : '';
 
-    return this.pedidoState.cambiarEstado(
+    const actualizado = await this.pedidoState.cambiarEstado(
       pedidoId,
       {
         nuevoEstado: EstadoPedido.PENDIENTE_PAGO,
@@ -145,24 +160,82 @@ export class MostradorService {
         invalidarMonitor: true,
       },
     );
+
+    // Oct 2026: a dónde va el cliente a pagar. La transición ya confirmó: si esto falla, el
+    // pedido igual está en PENDIENTE_PAGO y la operadora solo pierde el dato del toast.
+    const destinoPago = await this.destinoDePago(pedidoId);
+    if (completo) {
+      // La TV de mostrador es una pantalla PÚBLICA que ve todo el mundo: el aviso es el mismo
+      // para todos ("A pagar → pasa a CAJA") y NO revela cómo paga cada cliente. Una primera
+      // versión mandaba `destinoPago` aquí para pintar "Transfiere"; el dueño lo quitó (16-oct):
+      // el evento va a la sala de la tienda y lo recibe la TV, así que lo que lleve se ve en la
+      // pared. Solo folio.
+      this.realtime.emitToTienda(completo.tiendaId, 'pedido.enviado-a-pagar', {
+        id: pedidoId,
+        numeroPedido: completo.numeroPedido,
+      });
+    }
+    // `destinoPago` SÍ viaja en la respuesta HTTP: es para el toast de la operadora, privado.
+    return { ...actualizado, destinoPago };
   }
 
   /**
-   * `REVISADO → EN_REVISION`. El cliente quiere cambios: el pedido vuelve a
-   * la cola de bodega a que se surta lo nuevo.
+   * A dónde paga el cliente un pedido que acaba de pasar a PENDIENTE_PAGO: `TRANSFERENCIA` si ya
+   * se le emitieron los datos (eligió transferencia al pedir y había cuenta bancaria) y `CAJA` en
+   * cualquier otro caso. Solo se le dice a la operadora (respuesta HTTP); nunca a una TV.
+   */
+  private async destinoDePago(pedidoId: number): Promise<'CAJA' | 'TRANSFERENCIA'> {
+    try {
+      const pago = await this.prisma.pedidoPagoTransferencia.findFirst({
+        where: { pedidoId, estado: { in: [...ESTADOS_ACTIVOS] } },
+        select: { id: true },
+      });
+      return pago ? 'TRANSFERENCIA' : 'CAJA';
+    } catch (err) {
+      this.logger.warn(
+        `Pedido ${pedidoId}: no se pudo consultar el destino de pago (${(err as Error).message})`,
+      );
+      return 'CAJA';
+    }
+  }
+
+  /**
+   * El cliente quiere cambios. A dónde va el pedido depende de QUÉ cambia
+   * (oct 2026, propuestas — decisión 4 del dueño):
    *
-   * Fase 1 solo registra la intención (la nota). La Fase 4 agrega la edición
-   * real de items (agregar/quitar/cambiar cantidades) dentro de `efectos`.
+   *   - Hay algo que SURTIR (un producto agregado, o una cantidad que sube por
+   *     encima de lo que hay en la bolsa) → `EN_REVISION`: vuelve a la cola de
+   *     bodega SIN ASIGNAR, que verifica lo nuevo contra el anaquel.
+   *   - El cliente solo QUITA o BAJA piezas → se resuelve EN EL LUGAR: el pedido
+   *     se queda en el área de entrega (`REVISADO`, o `EN_ATENCION` si ya lo
+   *     llamaron) y las piezas quitadas pasan a REPOSICIÓN. El operador las saca de
+   *     la bolsa enfrente del cliente; lo que falta es devolverlas al anaquel, y
+   *     para eso no hace falta que el pedido pase por la cola de bodega mientras el
+   *     cliente espera de pie. Un pedido que esperaba aprobación
+   *     (`ESPERANDO_APROBACION`) pasa a `REVISADO`: el cliente ya está enfrente.
    *
-   * `asignacion: 'limpiar'` es obligatorio: el caller es el OPERADOR, no un
-   * bodeguero. Con 'caller' el pedido quedaría asignado a un usuario de
-   * mostrador, invisible en el monitor de bodega y bloqueado para todos los
-   * bodegueros. `cambiarEstado` exige que sea explícito justo por esto.
+   * Antes SIEMPRE iba a bodega, y el bodeguero sacaba las piezas con el checklist
+   * de retiro. Esto revierte esa regla solo para mostrador; el ajuste de ventas
+   * conserva el checklist (ahí el cliente no está esperando).
+   *
+   * Si el ajuste además agrega o sube algo, viaja a bodega y las piezas quitadas
+   * igual van a reposición: la regla del piso es "lo que quitas, lo sacas tú",
+   * sin depender de si la tanda trae otra cosa. `piezasRetiradas` se suma en el
+   * momento para que el checklist de bodega no las vuelva a pedir.
+   *
+   * Sin `items` (solo la nota) el comportamiento es el de la Fase 1: bodega mira el
+   * pedido tal cual. Lo mismo si todos los items son `completo`: no hay nada
+   * concreto que aplicar, y mandar el pedido a bodega es lo conservador.
+   *
+   * `asignacion: 'limpiar'` es obligatorio al ir a bodega: el caller es el
+   * OPERADOR, no un bodeguero. Con 'caller' el pedido quedaría asignado a un
+   * usuario de mostrador, invisible en el monitor de bodega y bloqueado para todos
+   * los bodegueros. `cambiarEstado` exige que sea explícito justo por esto.
    *
    * `reloj: 'reanudar'` (no 'pausar'): el pedido vuelve a ser tarea de bodega,
    * así que el reloj de atención arranca un turno nuevo acumulando lo previo.
    * Con 'pausar' el pedido volvería con el reloj congelado y la urgencia
-   * mentiría.
+   * mentiría. En el lugar el reloj no se toca: bodega no interviene.
    *
    * Fase 4 (sep 2026): acepta los cambios de items del editor POS. Se aplican
    * DENTRO de la transacción de la transición (`efectos`), así que el pedido no
@@ -219,6 +292,29 @@ export class MostradorService {
       : 'lista1';
 
     /**
+     * A dónde va el pedido (oct 2026): se decide ANTES de la transacción.
+     *
+     * Hay que saberlo antes porque `cambiarEstado` necesita el destino para abrir la
+     * transición, y los `efectos` que aplican los cambios corren dentro de ella —
+     * es la misma razón por la que `aprobarPropuestaVentas` termina con dos
+     * transiciones en commits separados. `ajusteNecesitaBodega` usa la misma
+     * función que `aplicarAjuste` para decidir qué se escribe, así que no puede
+     * contradecirse con él.
+     */
+    const hayCambiosReales = hayCambios && items!.some((i) => i.tipo !== 'completo');
+    const vaABodega = !hayCambiosReales || ajusteNecesitaBodega(pedidoCompleto.items, items!);
+
+    // En el lugar: el pedido se queda donde está, salvo el que esperaba aprobación,
+    // que pasa a REVISADO (el cliente ya está enfrente). Ver el docblock.
+    const estadoActual = pedidoCompleto.estado;
+    const destino = vaABodega
+      ? EstadoPedido.EN_REVISION
+      : estadoActual === EstadoPedido.ESPERANDO_APROBACION
+        ? EstadoPedido.REVISADO
+        : estadoActual;
+    const yaEstaEnDestino = destino === estadoActual;
+
+    /**
      * La observación del historial se construye DESPUÉS de aplicar los cambios.
      *
      * F21 (oct 2026): antes se armaba aquí, con
@@ -228,13 +324,16 @@ export class MostradorService {
      * `items.length` (los cambios PROPUESTOS) y nunca los realmente aplicados.
      * Un ajuste que pedía 5 cambios y aplicaba 2 quedaba auditado como 5.
      *
-     * Ahora la observación se calcula dentro de la transacción, donde el
-     * resultado ya se conoce, y se pasa por referencia mutable — el mismo patrón
-     * que `cambios` en `confirmarSurtido`.
+     * Oct 2026: el arreglo de F21 no funcionaba. `observacion` se copiaba al
+     * objeto del DTO por VALOR al llamar a `cambiarEstado`, así que la
+     * reasignación de los `efectos` nunca llegaba al historial (que se escribe
+     * después y lee `dto.observacion`). Ahora el DTO la lee con un getter: la
+     * transición la consulta cuando escribe la fila, ya con el conteo real.
      */
     let observacion = hayCambios
       ? `Ajuste en mostrador por ${usuario.nombre}: ${nota}`
       : `Ajuste solicitado en mostrador por ${usuario.nombre}: ${nota}`;
+    let piezasAReposicion = 0;
 
     /**
      * F21 (oct 2026): el ajuste de mostrador REGISTRA LA LLEGADA del cliente.
@@ -260,14 +359,28 @@ export class MostradorService {
     const resultado = await this.pedidoState.cambiarEstado(
       pedidoId,
       {
-        nuevoEstado: EstadoPedido.EN_REVISION,
-        observacion,
+        nuevoEstado: destino,
+        // Getter, no valor: ver el comentario de `observacion` arriba.
+        get observacion() {
+          return observacion;
+        },
       },
       usuario,
       {
-        asignacion: 'limpiar',
-        reloj: 'reanudar',
+        // A bodega: sin asignar y con el reloj corriendo (ver el docblock). En el
+        // lugar bodega no interviene, así que ni la asignación ni el reloj se tocan.
+        asignacion: vaABodega ? 'limpiar' : 'mantener',
+        reloj: vaABodega ? 'reanudar' : 'mantener',
         invalidarMonitor: true,
+        // En el lugar el destino suele ser el estado que el pedido YA tiene
+        // (REVISADO o EN_ATENCION): no hay transición, solo `efectos`. Sin esto
+        // `cambiarEstado` lanzaba "Transición no permitida: REVISADO → REVISADO".
+        // EN_ATENCION → EN_ATENCION además conserva la llamada: ver
+        // `ejecutarCambio`, que ya no limpia `llamadoAt` en este camino.
+        permitirMismoEstado: !vaABodega,
+        // El cliente está de pie en el mostrador: el correo de "tu pedido ya está
+        // listo en tienda" (ESPERANDO_APROBACION → REVISADO) sería ruido.
+        sinNotificar: !vaABodega,
         // Oct 2026: los efectos corren SIEMPRE, no solo cuando hay cambios de
         // items.
         //
@@ -297,17 +410,47 @@ export class MostradorService {
           // transicionó a EN_REVISION y bodega lo re-surtirá tal cual.
           if (!hayCambios) return;
 
-          const cambios = await this.aplicarAjuste(tx, pedidoCompleto, items!, columnaLista);
+          const { cambios, quitadas } = await this.aplicarAjuste(
+            tx,
+            pedidoCompleto,
+            items!,
+            columnaLista,
+          );
           // F21: el número REAL de cambios aplicados, no los propuestos. Ver el
           // comentario de `observacion` arriba.
-          observacion = `Ajuste en mostrador por ${usuario.nombre}: ${nota} (${cambios.length} cambio(s))`;
-          // Oct 2026: aquí NO se crea lista de reposición. Las prendas que el
-          // ajuste quitó están en la bolsa del área de entrega y el pedido
-          // vuelve a bodega: el bodeguero las saca con el checklist de retiro y
-          // las regresa al anaquel él mismo. La reposición es solo de pedidos
-          // cancelados o rechazados (F17 la creaba aquí, y el bodeguero
-          // acomodaba la misma mercancía dos veces: una al ajustar y otra al
-          // confirmar la lista).
+          observacion =
+            `Ajuste en mostrador por ${usuario.nombre}: ${nota} (${cambios.length} cambio(s))` +
+            (vaABodega ? '' : ' — resuelto en el área de entrega, sin pasar por bodega');
+
+          // Oct 2026 (decisión 4): lo que el operador quitó pasa a REPOSICIÓN. Las
+          // sacó él de la bolsa enfrente del cliente y nadie más las va a regresar
+          // al anaquel. Va en la misma transacción que el ajuste: o quedan los dos,
+          // o ninguno (mercancía fuera de la bolsa sin nadie que la devuelva).
+          //
+          // Esto revierte para mostrador la regla "un ajuste NO genera
+          // reposición". Aquello sigue valiendo para ventas, donde el pedido vuelve
+          // a bodega y el bodeguero las saca y las regresa él mismo.
+          if (quitadas.length > 0) {
+            await this.reposicion.registrarQuitadasEnMostrador(tx, pedidoId, quitadas);
+            piezasAReposicion = quitadas.reduce((a, q) => a + q.cantidad, 0);
+          }
+
+          // `cambiarEstado` NO escribe historial cuando el estado no cambió, y aquí
+          // sí pasó algo que hay que poder auditar: el operador modificó un pedido.
+          // Se escribe a mano, con el texto de lo que ocurrió de verdad. Mismo
+          // patrón que `aprobarPropuestaBodega`.
+          if (yaEstaEnDestino) {
+            await tx.historialPedido.create({
+              data: {
+                pedidoId,
+                estadoAnterior: destino,
+                estadoNuevo: destino,
+                observacion,
+                usuarioId: usuario.userId,
+                usuarioNombre: usuario.nombre,
+              },
+            });
+          }
         },
       },
     );
@@ -330,7 +473,26 @@ export class MostradorService {
       );
     }
 
-    return resultado;
+    // Bodega tiene que enterarse de que hay mercancía por devolver al anaquel. La
+    // consola de bodega se refresca con `pedido.estado`, pero cuando el pedido se
+    // queda donde está (REVISADO → REVISADO, EN_ATENCION → EN_ATENCION) la
+    // transición NO lo emite — no hubo cambio de estado — y la lista y el badge de
+    // reposición se quedarían con la foto vieja hasta un F5. Por eso el evento
+    // propio. Después del commit, como todo lo externo: emitirlo dentro de la
+    // transacción avisaría de un ajuste que un rollback podría deshacer.
+    //
+    // El frontend lo escucha en `bodega/page.tsx` y en `bodega/reposicion/page.tsx`.
+    if (piezasAReposicion > 0) {
+      this.realtime.emitToTienda(pedidoCompleto.tiendaId, 'reposicion.creada', {
+        pedidoId,
+        piezas: piezasAReposicion,
+      });
+    }
+
+    // `vaABodega` y `piezasAReposicion` son lo que el frontend necesita para decir la
+    // verdad en el aviso ("enviado a bodega" vs "se aplicó aquí"). Se agregan al
+    // pedido en vez de envolverlo para no romper a quien ya lee sus campos.
+    return { ...resultado, vaABodega, piezasAReposicion };
   }
 
   /**
@@ -348,14 +510,22 @@ export class MostradorService {
    * Los items nuevos nacen en `PENDIENTE` con `original: false`: nadie los ha
    * verificado contra el anaquel, y ese flag es lo que el monitor de bodega usa
    * para marcar el pedido como "vino con cambios" (§3.7 del plan).
+   *
+   * Devuelve además las piezas que el operador QUITÓ de la bolsa (`quitadas`): un
+   * item que sale del pedido (todo lo que había en la bolsa) o una cantidad que
+   * baja (el sobrante). Esas piezas se suman a `piezasRetiradas` AQUÍ, en el mismo
+   * update que las quita — son piezas que el operador ya sacó, y sin esto el
+   * checklist de retiro de bodega se las volvería a pedir (`piezasPendientesDeRetiro`
+   * las vería como "sobrantes por sacar"). El caller las manda a reposición.
    */
   private async aplicarAjuste(
     tx: Prisma.TransactionClient,
     pedido: { id: number; tiendaId: number; descuento: Prisma.Decimal; impuestos: Prisma.Decimal },
     items: ItemAjusteDto[],
     columnaLista: ColumnaLista,
-  ): Promise<string[]> {
+  ): Promise<{ cambios: string[]; quitadas: Array<{ itemId: number; cantidad: number }> }> {
     const cambios: string[] = [];
+    const quitadas: Array<{ itemId: number; cantidad: number }> = [];
     const idsActuales = new Set(
       (
         await tx.itemPedido.findMany({
@@ -413,15 +583,60 @@ export class MostradorService {
         );
       }
 
+      if (it.tipo === 'reponer') {
+        // Oct 2026 (decisión 3): una línea que bodega no encontró vuelve al pedido.
+        // Se vuelve a comprobar DENTRO de la transacción: `validarAjuste` corrió
+        // antes y el estado pudo cambiar.
+        const previo = await tx.itemPedido.findUnique({
+          where: { id: it.itemId },
+          select: {
+            precioUnitario: true,
+            cancelada: true,
+            estadoSurtido: true,
+            cantidadSurtida: true,
+          },
+        });
+        if (!previo || !sePuedeReponer(previo)) {
+          throw new BadRequestException(
+            `El item ${it.itemId} no se puede reponer: solo vuelven las líneas que bodega ` +
+              'marcó sin existencia.',
+          );
+        }
+        const cantidad = Math.max(1, it.cantidad ?? 1);
+        // Nace como una línea que nadie ha visto en el anaquel: bodega la verifica.
+        // `cantidadPedida` no se toca (sigue siendo lo que el cliente pidió).
+        await tx.itemPedido.update({
+          where: { id: it.itemId },
+          data: {
+            ...datosDeReposicion(),
+            cantidad,
+            subtotal: new Prisma.Decimal(previo.precioUnitario).mul(cantidad),
+          },
+        });
+        cambios.push(`Item #${it.itemId} repuesto (${cantidad} pzas, vuelve a bodega a surtir)`);
+        continue;
+      }
+
       if (it.tipo === 'no-disponible') {
         // Se lee el estado físico ANTES de cancelar para conservarlo (F20): el
         // hallazgo de bodega sigue siendo cierto y es lo que el checklist de
         // retiro usa para saber cuánto sacar de la bolsa.
         const previo = await tx.itemPedido.findUnique({
           where: { id: it.itemId },
-          select: { cantidadSurtida: true, cantidad: true, estadoSurtido: true },
+          select: {
+            cantidadSurtida: true,
+            cantidad: true,
+            estadoSurtido: true,
+            piezasRetiradas: true,
+          },
         });
         const piezasEnBolsa = previo?.cantidadSurtida ?? 0;
+        // Lo que de verdad SIGUE en la bolsa: lo que un ajuste anterior ya sacó no
+        // se vuelve a contar (ya está en el anaquel, o en la lista de reposición).
+        const piezasQuitadas = piezasEnLaBolsa({
+          cantidadSurtida: piezasEnBolsa,
+          piezasRetiradas: previo?.piezasRetiradas,
+        });
 
         // F20 (oct 2026): se CONSERVA el estado físico.
         //
@@ -435,11 +650,15 @@ export class MostradorService {
         // filtran `cancelada` primero (ver `cancelacion-linea.util.ts`).
         await tx.itemPedido.update({
           where: { id: it.itemId },
-          data: datosDeRetiroPorDecision({
-            estadoSurtido: previo?.estadoSurtido ?? 'NO_DISPONIBLE',
-            cantidadSurtida: piezasEnBolsa,
-          }),
+          data: {
+            ...datosDeRetiroPorDecision({
+              estadoSurtido: previo?.estadoSurtido ?? 'NO_DISPONIBLE',
+              cantidadSurtida: piezasEnBolsa,
+            }),
+            ...(piezasQuitadas > 0 ? { piezasRetiradas: { increment: piezasQuitadas } } : {}),
+          },
         });
+        if (piezasQuitadas > 0) quitadas.push({ itemId: it.itemId, cantidad: piezasQuitadas });
         cambios.push(`Item #${it.itemId} quitado`);
         continue;
       }
@@ -483,9 +702,18 @@ export class MostradorService {
           where: { id: it.itemId },
           data: {
             ...ajuste.data,
+            // Oct 2026: si BAJA, el sobrante lo saca el operador ahora mismo. Se
+            // suma al contador en el mismo update; al SUBIR `ajuste.data` ya lo
+            // reinicia a 0 junto con `cantidadSurtida`.
+            ...(ajuste.piezasSobrantes > 0
+              ? { piezasRetiradas: { increment: ajuste.piezasSobrantes } }
+              : {}),
             subtotal: new Prisma.Decimal(item.precioUnitario).mul(cantidad),
           },
         });
+        if (ajuste.piezasSobrantes > 0) {
+          quitadas.push({ itemId: it.itemId, cantidad: ajuste.piezasSobrantes });
+        }
         cambios.push(
           `Item #${it.itemId}: ${item.cantidad} → ${cantidad} pzas` +
             (ajuste.subeLaCantidad ? ' (vuelve a bodega a surtir)' : ''),
@@ -506,7 +734,7 @@ export class MostradorService {
     }
 
     await recalcularTotalesPedido(tx, pedido);
-    return cambios;
+    return { cambios, quitadas };
   }
 
   /**
@@ -515,7 +743,12 @@ export class MostradorService {
    */
   private validarAjuste(
     items: ItemAjusteDto[],
-    itemsActuales: Array<{ id: number; cancelada: boolean }>,
+    itemsActuales: Array<{
+      id: number;
+      cancelada: boolean;
+      estadoSurtido: EstadoSurtido;
+      cantidadSurtida: number;
+    }>,
   ): void {
     const ids = new Set(itemsActuales.map((i) => i.id));
 
@@ -536,6 +769,18 @@ export class MostradorService {
       }
       if (it.tipo === 'parcial' && (it.cantidad == null || it.cantidad < 1)) {
         throw new BadRequestException('Un ajuste parcial requiere una cantidad mayor a 0.');
+      }
+      if (it.tipo === 'reponer') {
+        if (it.cantidad == null || it.cantidad < 1) {
+          throw new BadRequestException('Reponer una línea requiere una cantidad mayor a 0.');
+        }
+        const actual = itemsActuales.find((i) => i.id === it.itemId);
+        if (!actual || !sePuedeReponer(actual)) {
+          throw new BadRequestException(
+            `El item ${it.itemId} no se puede reponer: solo vuelven las líneas que bodega ` +
+              'marcó sin existencia.',
+          );
+        }
       }
     }
   }
@@ -955,7 +1200,11 @@ export class MostradorService {
     // varios operadores, un "pasa a mostrador" a secas deja al cliente sin saber a
     // quién acercarse. Tira 400 si la tienda tiene mostradores y el operador no
     // eligió el suyo; devuelve null en una tienda sin mostradores configurados.
-    const mostrador = await this.mostradores.resolverParaLlamar(usuario.userId, completo.tiendaId);
+    const mostrador = await this.mostradores.resolverParaLlamar(
+      usuario.userId,
+      completo.tiendaId,
+      usuario.rol === RolUsuario.ADMIN,
+    );
 
     // `UserContext` no trae apellido (viene del JWT), así que el nombre del
     // operador es el que ya está disponible.
@@ -1042,7 +1291,7 @@ export class MostradorService {
    * `itemsVerificados: number[]` al body y persistirlo en
    * `HistorialPedido.observacion`.
    */
-  async entregar(pedidoId: number, usuario: UserContext) {
+  async entregar(pedidoId: number, usuario: UserContext, recogioNombre?: string) {
     // 1. Cargar y validar acceso (ADMIN cross-tienda, MOSTRADOR sólo su tienda).
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
@@ -1053,17 +1302,63 @@ export class MostradorService {
       );
     }
 
-    // 3. Delegar al servicio central para transición + historial + realtime
+    // 3. Quién recoge. Oct 2026 (16-oct): a la tienda llegan mandaderos y familiares, no solo el
+    //    titular, y `entregar` no dejaba constancia de quién se llevó la mercancía. El nombre solo
+    //    se guarda si NO es el titular: el del titular ya está en `clienteNombre`, y repetirlo
+    //    en el correo ("Recogió: <el mismo>") sería ruido.
+    const titular = recogioNombre?.trim()
+      ? ((
+          await this.prisma.pedido.findUnique({
+            where: { id: pedidoId },
+            select: { clienteNombre: true },
+          })
+        )?.clienteNombre ?? '')
+      : '';
+    const recogio = this.normalizarRecogio(recogioNombre, titular);
+
+    // 4. Delegar al servicio central para transición + historial + realtime
     //    + notificación al cliente (ENTREGADO). La observación incluye el
     //    rol para distinguir en el historial si fue entregado en mostrador
     //    o por bodega en una migración.
+    //
+    //    `recogioNombre` se escribe en la MISMA transacción que la transición (`efectos`): el correo
+    //    de "entregado" relee el pedido DESPUÉS del commit y tiene que encontrarlo ya guardado.
     return this.pedidoState.cambiarEstado(
       pedidoId,
       {
         nuevoEstado: EstadoPedido.ENTREGADO,
-        observacion: `Entregado en mostrador por ${usuario.nombre}`,
+        observacion:
+          `Entregado en mostrador por ${usuario.nombre}` +
+          (recogio ? ` — lo recogió ${recogio} (no es el titular)` : ''),
       },
       usuario,
+      {
+        efectos: async (tx) => {
+          if (recogio) {
+            await tx.pedido.update({ where: { id: pedidoId }, data: { recogioNombre: recogio } });
+          }
+        },
+      },
     );
+  }
+
+  /**
+   * El nombre de quien recoge, limpio: sin espacios de más, mínimo 3 letras, y `null` si no hay o si
+   * es el mismo titular (sin acentos ni mayúsculas, para que "jose perez" no se anote como otra
+   * persona que "José Pérez").
+   */
+  private normalizarRecogio(nombre: string | undefined, titular: string): string | null {
+    const limpio = (nombre ?? '').replace(/\s+/g, ' ').trim();
+    if (!limpio) return null;
+    if (limpio.length < 3) {
+      throw new BadRequestException('Escribe el nombre completo de quien recoge el pedido.');
+    }
+    const plano = (t: string) =>
+      t
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .trim();
+    return plano(limpio) === plano(titular) ? null : limpio;
   }
 }

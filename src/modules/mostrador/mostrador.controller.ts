@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query, ParseIntPipe } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { MostradorService } from './mostrador.service';
 import { MostradorQueryService } from './mostrador-query.service';
@@ -8,10 +8,12 @@ import {
   CancelarPedidoDto,
   CancelarVencidosDto,
   EnviarAPagarDto,
+  EntregarPedidoDto,
 } from './dto/accion-mostrador.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
+import { EstacionGuard, RequiereEstacion } from '../../common/guards/estacion.guard';
 
 /**
  * Consola del Mostrador (jul 2026).
@@ -32,6 +34,7 @@ import { RolUsuario } from '@prisma/client';
  * fricción operativa (el cliente llega y el primer mostrador libre lo atiende).
  */
 @ApiTags('Pedidos - Mostrador')
+@UseGuards(EstacionGuard)
 @Controller('pedidos/mostrador')
 @Roles(RolUsuario.MOSTRADOR, RolUsuario.ADMIN)
 @ApiBearerAuth()
@@ -151,6 +154,7 @@ export class MostradorController {
    * segmentos distintos a `:id/...`, así que no choca con las rutas de pedido.
    */
   @Post('cancelar-vencidos')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'F22: cancela pedidos vencidos (días sin recoger y sin respuesta). Revalida cada ' +
@@ -203,11 +207,18 @@ export class MostradorController {
   }
 
   @Post(':id/entregar')
+  @RequiereEstacion()
   @ApiOperation({
-    summary: 'PAID|SHIPPED → COMPLETED. Confirma que el cliente recogió el pedido en tienda.',
+    summary:
+      'PAGADO|ENVIADO → ENTREGADO. Confirma que se recogió el pedido en tienda; `recogioNombre` (opcional) ' +
+      'deja constancia de quién lo recogió cuando NO es el titular.',
   })
-  async entregar(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
-    return this.mostradorService.entregar(id, user);
+  async entregar(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: any,
+    @Body() dto: EntregarPedidoDto,
+  ) {
+    return this.mostradorService.entregar(id, user, dto?.recogioNombre);
   }
 
   // ------------------------------------------------------------------
@@ -215,6 +226,7 @@ export class MostradorController {
   // ------------------------------------------------------------------
 
   @Post(':id/llamar')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'F16: manda a llamar al cliente. NO cambia el estado — emite ' +
@@ -233,6 +245,7 @@ export class MostradorController {
    * falla con 400.
    */
   @Post('llamar-siguiente')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'Oct 2026: manda a llamar al primer pedido de la cola de revisión ' +
@@ -243,6 +256,7 @@ export class MostradorController {
   }
 
   @Post(':id/no-se-presento')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'F22: el cliente llamado no se presentó. Pasa al FINAL de la cola (a la 2ª vez se ' +
@@ -253,6 +267,7 @@ export class MostradorController {
   }
 
   @Post(':id/descartar-llegada')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'F16: descarta un aviso de llegada falso (el cliente no estaba). Funciona con ' +
@@ -264,6 +279,7 @@ export class MostradorController {
   }
 
   @Post(':id/marcar-llegada')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'Oct 2026: el operador marca la llegada en nombre del cliente (llegó ' +
@@ -275,6 +291,7 @@ export class MostradorController {
   }
 
   @Post(':id/devolver-a-cola')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'Oct 2026: deshace un "Llamar por la TV". Saca el folio del panel ' +
@@ -285,6 +302,7 @@ export class MostradorController {
   }
 
   @Post(':id/traer-a-entrega')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'Oct 2026: EN_ASESORIA → REVISADO. Trae al área de entrega un pedido que ' +
@@ -300,6 +318,7 @@ export class MostradorController {
   }
 
   @Post(':id/enviar-a-pagar')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'REVISADO → PENDIENTE_PAGO. El cliente aprobó su pedido; pasa a caja. ' +
@@ -314,6 +333,7 @@ export class MostradorController {
   }
 
   @Post(':id/ajustar')
+  @RequiereEstacion()
   @ApiOperation({
     summary:
       'REVISADO → EN_REVISION. El cliente pidió cambios; el pedido vuelve ' +
@@ -328,6 +348,7 @@ export class MostradorController {
   }
 
   @Post(':id/cancelar')
+  @RequiereEstacion()
   @ApiOperation({
     summary: 'REVISADO → CANCELLED + lista de reposición. La mercancía vuelve al anaquel.',
   })

@@ -93,7 +93,7 @@ function crearServicio(opts: { propuesta?: Record<string, unknown> } = {}) {
     { enviar: jest.fn() } as never, // notifications
   );
 
-  return { svc, historialCreate, prisma };
+  return { svc, historialCreate, prisma, state };
 }
 
 describe('responderPropuestaDesdeMostrador — el operador responde por el cliente', () => {
@@ -257,6 +257,51 @@ describe('responderPropuestaDesdeMostrador — el operador responde por el clien
     await expect(
       svc.responderPropuestaDesdeMostrador(1, 99, { decision: 'APROBAR' }, operador),
     ).resolves.toBeDefined();
+  });
+
+  it('aprobar desde EN_ATENCION lo deja en EN_ATENCION: la llamada del cliente no se pierde', async () => {
+    // Oct 2026. `destinoTrasSurtido` devuelve REVISADO (el destino de un pedido que
+    // sale de bodega), y `EN_ATENCION → REVISADO` es "deshacer la llamada": limpiaba
+    // `llamadoAt` y el cliente en pleno recuento perdía su "te toca" en la TV, por
+    // haber resuelto el faltante que el operador tenía en la mano.
+    const { svc, prisma, state } = crearServicio();
+    prisma.pedido.findUnique.mockResolvedValue({
+      id: 1,
+      tiendaId: 5,
+      usuarioId: 7,
+      estado: EstadoPedido.EN_ATENCION,
+      modoEntrega: 'RECOGER_TIENDA',
+      descuento: 0,
+      impuestos: 0,
+      items: [],
+    });
+
+    const r = await svc.responderPropuestaDesdeMostrador(1, 99, { decision: 'APROBAR' }, operador);
+
+    const [, dto, , opts] = state.cambiarEstado.mock.calls[0];
+    expect(dto.nuevoEstado).toBe(EstadoPedido.EN_ATENCION);
+    // Mismo estado: la transición se salta y solo corren los efectos.
+    expect(opts.permitirMismoEstado).toBe(true);
+    expect(r.estado).toBe(EstadoPedido.EN_ATENCION);
+    expect(r.mensaje).toMatch(/mostrador/i);
+  });
+
+  it('aprobar desde REVISADO sigue dejándolo en REVISADO', async () => {
+    const { svc, prisma, state } = crearServicio();
+    prisma.pedido.findUnique.mockResolvedValue({
+      id: 1,
+      tiendaId: 5,
+      usuarioId: 7,
+      estado: EstadoPedido.REVISADO,
+      modoEntrega: 'RECOGER_TIENDA',
+      descuento: 0,
+      impuestos: 0,
+      items: [],
+    });
+
+    await svc.responderPropuestaDesdeMostrador(1, 99, { decision: 'APROBAR' }, operador);
+
+    expect(state.cambiarEstado.mock.calls[0][1].nuevoEstado).toBe(EstadoPedido.REVISADO);
   });
 
   it('el CLIENTE no puede responder desde EN_ATENCION (solo el operador)', async () => {
@@ -617,16 +662,16 @@ describe('CrearMensajeConAdjuntoDto valida contenido cuando NO hay propuesta', (
   // Fijado por class-validator: si el operador no adjunta propuesta, el texto
   // es obligatorio. Antes el chat mostraba una burbuja vacía que parecía error.
   it('rechaza el mensaje cuando no hay propuesta y el texto está vacío', () => {
-    // La regla del DTO dice: si `propuestaItems` viene vacío o ausente,
+    // La regla del DTO dice: si `ajuste` viene vacío o ausente,
     // `contenido` es obligatorio. No podemos ejecutar class-validator en
     // runtime con decoradores aplicados en compile-time, pero podemos
     // verificar la regla de negocio subyacente: la misma expresión que
     // usa `@ValidateIf` debe ser `true` para que el validador rechace.
-    const dto: { contenido: string; propuestaItems: unknown } = {
+    const dto: { contenido: string; ajuste: unknown } = {
       contenido: '',
-      propuestaItems: undefined,
+      ajuste: undefined,
     };
-    const shouldApplyIsNotEmpty = !dto.propuestaItems || (dto.propuestaItems as any[]).length === 0;
+    const shouldApplyIsNotEmpty = !dto.ajuste || (dto.ajuste as any[]).length === 0;
     expect(shouldApplyIsNotEmpty).toBe(true);
     // Y el contenido está vacío, por lo que la regla falla y el DTO
     // es rechazado con 400.

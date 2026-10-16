@@ -49,6 +49,8 @@ function crearServicio(estadoInicial: EstadoPedido, modoEntrega: ModoEntrega) {
         return { count: 1 };
       }),
     },
+    // Oct 2026: la cancelación consulta si el pedido tenía un pago por transferencia (aquí: ninguno).
+    pedidoPagoTransferencia: { findFirst: jest.fn().mockResolvedValue(null) },
     historialPedido: {
       create: jest.fn().mockResolvedValue({}),
       // F22: el correo "listo en tienda" es del PRIMER paso a REVISADO; la máquina

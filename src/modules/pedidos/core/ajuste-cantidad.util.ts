@@ -64,16 +64,20 @@ export interface ResultadoAjuste {
    */
   subeLaCantidad: boolean;
   /**
-   * Cuántas piezas quedan de MÁS en la bolsa y el bodeguero tiene que sacar.
+   * Cuántas piezas quedan de MÁS en la bolsa y alguien tiene que sacar.
    *
-   * 0 cuando el ajuste sube o deja la cantidad igual. El caller lo usa para
-   * decidir que el pedido VUELVE a bodega (checklist de retiro): sin esto,
-   * bajar de 5 a 3 dejaba 2 prendas dentro de la bolsa viajando al área de
-   * entrega sin que nadie las sacara.
+   * 0 cuando el ajuste sube o deja la cantidad igual. Sin esto, bajar de 5 a 3
+   * dejaba 2 prendas dentro de la bolsa viajando al área de entrega sin que nadie
+   * las sacara. Quién las saca depende de quién ajusta:
    *
-   * NO alimenta la lista de reposición. Esas piezas las saca el bodeguero y las
-   * regresa al anaquel él mismo mientras hace el ajuste; la reposición es solo
-   * de pedidos cancelados o rechazados.
+   *   - VENTAS: el pedido vuelve a bodega y el bodeguero las saca con el checklist
+   *     de retiro y las regresa al anaquel él mismo. NO hay reposición.
+   *   - MOSTRADOR (oct 2026): las saca el operador enfrente del cliente y pasan a
+   *     reposición (`ReposicionService.registrarQuitadasEnMostrador`); el pedido
+   *     solo viaja a bodega si además hay algo que surtir.
+   *
+   * En los dos casos el caller suma estas piezas a `piezasRetiradas` cuando
+   * quedan fuera de la bolsa, para que el checklist no vuelva a pedirlas.
    */
   piezasSobrantes: number;
 }
@@ -88,22 +92,29 @@ export interface ResultadoAjuste {
  *                 porque lo que se lleva YA estaba verificado: no hay nada que
  *                 bodega tenga que revisar.
  *
- *   SUBE (3 → 7)  `cantidad` = 7, `cantidadSurtida` = 0, PENDIENTE.
- *                 Las 7 piezas se re-verifican: el item vuelve a bodega
- *                 completo. Se limpia el hallazgo a propósito, y NO es una
- *                 pérdida de dato: el invariante del repo es
- *                 `PENDIENTE ⟹ cantidadSurtida === 0` (ver `validarCoherencia`
- *                 en `surtido.service.ts` y `construirItemPedido`), y el
- *                 bodeguero va a recorrer el anaquel de nuevo de todos modos.
- *                 Las 3 que ya estaban en la bolsa siguen físicamente ahí; lo
- *                 que cambia es que el sistema pide re-contarlas porque el
- *                 pedido creció y nadie verificó las nuevas.
+ *   SUBE (3 → 7)  `cantidad` = 7, PENDIENTE, y la línea se REBASA a lo que hay en
+ *                 la bolsa: `cantidadSurtida` = 3, `piezasRetiradas` = 0 y
+ *                 `piezasBase` = 3. Bodega verifica SOLO las 4 de más (decisión 2 del
+ *                 dueño, oct 2026); las 3 que ya están en la bolsa no se vuelven a
+ *                 contar.
+ *
+ *                 Antes la línea se reiniciaba entera (`cantidadSurtida` = 0) y
+ *                 bodega re-verificaba las 7, cuando 3 ya estaban físicamente en la
+ *                 bolsa del área de entrega. Rebasar a la bolsa (y no conservar el
+ *                 hallazgo original) mantiene la cuenta simple: con `piezasRetiradas`
+ *                 en 0, "lo que hay en la bolsa" y `cantidadSurtida` vuelven a ser la
+ *                 misma cifra para todo el que lee la línea. El hallazgo histórico se
+ *                 pierde, pero ya se había descartado antes: el reinicio lo borraba.
+ *
+ *                 `piezasBase` es el PISO de lo que bodega puede marcar (nunca menos
+ *                 de 3) y no se puede derivar: en cuanto marca, `cantidadSurtida` pasa
+ *                 a ser el total. Ver la columna en `schema.prisma`.
  *
  *   IGUAL         no se llama: el caller ya filtró que no hay cambio.
  *
  * La asimetría es deliberada: al BAJAR el hallazgo es un hecho histórico que hay
- * que conservar (nadie vuelve a mirar el anaquel); al SUBIR es un dato que se va
- * a reemplazar en la siguiente pasada de bodega.
+ * que conservar (nadie vuelve a mirar el anaquel); al SUBIR se rebasa a lo que hay
+ * en la bolsa y bodega suma lo que encuentre encima.
  *
  * **Invariante que hay que sostener:** `cantidadSurtida` significa siempre "lo
  * que bodega encontró en el anaquel" y NUNCA se escribe con una decisión. Los
@@ -125,15 +136,19 @@ export function calcularAjusteDeCantidad(
     return {
       data: {
         cantidad,
-        // Invariante `PENDIENTE ⟹ cantidadSurtida === 0`: bodega re-verifica el
-        // item completo. Ver el comentario de arriba sobre la asimetría.
+        // Bodega todavía tiene que verificar lo que excede la bolsa.
         estadoSurtido: EstadoSurtido.PENDIENTE,
-        cantidadSurtida: 0,
+        // REBASE: el hallazgo pasa a ser lo que HAY en la bolsa. Las piezas que un
+        // ajuste anterior sacó ya no cuentan: están en el anaquel, y bodega las
+        // volvería a traer como si fueran nuevas (que es exactamente lo que son).
+        cantidadSurtida: enBolsa,
         // `piezasRetiradas` cuenta piezas contra el hallazgo de `cantidadSurtida`;
-        // si éste se reinicia, el conteo también. Si no, la siguiente baja
-        // restaría un retiro de una ronda anterior y el bodeguero nunca
-        // recibiría el checklist de las piezas que de verdad sobran.
+        // al rebasarlo el conteo vuelve a 0. Si no, la siguiente baja restaría un
+        // retiro de una ronda anterior y el bodeguero nunca recibiría el checklist
+        // de las piezas que de verdad sobran.
         piezasRetiradas: 0,
+        // El piso: bodega no puede marcar menos de lo que ya está en la bolsa.
+        piezasBase: enBolsa,
       },
       subeLaCantidad: true,
       piezasSobrantes: 0,
@@ -147,10 +162,64 @@ export function calcularAjusteDeCantidad(
       cantidadSurtida: item.cantidadSurtida,
       // Todo lo que se lleva ya estaba verificado: no vuelve a bodega.
       estadoSurtido: EstadoSurtido.COMPLETO,
+      // La línea ya no espera nada de bodega (puede venir de una subida que aún no
+      // se surtía): sin esto el piso viejo bloquearía marcarla más abajo.
+      piezasBase: 0,
     },
     subeLaCantidad: false,
     piezasSobrantes: Math.max(0, enBolsa - cantidad),
   };
+}
+
+/**
+ * Oct 2026 (propuestas, decisión 4): ¿este ajuste de MOSTRADOR tiene algo que
+ * bodega deba surtir?
+ *
+ * Es la pregunta que decide si el pedido viaja a bodega o se resuelve en el lugar.
+ * Si el cliente solo QUITA o BAJA piezas, el operador las saca él enfrente del
+ * cliente, pasan a reposición y no hay nada que bodega tenga que ver: mandar el
+ * pedido a la cola solo hacía esperar al cliente que está de pie en la tienda.
+ * Bodega entra únicamente cuando hay piezas que nadie ha verificado contra el
+ * anaquel: un producto AGREGADO o una cantidad que SUBE por encima de lo que hay en
+ * la bolsa.
+ *
+ * Usa `calcularAjusteDeCantidad` para las líneas con cambio de cantidad, a
+ * propósito: es la MISMA función que decide qué se escribe, así que la decisión de
+ * "va a bodega" y el dato que queda en la línea no pueden contradecirse. Y es la
+ * misma vara que `piezasPorSurtir` de la calculadora del editor (lo que sobra sobre
+ * `piezasEnLaBolsa`), que es lo que el frontend lee para anunciarlo antes de enviar.
+ *
+ * Las líneas SIN cambio también cuentan: una línea viva con más cantidad que piezas
+ * en la bolsa (un PENDIENTE que nadie ha surtido) no puede quedarse en el área de
+ * entrega, o llegaría al ERP cobrando mercancía que bodega nunca vio.
+ */
+export function ajusteNecesitaBodega(
+  actuales: Array<ItemParaAjuste & { id: number; cancelada: boolean }>,
+  cambios: Array<{
+    tipo: 'completo' | 'parcial' | 'no-disponible' | 'agregado' | 'reponer';
+    itemId?: number;
+    cantidad?: number;
+  }>,
+): boolean {
+  // Un producto agregado y una línea repuesta son lo mismo para bodega: piezas que
+  // nadie ha visto en el anaquel.
+  if (cambios.some((c) => c.tipo === 'agregado' || c.tipo === 'reponer')) return true;
+
+  const cambioPorItem = new Map(
+    cambios.filter((c) => c.tipo !== 'completo' && c.itemId != null).map((c) => [c.itemId!, c]),
+  );
+
+  return actuales.some((item) => {
+    if (item.cancelada) return false;
+    const cambio = cambioPorItem.get(item.id);
+    // La línea sale del pedido: no hay nada que surtir de ella.
+    if (cambio?.tipo === 'no-disponible') return false;
+    if (cambio?.tipo === 'parcial') {
+      // Mismo piso de 1 que `aplicarAjuste`.
+      return calcularAjusteDeCantidad(item, Math.max(1, cambio.cantidad ?? 1)).subeLaCantidad;
+    }
+    return item.cantidad > piezasEnLaBolsa(item);
+  });
 }
 
 /**
@@ -171,8 +240,9 @@ export function calcularAjusteDeCantidad(
  *
  * OJO: esto NO es reposición. Estas piezas las saca el bodeguero de la bolsa y
  * las regresa al anaquel él mismo mientras hace el ajuste (checklist de retiro);
- * no generan trabajo posterior. La lista de reposición es solo de pedidos
- * cancelados o rechazados.
+ * no generan trabajo posterior. La reposición es de pedidos cancelados o
+ * rechazados y de lo que el operador de MOSTRADOR quita enfrente del cliente
+ * (que ya no pasa por el checklist: ver `piezasPendientesDeRetiro`).
  */
 export function piezasFueraDeLaBolsa(item: {
   cancelada: boolean;

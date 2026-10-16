@@ -341,10 +341,13 @@ describe('aplicarPropuestaDeVentas: el item liquidado queda coherente', () => {
       'precio1',
     );
 
+    // Decisión 2 (oct 2026): las 3 que bodega encontró se conservan como piso y bodega
+    // solo vuelve a buscar las 2 que faltaban.
     expect(updates[0].data).toMatchObject({
       cantidad: 5,
       estadoSurtido: EstadoSurtido.PENDIENTE,
-      cantidadSurtida: 0,
+      cantidadSurtida: 3,
+      piezasBase: 3,
     });
   });
 

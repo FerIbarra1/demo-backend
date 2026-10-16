@@ -58,6 +58,26 @@ export default registerAs('app', () => ({
     // avisó y se fue no puede quedar en la TV de mañana.
     presenciaCaducaHoras: parseInt(process.env.PRESENCIA_CADUCA_HORAS || '8', 10),
   },
+  // Oct 2026: pagos por transferencia (ver PLAN-PAGOS-TRANSFERENCIA.md).
+  pagos: {
+    // Cuánto tiempo son válidas las instrucciones antes de marcarse vencidas. Un abono tardío
+    // se puede verificar igual: el plazo es un aviso para el cliente, no un candado.
+    transferenciaVenceHoras: parseInt(process.env.PAGO_TRANSFERENCIA_VENCE_HORAS || '48', 10),
+    // Zona horaria con la que se escriben las fechas en correos y textos copiables. Las tiendas
+    // están en husos distintos y el modelo no guarda el de cada una, así que se fija una.
+    zonaHoraria: process.env.PAGOS_ZONA_HORARIA || 'America/Mexico_City',
+    // Cuántas horas puede esperar una transferencia VERIFICADA a que la tienda la registre en VFP
+    // antes de marcarse "atrasada" en la cola de Tesorería (es el olvido más probable del flujo).
+    alertaSinRegistrarHoras: parseInt(process.env.PAGOS_ALERTA_SIN_REGISTRAR_HORAS || '4', 10),
+    comprobantes: {
+      // Bucket dedicado para comprobantes. Opcional: sin él se usa el bucket de las imágenes bajo
+      // `comprobantes/`, y `ComprobanteStorageService` comprueba que ese prefijo NO sea de lectura
+      // pública antes de guardar nada (falla cerrado si lo es).
+      bucket: process.env.AWS_S3_COMPROBANTES_BUCKET || '',
+      // Tope por archivo. Las apps de banco exportan PDFs de más de 5 MB rara vez.
+      maxBytes: parseInt(process.env.COMPROBANTE_MAX_BYTES || String(8 * 1024 * 1024), 10),
+    },
+  },
   smtp: {
     host: process.env.SMTP_HOST || 'localhost',
     port: parseInt(process.env.SMTP_PORT || '1025', 10),

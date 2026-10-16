@@ -228,7 +228,10 @@ describe('huboRetiro: lo que el bodeguero ya sacó no se vuelve a pedir', () => 
     const data = (tx.itemPedido.update as jest.Mock).mock.calls[0][0].data;
     expect(data.cantidad).toBe(4);
     expect(data.estadoSurtido).toBe(EstadoSurtido.PENDIENTE);
-    expect(data.cantidadSurtida).toBe(0);
+    // Oct 2026 (decisión 2): se rebasa a lo que hay en la bolsa (5 − 2 = 3): bodega
+    // verifica 1 pieza, no 4.
+    expect(data.cantidadSurtida).toBe(3);
+    expect(data.piezasBase).toBe(3);
     // El conteo de retiros se reinicia junto con el hallazgo al que pertenece.
     expect(data.piezasRetiradas).toBe(0);
     expect(r.huboRetiro).toBe(false);

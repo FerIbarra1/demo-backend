@@ -43,6 +43,8 @@ function crearServicio(
     siguiente?: { id: number } | null;
     vigentes?: Array<{ id: number }>;
     config?: Record<string, unknown>;
+    /** Una transferencia viva del pedido (el cliente la eligió al pedir). */
+    pagoVivo?: { id: number } | null;
   } = {},
 ) {
   const txUpdate = jest.fn().mockResolvedValue({});
@@ -57,6 +59,7 @@ function crearServicio(
       findMany,
     },
     pedidoPropuesta: { findFirst: jest.fn().mockResolvedValue(null) },
+    pedidoPagoTransferencia: { findFirst: jest.fn().mockResolvedValue(opts.pagoVivo ?? null) },
   };
   const cambiarEstado = jest.fn(async (_id: number, _dto: any, _u: any, o: any) => {
     if (o?.efectos) await o.efectos({ pedido: { update: txUpdate } });
@@ -175,7 +178,7 @@ describe('MostradorService.llamar — desde qué mostrador', () => {
   it('el mostrador se resuelve con la TIENDA DEL PEDIDO, no con la del header', async () => {
     const { svc, mostradores } = crearServicio({ mostrador: null });
     await svc.llamar(1, operador);
-    expect(mostradores.resolverParaLlamar).toHaveBeenCalledWith(3, 5);
+    expect(mostradores.resolverParaLlamar).toHaveBeenCalledWith(3, 5, false);
   });
 });
 
@@ -428,5 +431,54 @@ describe('MostradorService.enviarAPagar — la nota de historial usa la presenci
     await svc.enviarAPagar(1, operador);
 
     expect(cambiarEstado.mock.calls[0][1].observacion).toMatch(/sin aviso de llegada/i);
+  });
+});
+
+describe('MostradorService.enviarAPagar — a dónde paga el cliente', () => {
+  const completoWeb = {
+    numeroPedido: 'PD-2026-000321',
+    tiendaId: 5,
+    canalOrigen: 'KIOSKO',
+    llegadaAnunciadaAt: null,
+    llegadaDescartadaAt: null,
+  };
+
+  it('sin transferencia emitida: la operadora ve CAJA y la TV recibe solo el folio', async () => {
+    const { svc, emitToTienda } = crearServicio({ completo: completoWeb, pagoVivo: null });
+
+    const r = await svc.enviarAPagar(1, operador);
+
+    expect(r.destinoPago).toBe('CAJA');
+    expect(emitToTienda).toHaveBeenCalledWith(5, 'pedido.enviado-a-pagar', {
+      id: 1,
+      numeroPedido: 'PD-2026-000321',
+    });
+  });
+
+  it('con la transferencia ya emitida: la operadora ve TRANSFERENCIA, pero la TV NO se entera', async () => {
+    const { svc, emitToTienda } = crearServicio({ completo: completoWeb, pagoVivo: { id: 9 } });
+
+    const r = await svc.enviarAPagar(1, operador);
+
+    // El dato es para el toast de la operadora (respuesta HTTP, privada)…
+    expect(r.destinoPago).toBe('TRANSFERENCIA');
+    // …y el evento es idéntico al de quien paga en caja: la pared no revela cómo paga cada quien.
+    expect(emitToTienda).toHaveBeenCalledWith(5, 'pedido.enviado-a-pagar', {
+      id: 1,
+      numeroPedido: 'PD-2026-000321',
+    });
+  });
+
+  it('el aviso lleva solo el folio: la TV es pública (sin nombre, correo, monto ni método de pago)', async () => {
+    const { svc, emitToTienda } = crearServicio({ completo: completoWeb, pagoVivo: { id: 9 } });
+    await svc.enviarAPagar(1, operador);
+    const payload = emitToTienda.mock.calls.find((c) => c[1] === 'pedido.enviado-a-pagar')![2];
+    expect(Object.keys(payload).sort()).toEqual(['id', 'numeroPedido']);
+  });
+
+  it('si no se puede consultar el pago, el pedido ya está en PENDIENTE_PAGO: cae a CAJA sin fallar', async () => {
+    const { svc, prisma } = crearServicio({ completo: completoWeb });
+    prisma.pedidoPagoTransferencia.findFirst.mockRejectedValueOnce(new Error('BD caída'));
+    await expect(svc.enviarAPagar(1, operador)).resolves.toMatchObject({ destinoPago: 'CAJA' });
   });
 });

@@ -72,6 +72,17 @@ export class RealtimeService {
     this.safeEmit(room, evento, payload);
   }
 
+  /**
+   * Oct 2026: room `tesoreria` — el equipo que verifica transferencias de TODAS las tiendas.
+   * No es de tienda: un usuario TESORERIA no tiene `tiendaId`, así que `tienda-{id}` nunca le
+   * llegaría.
+   */
+  emitToTesoreria(evento: string, payload: unknown) {
+    const room = 'tesoreria';
+    this.persistir(room, evento, payload);
+    this.safeEmit(room, evento, payload);
+  }
+
   emitToUser(userId: number, evento: string, payload: unknown) {
     const room = `user-${userId}`;
     this.persistir(room, evento, payload);

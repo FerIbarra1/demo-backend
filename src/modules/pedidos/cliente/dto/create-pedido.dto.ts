@@ -14,7 +14,7 @@ import {
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { CanalOrigen, ModoEntrega, Paqueteria } from '@prisma/client';
+import { CanalOrigen, MetodoPago, ModoEntrega, Paqueteria } from '@prisma/client';
 
 class ItemPedidoInputDto {
   @ApiProperty({ description: 'ID de PrecioCO (variante talla/color)' })
@@ -114,6 +114,16 @@ export class CreatePedidoDto {
   @IsOptional()
   @IsBoolean()
   dejarAdminDecidePaqueteria?: boolean;
+
+  @ApiPropertyOptional({
+    enum: MetodoPago,
+    description:
+      'Cómo piensa pagar. NO vincula nada: solo preselecciona la opción cuando el pedido esté listo ' +
+      'para pagar. Se ignora en pedidos a domicilio.',
+  })
+  @IsOptional()
+  @IsEnum(MetodoPago)
+  metodoPagoPreferido?: MetodoPago;
 
   // Notas libres del cliente
   @ApiPropertyOptional()

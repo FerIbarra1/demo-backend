@@ -103,3 +103,58 @@ export function seRetiraronPiezas(item: {
 }): boolean {
   return item.cancelada && item.cantidadSurtida > 0;
 }
+
+/**
+ * Oct 2026 (propuestas, decisión 3): ¿esta línea se puede REPONER?
+ *
+ * Una línea "sin existencia" es la que BODEGA no encontró y por eso salió del
+ * pedido: es exactamente lo que escribe `datosDeFaltaDeBodega()` (cancelada +
+ * `NO_DISPONIBLE` + `cantidadSurtida: 0`). El dueño pidió que se pueda volver a
+ * meter —llegó mercancía, o bodega se equivocó—: reponerla es DESHACER esa salida,
+ * no crear una línea nueva. Reponer la línea original conserva lo que importa:
+ * "Pediste 5" (`cantidadPedida`), el par de precios congelado y el rastro de que
+ * hubo un faltante. Agregar la misma variante como producto nuevo duplicaba el
+ * renglón y falseaba el "Pediste".
+ *
+ * Las tres condiciones importan, y la última es la que separa esto de un retiro:
+ *
+ *   - `cancelada`            — si está viva no hay nada que reponer.
+ *   - `NO_DISPONIBLE`        — solo lo que bodega marcó. Una línea que alguien
+ *                              QUITÓ conserva el estado que tenía (ver
+ *                              `datosDeRetiroPorDecision`), y una que se cambió
+ *                              por otra (`cambio`) ya tiene su reemplazo.
+ *   - `cantidadSurtida === 0`— no hay piezas en la bolsa ni en reposición que
+ *                              deshacer. Una línea retirada con piezas apartadas
+ *                              ya tiene trabajo en marcha (el checklist de bodega o
+ *                              la lista de reposición) y reponerla chocaría con él.
+ *
+ * Es el espejo de `estaSinExistencia` del frontend.
+ */
+export function sePuedeReponer(item: {
+  cancelada: boolean;
+  estadoSurtido: EstadoSurtido;
+  cantidadSurtida: number;
+}): boolean {
+  return (
+    item.cancelada &&
+    item.estadoSurtido === EstadoSurtido.NO_DISPONIBLE &&
+    item.cantidadSurtida === 0
+  );
+}
+
+/**
+ * El `data` que devuelve una línea sin existencia al pedido.
+ *
+ * Nace como cualquier línea que nadie ha visto en el anaquel: `PENDIENTE` con
+ * `cantidadSurtida: 0`, así que el pedido tiene que pasar por bodega a verificarla.
+ * `cantidad` y `subtotal` los pone el caller (necesita el precio de la línea).
+ * `cantidadPedida` NO se toca: sigue siendo lo que el cliente pidió.
+ */
+export function datosDeReposicion(): Prisma.ItemPedidoUpdateInput {
+  return {
+    cancelada: false,
+    estadoSurtido: EstadoSurtido.PENDIENTE,
+    cantidadSurtida: 0,
+    piezasRetiradas: 0,
+  };
+}

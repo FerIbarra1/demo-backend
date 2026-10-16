@@ -42,6 +42,10 @@ enum RolUsuario {
   // Tiene el chat con el cliente (el bodeguero ya no lo tiene) y arma la
   // contrapropuesta de productos, cantidades y variantes.
   VENTAS
+  // Oct 2026 (pagos por transferencia): verifica que las transferencias de TODAS las tiendas
+  // sí llegaron al banco. Multi-tienda: NO tiene `tiendaId`. No cobra, no marca pagado y no
+  // cambia el estado de ningún pedido: el cobro sigue siendo de VFP. Ver PLAN-PAGOS-TRANSFERENCIA.md.
+  TESORERIA
   ADMIN
 }
 
@@ -192,6 +196,13 @@ enum TipoNotificacion {
   // el área de entrega y el cliente no ha pasado ni avisado. El correo lleva al
   // pedido, donde puede confirmar que sigue interesado o cancelarlo.
   RECORDATORIO_RECOGER
+  // Oct 2026 (pagos por transferencia). Ninguno cambia el estado del pedido.
+  TRANSFERENCIA_INSTRUCCIONES
+  TRANSFERENCIA_COMPROBANTE_RECIBIDO
+  TRANSFERENCIA_VERIFICADA
+  TRANSFERENCIA_RECHAZADA
+  TRANSFERENCIA_POR_VENCER
+  TRANSFERENCIA_REEMBOLSADA
 }
 
 enum EstadoSurtido {
@@ -216,6 +227,33 @@ enum EstadoKiosko {
   INACTIVO
 }
 
+// Oct 2026 (pagos por transferencia). Solo describe la PREFERENCIA del cliente al hacer el
+// pedido (`Pedido.metodoPagoPreferido`, no vinculante). Con qué se cobró de verdad lo decide
+// VFP y la nube no lo sabe (ver PLAN-PAGOS-TRANSFERENCIA.md §8).
+enum MetodoPago {
+  EN_TIENDA
+  TRANSFERENCIA
+}
+
+// Estados de un pago por transferencia. Es una máquina APARTE de `EstadoPedido`: el pedido
+// sigue en PENDIENTE_PAGO hasta que VFP lo cobra. Solo hay dinero real desde VERIFICADO.
+enum EstadoPagoTransferencia {
+  PENDIENTE // instrucciones emitidas, esperando la transferencia
+  EN_REVISION // hay un comprobante por revisar
+  VERIFICADO // Tesorería vio el abono en el banco
+  APLICADO // VFP registró el cobro (el pedido está PAGADO)
+  CANCELADO // se cambió a pago en tienda / el pedido murió — sin dinero de por medio
+  VENCIDO // caducaron las instrucciones — sin dinero
+  REEMBOLSO_PENDIENTE // hubo dinero y hay que devolverlo
+  REEMBOLSADO
+}
+
+enum EstadoComprobante {
+  PENDIENTE
+  ACEPTADO
+  RECHAZADO
+}
+
 // ==================== ENTIDADES CORE ====================
 
 model Tienda {
@@ -235,23 +273,25 @@ model Tienda {
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   // Relaciones
-  usuarios        Usuario[]
-  usuariosCliente UsuarioTienda[]
-  productosTienda ProductoTienda[]
-  precios         Precio[]
-  preciosCO       PrecioCO[]
-  pedidos         Pedido[]
-  kioskos         Kiosko[]
+  usuarios         Usuario[]
+  usuariosCliente  UsuarioTienda[]
+  productosTienda  ProductoTienda[]
+  precios          Precio[]
+  preciosCO        PrecioCO[]
+  pedidos          Pedido[]
+  kioskos          Kiosko[]
   // SyncModule: checkpoint por tienda (último BANDEJA_SYNC.ID procesado).
-  checkpoint      SyncCheckpoint?
+  checkpoint       SyncCheckpoint?
   // F11 (ago 2026): ventanillas físicas del módulo de cajeros (1, 2, 3...).
   // Cada ventanilla puede estar asignada a un cajero a la vez.
-  ventanillas     Ventanilla[]
+  ventanillas      Ventanilla[]
   // F22 (oct 2026): mostradores físicos (1, 2, 3...) donde el operador llama al
   // cliente por la TV. Misma idea que las ventanillas del cajero.
-  mostradores     Mostrador[]
+  mostradores      Mostrador[]
   // F9 ago 2026: inbox de eventos Firebird→nube por tienda.
-  syncEventInbox  SyncEventInbox[]
+  syncEventInbox   SyncEventInbox[]
+  // Oct 2026: cuenta bancaria propia de la tienda para transferencias (si no tiene, se usa la global).
+  cuentasBancarias CuentaBancaria[]
 
   @@map("tiendas")
 }
@@ -285,24 +325,24 @@ model Usuario {
   updatedAt         DateTime   @updatedAt @map("updated_at")
 
   // Relaciones
-  tienda                  Tienda?              @relation(fields: [tiendaId], references: [id])
+  tienda                  Tienda?                   @relation(fields: [tiendaId], references: [id])
   tiendasCliente          UsuarioTienda[]
-  pedidos                 Pedido[]             @relation("PedidoCliente")
-  pedidosAsignados        Pedido[]             @relation("PedidoBodeguero")
-  pedidosEnCaja           Pedido[]             @relation("PedidoCajero")
+  pedidos                 Pedido[]                  @relation("PedidoCliente")
+  pedidosAsignados        Pedido[]                  @relation("PedidoBodeguero")
+  pedidosEnCaja           Pedido[]                  @relation("PedidoCajero")
   actividades             LogActividad[]
-  propuestasCreadas       PedidoPropuesta[]    @relation("PropuestaCreador")
-  propuestasForzadas      PedidoPropuesta[]    @relation("PropuestaForzador")
+  propuestasCreadas       PedidoPropuesta[]         @relation("PropuestaCreador")
+  propuestasForzadas      PedidoPropuesta[]         @relation("PropuestaForzador")
   // F13 (sep 2026): bodeguero que confirmó que la mercancía de un pedido
   // cancelado volvió al anaquel.
-  reposicionesRepuestas   PedidoReposicion[]   @relation("ReposicionReponedor")
+  reposicionesRepuestas   PedidoReposicion[]        @relation("ReposicionReponedor")
   mensajes                PedidoMensaje[]
   favoritos               Favorito[]
-  kioskosActivados        Kiosko[]             @relation("KioskoActivador")
-  kioskosDesactivados     Kiosko[]             @relation("KioskoDesactivador")
-  kioskoPairingsAprobados KioskoPairing[]      @relation("KioskoPairingAprobador")
+  kioskosActivados        Kiosko[]                  @relation("KioskoActivador")
+  kioskosDesactivados     Kiosko[]                  @relation("KioskoDesactivador")
+  kioskoPairingsAprobados KioskoPairing[]           @relation("KioskoPairingAprobador")
   // PR7 (sep 2026): operador que descartó avisos de llegada en mostrador.
-  llegadasDescartadas     Pedido[]             @relation("PedidoLlegadaDescartada")
+  llegadasDescartadas     Pedido[]                  @relation("PedidoLlegadaDescartada")
   passwordResetTokens     PasswordResetToken[]
   refreshTokens           RefreshToken[]
   // F11 (ago 2026): ventanilla física donde trabaja el cajero (1:1 nullable).
@@ -310,9 +350,14 @@ model Usuario {
   ventanilla              Ventanilla?
   // F22 (oct 2026): mostrador físico donde trabaja el operador (1:1 nullable).
   // Se setea vía POST /pedidos/mostrador/puesto/elegir.
-  mostrador               Mostrador?           @relation("MostradorOperador")
+  mostrador               Mostrador?                @relation("MostradorOperador")
   // F22: pedidos que este operador mandó a llamar por la TV.
-  pedidosLlamados         Pedido[]             @relation("PedidoLlamadoPor")
+  pedidosLlamados         Pedido[]                  @relation("PedidoLlamadoPor")
+  // Oct 2026 (pagos por transferencia): quién verificó / reembolsó, y comprobantes que subió o revisó.
+  pagosVerificados        PedidoPagoTransferencia[] @relation("PagoVerificador")
+  pagosReembolsados       PedidoPagoTransferencia[] @relation("PagoReembolsador")
+  comprobantesSubidos     PagoComprobante[]         @relation("ComprobanteSubidoPor")
+  comprobantesRevisados   PagoComprobante[]         @relation("ComprobanteRevisadoPor")
 
   @@map("usuarios")
 }
@@ -595,6 +640,14 @@ model Pedido {
 
   // Envío
   shippingDireccion          String?     @map("shipping_direccion") @db.Text
+
+  // Oct 2026 (16-oct): QUIÉN recogió el pedido cuando NO es el titular — el mandadero que mandó su
+  // patrón, un familiar. Lo captura el operador de mostrador al confirmar la entrega. `null` = lo
+  // recogió el titular (o el pedido es anterior a este campo): NO se guarda el nombre del titular,
+  // que ya está en `clienteNombre`. Es constancia, no un permiso: sale en el historial, en el
+  // detalle del pedido y en el correo de "entregado", donde el titular puede avisar si no reconoce a
+  // quien lo recogió.
+  recogioNombre String? @map("recogio_nombre") @db.VarChar(150)
   shippingReferencia         String?     @map("shipping_referencia") @db.VarChar(255)
   // F8 (jul 2026): dirección estructurada para envío a domicilio. Requeridos
   // por el service cuando modoEntrega=DOMICILIO.
@@ -620,10 +673,32 @@ model Pedido {
   asignadoAId Int?      @map("asignado_a_id")
   asignadoAt  DateTime? @map("asignado_at")
 
-  // Asignación a cajero (monitor de ventanillas). Sólo aplica a pedidos KIOSKO en PENDING_PAID.
-  // 1:1 con el usuario Cajero logueado — no hay tabla Ventanilla, cada Cajero ES su ventanilla.
+  // Asignación a cajero (monitor de ventanillas). Aplica a los pedidos en PENDIENTE_PAGO que se
+  // cobran en ventanilla: kiosko y web, NO domicilio. Es el cajero logueado, que a su vez ocupa
+  // una `Ventanilla` (1:1). Se toma con una guarda atómica: si dos cajeros lo toman a la vez,
+  // uno gana y el otro recibe 409.
   cajeroAsignadoId Int?      @map("cajero_asignado_id")
   cajeroAsignadoAt DateTime? @map("cajero_asignado_at")
+
+  // Oct 2026: EL LUGAR en la fila de caja. Es desde cuándo el cliente espera su turno de pago:
+  // se escribe al entrar a PENDIENTE_PAGO (mostrador lo manda a pagar) y se limpia al salir.
+  //
+  // Antes la fila se ordenaba por `fechaPedido`, que es cuándo se HIZO el pedido, no cuándo
+  // llegó a caja: un pedido web hecho a las 9:00 que mostrador mandó a pagar a las 11:10 pasaba
+  // delante del cliente de kiosko que llegó a caja a las 11:05. Con esta columna:
+  //   - "Devolver a la cola" (caja) conserva el lugar: no la toca.
+  //   - "No se presentó" lo manda al FINAL: la reinicia a `now()`. Sin esto, el cliente que no
+  //     acudió volvía a ser el primero y "Llamar siguiente" lo llamaba otra vez, y otra.
+  colaCajaDesdeAt DateTime? @map("cola_caja_desde_at")
+
+  // Oct 2026 (16-oct): "Regresar a la cola hasta que se valide". La cajera llamó a un cliente con
+  // una transferencia SIN validar y decide no esperarlo en su ventanilla: lo suelta conservando su
+  // lugar (`colaCajaDesdeAt` no se toca) y deja esta marca. Mientras la transferencia siga sin
+  // verificar, "Llamar siguiente" lo salta; sin ella lo volvería a llamar de inmediato, y otra
+  // vez (el mismo bucle que "No se presentó" ya resolvió). Cuando Tesorería verifica deja de
+  // contar sola —el filtro exige ambas cosas—, así que no hace falta nadie que la limpie. Se
+  // limpia igual al tomar el pedido una cajera y al salir de PENDIENTE_PAGO.
+  esperaValidacionDesdeAt DateTime? @map("espera_validacion_desde_at")
 
   // F12 (sep 2026): reloj de atención del bodeguero. La urgencia de un pedido
   // mide cuánto tiempo lleva en MANOS del bodeguero, no el tiempo total desde
@@ -644,7 +719,7 @@ model Pedido {
   // propuesta de bodega. NULL = nunca lo pidió. El pedido pasa a EN_ASESORIA
   // y entra a la cola de VENTAS de su tienda (que es 1 por tienda, sin
   // asignación 1:1 — no hay vendedorAsignadoId).
-  asesorSolicitadoAt  DateTime? @map("asesor_solicitado_at")
+  asesorSolicitadoAt DateTime? @map("asesor_solicitado_at")
   // Oct 2026: aquí vivía `asesorSolicitudNota` (F13), la nota libre que el
   // cliente escribía al pedir un asesor. Se ELIMINÓ: ese texto ahora ES el
   // primer mensaje del chat con el asesor (`PedidoMensaje`), así que la
@@ -695,11 +770,11 @@ model Pedido {
   // Se conserva al "Devolver a la cola" (es el que no pierde su lugar) y se
   // reinicia al "No se presentó" (pasa al final) y cuando el cliente vuelve a
   // avisar tras un descarte (llegó de verdad ahora, no hace dos horas).
-  presenteDesdeAt          DateTime?     @map("presente_desde_at")
+  presenteDesdeAt  DateTime? @map("presente_desde_at")
   // Cuántas veces el mostrador descartó el aviso de ESTE pedido. A la segunda el
   // botón web se bloquea: solo el kiosko o el operador pueden volver a marcar la
   // llegada (un cliente que avisa en falso dos veces ya no se cree por web).
-  llegadaDescartes         Int           @default(0) @map("llegada_descartes")
+  llegadaDescartes Int       @default(0) @map("llegada_descartes")
 
   // F16 (sep 2026): "Atendiendo" del monitor de mostrador.
   //
@@ -712,16 +787,16 @@ model Pedido {
   // `PedidoStateService.cambiarEstado` la limpia sola en cuanto el pedido sale
   // de EN_MOSTRADOR, así que no puede quedar un pedido "atendido" en otro
   // estado (ver el comentario en ese archivo).
-  llamadoAt                DateTime?     @map("llamado_at")
+  llamadoAt          DateTime? @map("llamado_at")
   // F22 (oct 2026): QUIÉN llamó y A QUÉ MOSTRADOR. La TV dice "Pasa al mostrador
   // 2" y la consola de los demás operadores dice "Lo atiende Ana". Se escriben
   // dentro de la misma transacción que la transición a EN_ATENCION y se limpian
   // al salir de ella (junto con `llamadoAt`).
-  llamadoPorId             Int?          @map("llamado_por_id")
-  llamadoMostradorId       Int?          @map("llamado_mostrador_id")
+  llamadoPorId       Int?      @map("llamado_por_id")
+  llamadoMostradorId Int?      @map("llamado_mostrador_id")
   // Cuántas veces se llamó a este pedido y el cliente no se presentó. A la
   // segunda se descarta su aviso de llegada.
-  llamadasFallidas         Int           @default(0) @map("llamadas_fallidas")
+  llamadasFallidas   Int       @default(0) @map("llamadas_fallidas")
 
   // F22 (oct 2026): la bolsa está en el área de entrega esperando al cliente.
   //
@@ -729,14 +804,14 @@ model Pedido {
   // sale (a) el recordatorio "¿aún lo quieres?" y (b) la lista de pedidos sin
   // recoger que el operador puede cancelar. NO se reinicia al devolver a la cola
   // ni al llamar: es la antigüedad de la ESPERA, no de la última acción.
-  esperaClienteDesdeAt     DateTime?     @map("espera_cliente_desde_at")
+  esperaClienteDesdeAt   DateTime? @map("espera_cliente_desde_at")
   // Cuándo se mandó el correo "¿aún quieres tu pedido?". Una sola vez por ciclo
   // de espera; se limpia si el cliente confirma que sigue interesado.
-  recordatorioRecogerAt    DateTime?     @map("recordatorio_recoger_at")
+  recordatorioRecogerAt  DateTime? @map("recordatorio_recoger_at")
   // Cuántas veces el cliente contestó "sí, lo quiero". Tope de 2: un cliente
   // que posterga para siempre una bolsa apartada no puede hacerlo sin que el
   // mostrador lo decida.
-  interesConfirmadoCount   Int           @default(0) @map("interes_confirmado_count")
+  interesConfirmadoCount Int       @default(0) @map("interes_confirmado_count")
 
   // F15 (sep 2026): marcas de agua de lectura del chat (modelo WhatsApp/Telegram).
   //   * Por LADO, no por usuario (hay UN asesor por tienda, así que "tienda leyó" es la
@@ -754,6 +829,12 @@ model Pedido {
   clienteUltimoMensajeLeidoId     Int? @map("cliente_ultimo_mensaje_leido_id")
   tiendaUltimoMensajeLeidoId      Int? @map("tienda_ultimo_mensaje_leido_id")
 
+  // Oct 2026 (pagos por transferencia): lo que el cliente ELIGIÓ al hacer el pedido. No vincula
+  // nada: el compromiso real es que exista un `PedidoPagoTransferencia` activo. Sirve para
+  // preseleccionar la opción cuando el pedido llega a PENDIENTE_PAGO y para que caja y mostrador
+  // sepan qué esperar. Siempre null en pedidos a domicilio (la transferencia no aplica ahí todavía).
+  metodoPagoPreferido MetodoPago? @map("metodo_pago_preferido")
+
   // Timestamps
   fechaPedido DateTime  @default(now()) @map("fecha_pedido")
   // Lo rellena el webhook del sistema externo (Firebird) al confirmar el cobro,
@@ -761,18 +842,18 @@ model Pedido {
   fechaPago   DateTime? @map("fecha_pago")
 
   // Relaciones
-  usuario              Usuario                  @relation("PedidoCliente", fields: [usuarioId], references: [id])
-  tienda               Tienda                   @relation(fields: [tiendaId], references: [id])
-  kiosko               Kiosko?                  @relation("PedidoKioskoOrigen", fields: [kioskoId], references: [id], onDelete: SetNull)
+  usuario              Usuario                   @relation("PedidoCliente", fields: [usuarioId], references: [id])
+  tienda               Tienda                    @relation(fields: [tiendaId], references: [id])
+  kiosko               Kiosko?                   @relation("PedidoKioskoOrigen", fields: [kioskoId], references: [id], onDelete: SetNull)
   // PR7 (sep 2026): kiosko que AVISÓ la llegada (no necesariamente el
   // kiosko que creó el pedido). Cuando llega vía el kiosko del cliente,
   // esta FK se popula; cuando llega por web/app, queda null.
-  kioskoLlegada        Kiosko?                  @relation("PedidoKioskoLlegada", fields: [llegadaAnunciadaKioskoId], references: [id], onDelete: SetNull)
-  asignadoA            Usuario?                 @relation("PedidoBodeguero", fields: [asignadoAId], references: [id], onDelete: SetNull)
-  cajeroAsignado       Usuario?                 @relation("PedidoCajero", fields: [cajeroAsignadoId], references: [id], onDelete: SetNull)
-  llegadaDescartadaPor Usuario?                 @relation("PedidoLlegadaDescartada", fields: [llegadaDescartadaPorId], references: [id], onDelete: SetNull)
-  llamadoPor           Usuario?                 @relation("PedidoLlamadoPor", fields: [llamadoPorId], references: [id], onDelete: SetNull)
-  llamadoMostrador     Mostrador?               @relation("PedidoLlamadoMostrador", fields: [llamadoMostradorId], references: [id], onDelete: SetNull)
+  kioskoLlegada        Kiosko?                   @relation("PedidoKioskoLlegada", fields: [llegadaAnunciadaKioskoId], references: [id], onDelete: SetNull)
+  asignadoA            Usuario?                  @relation("PedidoBodeguero", fields: [asignadoAId], references: [id], onDelete: SetNull)
+  cajeroAsignado       Usuario?                  @relation("PedidoCajero", fields: [cajeroAsignadoId], references: [id], onDelete: SetNull)
+  llegadaDescartadaPor Usuario?                  @relation("PedidoLlegadaDescartada", fields: [llegadaDescartadaPorId], references: [id], onDelete: SetNull)
+  llamadoPor           Usuario?                  @relation("PedidoLlamadoPor", fields: [llamadoPorId], references: [id], onDelete: SetNull)
+  llamadoMostrador     Mostrador?                @relation("PedidoLlamadoMostrador", fields: [llamadoMostradorId], references: [id], onDelete: SetNull)
   items                ItemPedido[]
   historial            HistorialPedido[]
   actividades          LogActividad[]
@@ -785,6 +866,8 @@ model Pedido {
   // F13 (sep 2026): lista de reposición. 1:1 con Pedido, sólo existe si el
   // pedido se canceló por rechazo del cliente (los productos vuelven al anaquel).
   reposicion           PedidoReposicion?
+  // Oct 2026: pagos por transferencia de este pedido (a lo más UNO activo; el resto es historial).
+  pagosTransferencia   PedidoPagoTransferencia[]
 
   @@index([tiendaId, estado])
   @@index([usuarioId])
@@ -808,13 +891,13 @@ model Pedido {
 }
 
 model ItemPedido {
-  id               Int     @id @default(autoincrement())
-  pedidoId         Int     @map("pedido_id")
-  productoId       Int     @map("producto_id")
-  precioCOId       Int?    @map("precioco_id") // Opcional: SetNull si PrecioCO se borra (snapshot guarda todo)
-  cantidad         Int
-  precioUnitario   Decimal @map("precio_unitario") @db.Decimal(10, 2)
-  subtotal         Decimal @db.Decimal(12, 2)
+  id             Int     @id @default(autoincrement())
+  pedidoId       Int     @map("pedido_id")
+  productoId     Int     @map("producto_id")
+  precioCOId     Int?    @map("precioco_id") // Opcional: SetNull si PrecioCO se borra (snapshot guarda todo)
+  cantidad       Int
+  precioUnitario Decimal @map("precio_unitario") @db.Decimal(10, 2)
+  subtotal       Decimal @db.Decimal(12, 2)
 
   // Promo de volumen (sep 2026): 12+ piezas → precio de lista 2.
   //
@@ -849,7 +932,7 @@ model ItemPedido {
   // existe: el handler de MOVPED que la comparaba contra lo reportado por
   // Firebird se eliminó (ver `pedido-pago.handler.ts`), así que su comentario
   // hablaba de un lector muerto.
-  cantidadPedida Int     @default(0) @map("cantidad_pedida")
+  cantidadPedida Int @default(0) @map("cantidad_pedida")
 
   // Snapshot de los datos (no cambia aunque el producto/variante cambien)
   productoNombre String @map("producto_nombre") @db.VarChar(150)
@@ -888,6 +971,27 @@ model ItemPedido {
   // `retiro-reposicion.spec.ts`. Es otra cosa — ese mapa es el transporte hacia
   // `crearDesdeAjuste`. No confundir los dos.
   piezasRetiradas Int @default(0) @map("piezas_retiradas")
+
+  // Oct 2026 (propuestas, decisión 2 del dueño): cuántas piezas de esta línea YA
+  // estaban en la bolsa cuando se subió la cantidad, y que bodega NO tiene que
+  // volver a verificar.
+  //
+  // Al subir de 3 a 5 con 3 en la bolsa, bodega verifica SOLO las 2 extra. Antes la
+  // línea se reiniciaba entera (`cantidadSurtida: 0`, PENDIENTE) y bodega
+  // re-verificaba las 5 — cuando 3 ya estaban físicamente en la bolsa del área de
+  // entrega. Ahora la línea se "rebasa": `cantidadSurtida` = lo que hay en la bolsa
+  // (3), `piezasRetiradas` = 0 y `piezasBase` = 3. Lo que bodega marque es el total
+  // (3 + lo que encuentre), nunca menos que `piezasBase`.
+  //
+  // Es un PISO durable y no se puede derivar de otras columnas: en cuanto bodega
+  // marca la línea, `cantidadSurtida` pasa a ser el total y se pierde cuántas ya
+  // estaban. Sin el piso, un "No hay" por costumbre —o corregir hacia abajo tras
+  // recargar— cancelaría una línea que tiene piezas dentro de la bolsa: ni el
+  // checklist de retiro ni la reposición sabrían de ellas.
+  //
+  // Vive solo durante UNA ronda de surtido: `confirmarSurtido` la limpia a 0 en
+  // todas las líneas, y una baja de cantidad también (la línea ya no espera nada).
+  piezasBase Int @default(0) @map("piezas_base")
 
   // B2B surtido B2.6: motivo textual del bodeguero al marcar el item
   // (ej. "No hay talla M", "Sólo hay 2 piezas"). Se propaga al PedidoRevisionItem.motivo
@@ -945,6 +1049,12 @@ model PedidoPropuesta {
   enviadaAt    DateTime        @default(now()) @map("enviada_at")
   // Cuándo el cliente respondió (aceptó o rechazó). NULL = aún pendiente.
   respondidaAt DateTime?       @map("respondida_at")
+  // Oct 2026 (propuestas, 3c): cuándo el CLIENTE abrió la propuesta por primera vez.
+  // NULL = nunca la ha visto. Sin esto mostrador solo podía decir "sin respuesta", y
+  // "no contestó" y "ni siquiera la abrió" piden acciones distintas: el segundo es el
+  // cliente que no se enteró y está parado en el mostrador. Solo cuenta el cliente
+  // dueño del pedido (no el personal que la lee) y solo mientras está PENDIENTE.
+  vistaAt      DateTime?       @map("vista_at")
   // F13 (sep 2026): cuándo bodega CONSUMIÓ esta propuesta aceptada al cerrar
   // el surtido. Sin esto, una propuesta ACEPTADA en la ronda 1 autorizaría
   // faltantes de la ronda 2 sin que el cliente los haya aprobado (el bug de
@@ -1021,6 +1131,156 @@ model MensajeBodegueroEnviado {
 // notifica al backend vía webhook (`POST /pedidos/admin/:id/marcar-pagado`,
 // autenticado por X-Agent-Key). No reintroducir este modelo sin antes evaluar
 // si el sistema externo va a generar sus propios recibos.
+
+// ==================== PAGOS POR TRANSFERENCIA (oct 2026) ====================
+//
+// Ver PLAN-PAGOS-TRANSFERENCIA.md. Principio rector: `PAGADO` sigue naciendo SOLO de VFP.
+// Tesorería verifica que el dinero llegó; la tienda registra el cobro en VFP; el agente lo sube.
+// Estos modelos son un subsistema paralelo al pedido: no tocan `EstadoPedido` ni la cola hacia
+// Firebird.
+//
+// Los índices PARCIALES (que Prisma no sabe declarar) viven en la migración SQL
+// `20261018120000_pagos_transferencia`:
+//   - un solo pago ACTIVO por pedido,
+//   - una misma clave de rastreo no puede pagar dos pedidos,
+//   - una sola cuenta bancaria activa por ámbito (global o por tienda).
+
+// Cuenta a la que el cliente transfiere. La administra ADMIN. `tiendaId` null = cuenta global.
+// Cada pago guarda un SNAPSHOT de la cuenta con la que se le dieron las instrucciones, así que
+// editar la cuenta no reescribe lo que ya se le dijo a clientes con pagos abiertos.
+model CuentaBancaria {
+  id            Int      @id @default(autoincrement())
+  tiendaId      Int?     @map("tienda_id")
+  banco         String   @db.VarChar(60)
+  titular       String   @db.VarChar(120)
+  // 18 dígitos, validada con su dígito verificador al guardar.
+  clabe         String   @db.VarChar(18)
+  cuenta        String?  @db.VarChar(20)
+  // Texto extra que el negocio quiera agregar a las instrucciones.
+  instrucciones String?  @db.Text
+  activa        Boolean  @default(true)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  tienda Tienda? @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+
+  @@index([tiendaId, activa])
+  @@map("cuentas_bancarias")
+}
+
+model PedidoPagoTransferencia {
+  id       Int                     @id @default(autoincrement())
+  pedidoId Int                     @map("pedido_id")
+  estado   EstadoPagoTransferencia @default(PENDIENTE)
+
+  // Snapshot al emitir las instrucciones: lo que se le dijo al cliente no cambia aunque cambien
+  // la cuenta o (por error) el total del pedido.
+  montoEsperado    Decimal  @map("monto_esperado") @db.Decimal(12, 2)
+  cuentaSnapshot   Json     @map("cuenta_snapshot")
+  // "Referencia" del SPEI: 7 dígitos (el límite del campo), aleatoria y única. No es el id del pedido.
+  referencia       String   @db.VarChar(7)
+  // "Concepto de pago": alfanumérico sin guiones (varios bancos los rechazan).
+  concepto         String   @db.VarChar(30)
+  venceAt          DateTime @map("vence_at")
+  // Cuántos comprobantes se han rechazado en este pago.
+  intentos         Int      @default(0)
+  // Si no es null, hay algo que aclarar antes de aprobar (el total cambió en VFP, el pedido se
+  // canceló o se cobró en tienda teniendo un comprobante en revisión...). Texto para Tesorería.
+  requiereRevision String?  @map("requiere_revision") @db.Text
+
+  // Resultado de la verificación (Tesorería).
+  montoVerificado  Decimal?  @map("monto_verificado") @db.Decimal(12, 2)
+  abonoFecha       DateTime? @map("abono_fecha")
+  claveRastreo     String?   @map("clave_rastreo") @db.VarChar(40)
+  verificadoPorId  Int?      @map("verificado_por_id")
+  verificadoAt     DateTime? @map("verificado_at")
+  notaVerificacion String?   @map("nota_verificacion") @db.Text
+
+  // VFP registró el cobro.
+  aplicadoAt DateTime? @map("aplicado_at")
+
+  // Reembolso.
+  reembolsoMonto   Decimal?  @map("reembolso_monto") @db.Decimal(12, 2)
+  reembolsoMotivo  String?   @map("reembolso_motivo") @db.Text
+  reembolsoRef     String?   @map("reembolso_ref") @db.VarChar(60)
+  reembolsadoPorId Int?      @map("reembolsado_por_id")
+  reembolsadoAt    DateTime? @map("reembolsado_at")
+
+  // Quién emitió las instrucciones (el cliente, o un empleado a su nombre).
+  creadoPorId  Int?        @map("creado_por_id")
+  creadoPorRol RolUsuario? @map("creado_por_rol")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Restrict a propósito: los pagos y su bitácora no se van en cascada con el pedido.
+  pedido         Pedido                    @relation(fields: [pedidoId], references: [id], onDelete: Restrict)
+  verificadoPor  Usuario?                  @relation("PagoVerificador", fields: [verificadoPorId], references: [id], onDelete: SetNull)
+  reembolsadoPor Usuario?                  @relation("PagoReembolsador", fields: [reembolsadoPorId], references: [id], onDelete: SetNull)
+  comprobantes   PagoComprobante[]
+  eventos        PagoTransferenciaEvento[]
+
+  @@unique([referencia])
+  @@index([pedidoId])
+  @@index([estado, venceAt])
+  @@index([estado, createdAt])
+  @@map("pedidos_pagos_transferencia")
+}
+
+model PagoComprobante {
+  id          Int               @id @default(autoincrement())
+  pagoId      Int               @map("pago_id")
+  subidoPorId Int               @map("subido_por_id")
+  // Key de almacenamiento PRIVADO (nunca una URL). Se sirve solo por un endpoint autorizado.
+  archivoKey  String            @map("archivo_key") @db.VarChar(255)
+  // Detectado por la firma binaria del archivo, no el que declara el cliente.
+  mime        String            @db.VarChar(40)
+  bytes       Int
+  sha256      String            @db.VarChar(64)
+  estado      EstadoComprobante @default(PENDIENTE)
+
+  // Lo que declara el cliente. Es ayuda para buscar en el banco; nunca se confía en ello.
+  montoDeclarado        Decimal?  @map("monto_declarado") @db.Decimal(12, 2)
+  fechaDeclarada        DateTime? @map("fecha_declarada")
+  bancoEmisor           String?   @map("banco_emisor") @db.VarChar(60)
+  claveRastreoDeclarada String?   @map("clave_rastreo_declarada") @db.VarChar(40)
+
+  motivoRechazo String?   @map("motivo_rechazo") @db.VarChar(30)
+  notaRechazo   String?   @map("nota_rechazo") @db.Text
+  revisadoPorId Int?      @map("revisado_por_id")
+  revisadoAt    DateTime? @map("revisado_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  pago        PedidoPagoTransferencia @relation(fields: [pagoId], references: [id], onDelete: Cascade)
+  subidoPor   Usuario                 @relation("ComprobanteSubidoPor", fields: [subidoPorId], references: [id])
+  revisadoPor Usuario?                @relation("ComprobanteRevisadoPor", fields: [revisadoPorId], references: [id], onDelete: SetNull)
+
+  @@index([pagoId, estado])
+  @@index([sha256])
+  @@map("pagos_comprobantes")
+}
+
+// Bitácora de SOLO AGREGAR: el código nunca hace UPDATE ni DELETE sobre esta tabla. Cada
+// transición de un pago escribe su fila en la MISMA transacción que la transición.
+model PagoTransferenciaEvento {
+  id          Int                      @id @default(autoincrement())
+  pagoId      Int                      @map("pago_id")
+  tipo        String                   @db.VarChar(40)
+  deEstado    EstadoPagoTransferencia? @map("de_estado")
+  aEstado     EstadoPagoTransferencia? @map("a_estado")
+  actorId     Int?                     @map("actor_id")
+  // String y no RolUsuario: también hay actores que no son usuarios (el agente de VFP, el sistema).
+  actorRol    String?                  @map("actor_rol") @db.VarChar(20)
+  actorNombre String?                  @map("actor_nombre") @db.VarChar(100)
+  ip          String?                  @db.VarChar(45)
+  detalle     Json?
+  createdAt   DateTime                 @default(now()) @map("created_at")
+
+  pago PedidoPagoTransferencia @relation(fields: [pagoId], references: [id], onDelete: Cascade)
+
+  @@index([pagoId, createdAt])
+  @@map("pagos_transferencia_eventos")
+}
 
 model Notificacion {
   id           Int               @id @default(autoincrement())

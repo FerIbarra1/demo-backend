@@ -1,11 +1,19 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Pedido, TipoNotificacion } from '@prisma/client';
+import { EstadoPagoTransferencia, Pedido, TipoNotificacion } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { ESTADOS_ACTIVOS } from '../pagos/transferencia/reglas';
+import { instruccionesDeUnPago, lineasParaCorreo } from '../pagos/transferencia/pago-comun';
 import { StorageService } from '../imagenes/storage.service';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { MailService } from '../mail/mail.service';
-import { mailTemplates, mailSubjects, folioVisible } from '../mail/mail.templates';
+import {
+  mailTemplates,
+  mailSubjects,
+  folioVisible,
+  type LineaCorreo,
+  type VarianteTransferencia,
+} from '../mail/mail.templates';
 import { generarQrDataUrl } from '../pedidos/core/qr.util';
 import { firmarLlegoQr } from '../pedidos/core/qr-llegada.util';
 
@@ -284,6 +292,11 @@ export class NotificationsService {
         motivoCancelacion: reposicion?.motivo ?? null,
         tiendaNombre: tienda?.nombre,
         tiendaTelefono: tienda?.telefono ?? undefined,
+        tiendaDireccion: tienda
+          ? [tienda.direccion, tienda.ciudad].filter(Boolean).join(', ') || undefined
+          : undefined,
+        pagoPorTransferencia: pedido.metodoPagoPreferido === 'TRANSFERENCIA',
+        recogioNombre: pedido.recogioNombre ?? null,
         items: items.map((it) => ({
           productoNombre: it.productoNombre,
           productoCodigo: it.productoCodigo,
@@ -329,9 +342,97 @@ export class NotificationsService {
    * Reutiliza el template PedidoAprobado (dice "aprobado y listo para pagar").
    * Fire-and-forget: no lanza errores al caller.
    */
+  /**
+   * Oct 2026: correos del pago por transferencia. Van aparte de `enviar()` porque necesitan datos
+   * que no salen del pedido (las instrucciones, el motivo de un rechazo, el monto devuelto).
+   *
+   * Igual que `enviar()`: nunca lanza hacia quien llama, y deja su fila en `notificaciones`.
+   * `destinatario` permite reenviar las instrucciones a un correo distinto al del pedido
+   * (el cliente dice que no le llegó); queda registrado en la propia notificación.
+   */
+  async enviarTransferencia(
+    pedido: Pedido,
+    tipo: Extract<TipoNotificacion, `TRANSFERENCIA_${string}`>,
+    datos: {
+      lineas?: LineaCorreo[];
+      notas?: string[];
+      detalle?: string;
+      destinatario?: string;
+      /** Versión en texto plano (para clientes de correo sin HTML). */
+      textFallback?: string;
+    } = {},
+  ) {
+    const para = datos.destinatario ?? pedido.clienteEmail;
+    if (!para) {
+      this.logger.warn(`Pedido ${pedido.id} sin email — no se envía ${tipo}`);
+      return;
+    }
+    try {
+      const { pedidoData, ctx, pedidoUrl } = await this.componerPedidoData(pedido);
+      const folio = folioVisible(pedidoData);
+      const variante = tipo.replace('TRANSFERENCIA_', '') as VarianteTransferencia;
+      await this.mail.sendEmail({
+        to: para,
+        subject: mailSubjects[tipo](folio),
+        template: mailTemplates.TransferenciaPago({
+          variante,
+          pedido: pedidoData,
+          pedidoUrl,
+          lineas: datos.lineas,
+          notas: datos.notas,
+          detalle: datos.detalle,
+          ...ctx,
+        }),
+        tipoNotificacion: tipo,
+        pedidoId: pedido.id,
+        textFallback: datos.textFallback,
+      });
+    } catch (err) {
+      this.logger.error(
+        `Error enviando ${tipo} del pedido ${pedido.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+
   async enviarListoParaPagar(pedido: Pedido, externalFolio: string) {
     if (!pedido.clienteEmail) {
       this.logger.warn(`Pedido ${pedido.id} sin clienteEmail — no se envía email listo para pagar`);
+      return;
+    }
+
+    // Oct 2026: el cliente que eligió TRANSFERENCIA recibe UN correo, el de las instrucciones
+    // (banco, CLABE, monto exacto, referencia), y no el de "listo para pagar" con el QR de caja.
+    //
+    // Antes este correo solo decía "entra a tu pedido para ver los datos": el cliente no tenía
+    // los datos en la mano, y el de las instrucciones solo salía si caja las daba a mano. Sale
+    // AQUÍ, al llegar el ACK del agente (cuando el pedido ya existe en VFP y tiene folio), a
+    // propósito: mandar a transferir antes de que exista el pedido en VFP deja dinero que la
+    // tienda no tiene dónde registrar.
+    //
+    //   PENDIENTE            → las instrucciones (es lo que el cliente necesita ahora).
+    //   EN_REVISION/VERIFICADO → nada: ya transfirió, no hay nada que pedirle.
+    //   sin pago vivo        → el correo normal de caja (caja lo cambió a pagar en tienda, o la
+    //                          transferencia no se pudo emitir: sin cuenta bancaria, etc.).
+    const pagoVivo = await this.prisma.pedidoPagoTransferencia.findFirst({
+      where: { pedidoId: pedido.id, estado: { in: [...ESTADOS_ACTIVOS] } },
+      orderBy: { id: 'desc' },
+    });
+    if (pagoVivo) {
+      if (pagoVivo.estado !== EstadoPagoTransferencia.PENDIENTE) return;
+      const instrucciones = instruccionesDeUnPago(
+        pagoVivo,
+        { ...pedido, pendienteEnvio: { externalFolio } },
+        {
+          zonaHoraria: this.config.get<string>('app.pagos.zonaHoraria') ?? 'America/Mexico_City',
+          frontendUrl: this.config.get<string>('app.mail.frontendUrl') ?? '',
+          venceHoras: this.config.get<number>('app.pagos.transferenciaVenceHoras') ?? 48,
+        },
+      );
+      await this.enviarTransferencia(pedido, TipoNotificacion.TRANSFERENCIA_INSTRUCCIONES, {
+        lineas: lineasParaCorreo(instrucciones),
+        notas: instrucciones.notas,
+        textFallback: instrucciones.texto,
+      });
       return;
     }
 
@@ -352,7 +453,9 @@ export class NotificationsService {
       ? await generarQrDataUrl(qrLlegoToken)
       : await generarQrDataUrl(externalFolio);
 
-    const pedidoData = { ...base, externalFolio, qrDataUrl };
+    // Sin pago vivo no hay "datos para transferir" a los que mandar al cliente, aunque haya elegido
+    // transferencia al pedir (`metodoPagoPreferido`): el correo le dice cómo pagar en caja.
+    const pedidoData = { ...base, externalFolio, qrDataUrl, pagoPorTransferencia: false };
 
     const template = mailTemplates.PedidoAprobado({
       pedido: pedidoData,

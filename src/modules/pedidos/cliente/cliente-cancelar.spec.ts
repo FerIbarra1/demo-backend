@@ -31,6 +31,8 @@ function crearServicio(
     asignadoAId?: number | null;
     /** Si el historial muestra que alguna vez se cerró un surtido. */
     cerroSurtidoAntes?: boolean;
+    /** Oct 2026: una transferencia que impide cancelar (comprobante en revisión o verificada). */
+    pagoEnCurso?: { id: number; estado: string } | null;
   } = {},
 ) {
   const crearDesdePedido = jest.fn().mockResolvedValue(undefined);
@@ -48,6 +50,10 @@ function crearServicio(
     },
     historialPedido: {
       findFirst: jest.fn().mockResolvedValue(opts.cerroSurtidoAntes ? { id: 9 } : null),
+    },
+    // Oct 2026: antes de cancelar se pregunta si hay una transferencia que lo impida (aquí: no).
+    pedidoPagoTransferencia: {
+      findFirst: jest.fn().mockResolvedValue(opts.pagoEnCurso ?? null),
     },
   };
 
@@ -218,5 +224,24 @@ describe('oct 2026 — la cancelación solo genera lista si la bolsa salió de l
     expect(opciones).toEqual({ bolsaEnManosDeBodega: false });
     // Y no hizo falta consultar el historial.
     expect(prisma.historialPedido.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe('oct 2026 — con una transferencia en curso el cliente no cancela solo', () => {
+  it.each([
+    ['EN_REVISION', /comprobante/i],
+    ['VERIFICADO', /verificada/i],
+  ])('transferencia %s: 409 y no toca el pedido', async (estadoPago, mensaje) => {
+    const { svc, cambiarEstado } = crearServicio(EstadoPedido.PENDIENTE_PAGO, {
+      pagoEnCurso: { id: 3, estado: estadoPago },
+    });
+    await expect(svc.cancelarPedido(1, usuario.userId, usuario)).rejects.toThrow(mensaje);
+    expect(cambiarEstado).not.toHaveBeenCalled();
+  });
+
+  it('sin transferencia que lo impida, cancela como siempre', async () => {
+    const { svc, cambiarEstado } = crearServicio(EstadoPedido.PENDIENTE_PAGO);
+    await svc.cancelarPedido(1, usuario.userId, usuario);
+    expect(cambiarEstado).toHaveBeenCalledTimes(1);
   });
 });

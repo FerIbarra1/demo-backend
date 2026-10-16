@@ -13,18 +13,18 @@ import { MostradorMonitorService } from './mostrador-monitor.service';
  */
 
 /** Prisma mockeado: captura el `where` que el service construye. */
-function crearServicio() {
+function crearServicio(mostradores: unknown[] = []) {
   const findMany = jest.fn().mockResolvedValue([]);
-  const count = jest.fn().mockResolvedValue(0);
 
   const prisma = {
     tienda: {
       findUnique: jest.fn().mockResolvedValue({ id: 5, nombre: 'Tienda Test' }),
     },
-    pedido: { findMany, count },
+    pedido: { findMany },
+    mostrador: { findMany: jest.fn().mockResolvedValue(mostradores) },
   };
 
-  return { svc: new MostradorMonitorService(prisma as never), findMany, count };
+  return { svc: new MostradorMonitorService(prisma as never), findMany };
 }
 
 describe('MostradorMonitorService — gate de llegada (D5)', () => {
@@ -87,13 +87,6 @@ describe('MostradorMonitorService — gate de llegada (D5)', () => {
     const { svc } = crearServicio();
     await expect(svc.obtenerMonitor(0)).rejects.toThrow(/tienda asignada/i);
   });
-
-  it('cuenta los pedidos listos para entregar (PAID|SHIPPED)', async () => {
-    const { svc, count } = crearServicio();
-    await svc.obtenerMonitor(5);
-    const where = count.mock.calls[0][0].where;
-    expect(where.estado.in).toEqual([EstadoPedido.PAGADO, EstadoPedido.ENVIADO]);
-  });
 });
 
 /**
@@ -147,21 +140,12 @@ describe('MostradorMonitorService — mostrador que llama (F22)', () => {
   const fila = (extra: Record<string, unknown> = {}) => ({
     id: 1,
     numeroPedido: 'PD-2026-000001',
-    clienteNombre: 'Juan',
-    canalOrigen: CanalOrigen.WEB,
-    total: 100,
-    fechaPedido: new Date(Date.now() - 3_600_000),
-    llegadaAnunciadaAt: new Date(Date.now() - 600_000),
-    llegadaDescartadaAt: null,
-    presenteDesdeAt: new Date(Date.now() - 600_000),
-    llamadoAt: new Date(),
+    llamadoMostradorId: 2,
     llamadoMostrador: { numero: 2 },
-    llamadoPor: { nombre: 'Ana', apellido: 'Ruiz' },
-    _count: { items: 3 },
     ...extra,
   });
 
-  it('el panel Atendiendo lleva el número de mostrador y el operador', async () => {
+  it('el panel Atendiendo lleva el número de mostrador', async () => {
     const { svc, findMany } = crearServicio();
     findMany.mockImplementation(async (args: any) =>
       args.where.estado === EstadoPedido.EN_ATENCION ? [fila()] : [],
@@ -170,68 +154,178 @@ describe('MostradorMonitorService — mostrador que llama (F22)', () => {
     const res = await svc.obtenerMonitor(5);
 
     expect(res.atendiendo[0].mostradorNumero).toBe(2);
-    expect(res.atendiendo[0].operadorNombre).toBe('Ana Ruiz');
   });
 
-  it('sin mostradores configurados el número es null (la TV dice solo "Pasa a mostrador")', async () => {
+  it('sin mostrador válido el número es null (la TV dice solo "Pasa a mostrador")', async () => {
     const { svc, findMany } = crearServicio();
     findMany.mockImplementation(async (args: any) =>
       args.where.estado === EstadoPedido.EN_ATENCION
-        ? [fila({ llamadoMostrador: null, llamadoPor: null })]
+        ? [fila({ llamadoMostradorId: null, llamadoMostrador: null })]
         : [],
     );
 
     const res = await svc.obtenerMonitor(5);
 
     expect(res.atendiendo[0].mostradorNumero).toBeNull();
-    expect(res.atendiendo[0].operadorNombre).toBeNull();
-  });
-
-  it('un pedido de KIOSKO en la cola cuenta como cliente en tienda, con su espera real', async () => {
-    // Antes `clienteEnTienda` miraba solo el aviso, y un kiosko (que nunca lo
-    // tiene) aparecía como "sin cliente" en los contadores.
-    const { svc, findMany } = crearServicio();
-    const hace30 = new Date(Date.now() - 30 * 60_000);
-    findMany.mockImplementation(async (args: any) =>
-      args.where.estado === EstadoPedido.REVISADO && args.where.llegadaDescartadaAt === null
-        ? [
-            fila({
-              canalOrigen: CanalOrigen.KIOSKO,
-              llegadaAnunciadaAt: null,
-              presenteDesdeAt: hace30,
-              llamadoMostrador: undefined,
-              llamadoPor: undefined,
-            }),
-          ]
-        : [],
-    );
-
-    const res = await svc.obtenerMonitor(5);
-
-    expect(res.cola[0].clienteEnTienda).toBe(true);
-    expect(res.cola[0].esperandoDesdeMin).toBe(30);
-    expect(res.contadores.enTienda).toBe(1);
   });
 });
 
 /**
- * F22: el contador `sinCliente` ahora es el mismo predicado que la lista "Sin
- * aviso" de la consola. Antes solo contaba web en REVISADO.
+ * 16-oct (§9.4): la TV es PÚBLICA. Lo que viaja al navegador de la pared es lo que cualquiera
+ * puede leer en la pestaña de red, así que solo sale lo que la pantalla dibuja: folio + números.
  */
-describe('MostradorMonitorService — sinCliente (F22)', () => {
-  it('cuenta también los que esperan aprobación y los de kiosko descartados', async () => {
+describe('MostradorMonitorService — la TV pública solo recibe folio y números', () => {
+  const hace = (min: number) => new Date(Date.now() - min * 60_000);
+
+  it('el select de la cola y del panel NO pide nombre, correo, total, canal ni fechas', async () => {
     const { svc, findMany } = crearServicio();
     await svc.obtenerMonitor(5);
-    // La 4ª consulta de `findMany` es la de sinCliente.
-    const where = findMany.mock.calls[2][0].where;
-    expect(where.estado).toEqual({
-      in: [EstadoPedido.REVISADO, EstadoPedido.ESPERANDO_APROBACION],
-    });
-    expect(where.OR).toEqual(
-      expect.arrayContaining([
-        { llegadaDescartadaAt: { not: null } },
-        { canalOrigen: CanalOrigen.WEB, llegadaAnunciadaAt: null },
-      ]),
+    for (const i of [0, 1]) {
+      const select = findMany.mock.calls[i][0].select;
+      for (const campo of [
+        'clienteNombre',
+        'clienteEmail',
+        'total',
+        'canalOrigen',
+        'fechaPedido',
+        'llegadaAnunciadaAt',
+        'llamadoPor',
+        '_count',
+      ]) {
+        expect(select).not.toHaveProperty(campo);
+      }
+    }
+  });
+
+  it('cada folio sale como { id, numeroPedido, mostradorNumero } y nada más', async () => {
+    const { svc, findMany } = crearServicio([
+      {
+        id: 2,
+        numero: 2,
+        operador: { nombre: 'Ana', apellido: null, lastLogin: hace(1), ultimoHeartbeat: hace(1) },
+      },
+    ]);
+    findMany.mockImplementation(async (args: any) =>
+      args.where.estado === EstadoPedido.EN_ATENCION
+        ? [
+            {
+              id: 10,
+              numeroPedido: 'PD-10',
+              llamadoMostradorId: 2,
+              llamadoMostrador: { numero: 2 },
+            },
+          ]
+        : [{ id: 11, numeroPedido: 'PD-11' }],
     );
+
+    const r = await svc.obtenerMonitor(5);
+
+    expect(r.cola[0]).toEqual({ id: 11, numeroPedido: 'PD-11', mostradorNumero: null });
+    expect(r.mostradores[0].atendiendo[0]).toEqual({
+      id: 10,
+      numeroPedido: 'PD-10',
+      mostradorNumero: 2,
+    });
+    expect(Object.keys(r).sort()).toEqual(
+      [
+        'atendiendo',
+        'cola',
+        'contadores',
+        'mostradores',
+        'sinMostrador',
+        'tiendaId',
+        'tiendaNombre',
+        'timestamp',
+      ].sort(),
+    );
+    expect(Object.keys(r.contadores).sort()).toEqual(['atendiendo', 'enCola']);
+  });
+
+  it('ya no consulta "listos para entregar" ni "sin recoger": no se pintan y llevaban nombres', async () => {
+    const { svc, findMany } = crearServicio();
+    await svc.obtenerMonitor(5);
+    // Solo dos consultas de pedidos: la cola y el panel Atendiendo.
+    expect(findMany).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('MostradorMonitorService — por mostrador (como la TV de caja)', () => {
+  const ahora = () => new Date();
+  const hace = (min: number) => new Date(Date.now() - min * 60_000);
+  const puesto = (id: number, numero: number, operador: unknown) => ({ id, numero, operador });
+  const llamado = (id: number, mostradorId: number | null) => ({
+    id,
+    numeroPedido: `PD-${id}`,
+    llamadoMostradorId: mostradorId,
+    llamadoMostrador: mostradorId ? { numero: mostradorId } : null,
+  });
+
+  /** El orden de las consultas `pedido.findMany` es: cola, atendiendo. */
+  function conLlamados(mostradores: unknown[], atendiendo: unknown[]) {
+    const { svc, findMany } = crearServicio(mostradores);
+    findMany.mockResolvedValueOnce([]).mockResolvedValueOnce(atendiendo);
+    return svc;
+  }
+
+  it('cada folio llamado queda en el mostrador desde el que se llamó', async () => {
+    const svc = conLlamados(
+      [
+        puesto(1, 1, {
+          nombre: 'Ana',
+          apellido: null,
+          lastLogin: ahora(),
+          ultimoHeartbeat: ahora(),
+        }),
+        puesto(2, 2, {
+          nombre: 'Luis',
+          apellido: null,
+          lastLogin: ahora(),
+          ultimoHeartbeat: ahora(),
+        }),
+      ],
+      [llamado(10, 2), llamado(11, 1)],
+    );
+    const r = await svc.obtenerMonitor(5);
+    expect(r.mostradores.map((m) => [m.numero, m.atendiendo.map((p) => p.id)])).toEqual([
+      [1, [11]],
+      [2, [10]],
+    ]);
+    expect(r.sinMostrador).toHaveLength(0);
+  });
+
+  it('un mostrador sin operador, o con +15 min sin señales, sale CERRADO', async () => {
+    const svc = conLlamados(
+      [
+        puesto(1, 1, null),
+        puesto(2, 2, {
+          nombre: 'Luis',
+          apellido: null,
+          lastLogin: hace(300),
+          ultimoHeartbeat: hace(20),
+        }),
+        puesto(3, 3, {
+          nombre: 'Eva',
+          apellido: 'R',
+          lastLogin: hace(300),
+          ultimoHeartbeat: hace(3),
+        }),
+      ],
+      [],
+    );
+    const r = await svc.obtenerMonitor(5);
+    expect(r.mostradores.map((m) => m.abierto)).toEqual([false, false, true]);
+    expect(r.mostradores[2].operadorNombre).toBe('Eva R');
+  });
+
+  it('un llamado sin mostrador válido NO desaparece: va en `sinMostrador`', async () => {
+    const svc = conLlamados([puesto(1, 1, null)], [llamado(10, null), llamado(11, 99)]);
+    const r = await svc.obtenerMonitor(5);
+    expect(r.sinMostrador.map((p) => p.id).sort()).toEqual([10, 11]);
+    expect(r.mostradores[0].atendiendo).toHaveLength(0);
+  });
+
+  it('`atendiendo` plano se conserva (compatibilidad)', async () => {
+    const svc = conLlamados([puesto(1, 1, null)], [llamado(10, 1)]);
+    expect((await svc.obtenerMonitor(5)).atendiendo).toHaveLength(1);
   });
 });

@@ -14,6 +14,7 @@ import { RealtimeOutboxWorker } from './realtime-outbox.worker';
  *     user-{userId}     — canal privado del usuario
  *     tienda-{id}       — para BODEGA/CAJERO/MONITOR/ADMIN de esa tienda
  *     admin:all         — sólo ADMIN, escucha todas las tiendas
+ *     tesoreria         — TESORERIA y ADMIN: pagos por transferencia de todas las tiendas
  * - El cliente puede unirse explícitamente a `pedido-{id}` para actualizaciones
  *   detalladas (surtido, mensajes, etc.).
  */

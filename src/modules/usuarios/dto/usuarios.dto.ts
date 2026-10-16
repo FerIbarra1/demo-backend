@@ -7,6 +7,7 @@ import {
   Matches,
   MaxLength,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -26,6 +27,8 @@ export const ROLES_EMPLEADO = [
   // provisionar por seed.
   RolUsuario.MOSTRADOR_MONITOR,
   RolUsuario.VENTAS,
+  // Oct 2026: verifica transferencias de TODAS las tiendas. Es el único rol sin tienda.
+  RolUsuario.TESORERIA,
 ] as const;
 
 export class CrearUsuarioDto {
@@ -55,10 +58,16 @@ export class CrearUsuarioDto {
   @IsIn(ROLES_EMPLEADO as unknown as string[])
   rol: RolUsuario;
 
-  @ApiProperty({ example: 1, description: 'Tienda a la que pertenece el empleado (obligatoria).' })
+  @ApiPropertyOptional({
+    example: 1,
+    description:
+      'Tienda a la que pertenece el empleado. Obligatoria para todos los roles EXCEPTO ' +
+      'TESORERIA (multi-tienda: se ignora si se manda).',
+  })
+  @ValidateIf((o: CrearUsuarioDto) => o.rol !== RolUsuario.TESORERIA)
   @Type(() => Number)
   @IsInt()
-  tiendaId: number;
+  tiendaId?: number;
 
   @ApiProperty({ description: 'Contraseña inicial definida por el admin.', minLength: 6 })
   @IsString()

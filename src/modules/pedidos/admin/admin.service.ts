@@ -10,6 +10,14 @@ import { NotificationsService } from '../../notifications/notifications.service'
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoAccessService } from '../core/pedido-access.service';
 import { PedidoStateService } from '../core/pedido-state.service';
+import { yaFueCobrado } from '../core/cobro.util';
+import {
+  ACTOR_AGENTE,
+  emitirCambioDePago,
+  pagoActivoDe,
+  resolverPagoAlCobrarse,
+} from '../../pagos/transferencia/hooks';
+import { ESTADOS_NO_COBRAR } from '../../pagos/transferencia/reglas';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, Prisma, TipoNotificacion } from '@prisma/client';
 
@@ -92,7 +100,7 @@ export class AdminService {
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
     if (pedido.estado !== EstadoPedido.CANCELADO) {
-      throw new BadRequestException('Sólo se pueden eliminar pedidos en estado CANCELLED');
+      throw new BadRequestException('Sólo se pueden eliminar pedidos en estado CANCELADO');
     }
     await this.prisma.pedido.delete({ where: { id: pedidoId } });
     return { mensaje: 'Pedido eliminado', pedidoId };
@@ -106,9 +114,27 @@ export class AdminService {
     });
   }
 
+  /**
+   * Marca un pedido como pagado. Lo llama el handler del agente (cobro en VFP) y, como
+   * herramienta de soporte, un ADMIN a mano.
+   *
+   * Oct 2026 (Fase 0 de pagos por transferencia), dos cosas que estaban mal:
+   *
+   * 1. **Podía resucitar un pedido terminal.** El `updateMany` filtraba por
+   *    `estado: { not: PAGADO }` (el comentario decía que usaba `estadoAnterior`; el código
+   *    no). Si el pedido se cancelaba entre la lectura y la escritura, el `where` seguía
+   *    cumpliéndose y `CANCELADO → PAGADO`. Ahora la escritura lleva el estado que se
+   *    LEYÓ dentro de la misma transacción: si cambió, no escribe.
+   * 2. **Un pedido `ENVIADO` retrocedía a `PAGADO`.** Solo `PAGADO` contaba como "ya
+   *    cobrado", y el agente puede llamar desde cualquier estado no terminal. Ver
+   *    `cobro.util.ts`.
+   *
+   * Idempotente: si el pedido ya pasó por el cobro, devuelve el pedido sin tocar nada ni
+   * volver a emitir (ni correo, ni realtime, ni historial).
+   */
   async marcarComoPagado(
     pedidoId: number,
-    body: { fechaPago?: string; referencia?: string } | undefined,
+    body: { fechaPago?: string; referencia?: string; forzar?: boolean } | undefined,
     usuario: UserContext,
   ) {
     // Validar propiedad: ADMIN o sistema externo. Si es ADMIN humano,
@@ -117,7 +143,7 @@ export class AdminService {
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
-    if (pedido.estado === EstadoPedido.PAGADO) {
+    if (yaFueCobrado(pedido.estado)) {
       return pedido;
     }
     // El agente externo (Firebird) inyecta userId=0 vía ApiKeyGuard. Puede
@@ -127,12 +153,11 @@ export class AdminService {
     // F13: PERO solo si el pedido ya llegó a Firebird. Un pedido en
     // EN_ASESORIA o ESPERANDO_APROBACION nunca se encoló (la fila de
     // `PedidoPendienteEnvio` se crea al pasar a PENDIENTE_PAGO), así que no
-    // existe en el ERP: marcarlo PAID dejaría un pedido pagado sin folio, sin
+    // existe en el ERP: marcarlo PAGADO dejaría un pedido pagado sin folio, sin
     // items confirmados y sin nada que cobrar. Se exige la fila de cola.
     const esAgente = usuario.userId === 0;
     if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO) {
-      const terminales: EstadoPedido[] = [EstadoPedido.CANCELADO, EstadoPedido.ENTREGADO];
-      if (!esAgente || terminales.includes(pedido.estado)) {
+      if (!esAgente || pedido.estado === EstadoPedido.CANCELADO) {
         throw new BadRequestException(
           `Sólo se marca como pagado un pedido en PENDIENTE_PAGO (actual: ${pedido.estado})`,
         );
@@ -160,20 +185,46 @@ export class AdminService {
       throw new BadRequestException('fechaPago inválido');
     }
 
-    // El estado real del pedido (PENDIENTE_PAGO para admin humano; cualquier
-    // no-terminal para el agente). Se usa como guarda del updateMany para
-    // evitar una race condition entre la lectura y la escritura.
-    const estadoAnterior = pedido.estado;
+    const referencia = body?.referencia?.trim() || undefined;
+
+    // Oct 2026 (pagos por transferencia): un ADMIN no cobra a mano un pedido que tiene una
+    // transferencia en curso sin saber lo que hace. Cobrar en caja con una transferencia abierta
+    // puede ser un doble pago. El cobro de VFP (el agente) nunca se bloquea: ya ocurrió.
+    if (!esAgente) {
+      const pago = await pagoActivoDe(this.prisma, pedidoId);
+      if (pago && ESTADOS_NO_COBRAR.includes(pago.estado)) {
+        if (!body?.forzar || !referencia) {
+          throw new ConflictException(
+            `Este pedido tiene una transferencia en curso (${pago.estado}). Si aun así quieres ` +
+              'cobrarlo a mano, manda `forzar: true` y explica el motivo en `referencia`.',
+          );
+        }
+      }
+    }
 
     const resultado = await this.prisma.$transaction(async (tx) => {
+      // El estado se LEE aquí, dentro de la transacción, y es el que se usa de guarda
+      // en la escritura y en el historial. Con el estado leído antes de abrirla, un
+      // cambio en medio (cancelación, envío) pasaba desapercibido.
+      const actual = await tx.pedido.findUnique({ where: { id: pedidoId } });
+      if (!actual) throw new NotFoundException('Pedido no encontrado');
+
+      // Idempotencia: otro proceso lo cobró entre la primera lectura y ahora.
+      if (yaFueCobrado(actual.estado)) return { yaPagado: true as const, pedido: actual };
+
+      // Un pedido que se canceló en medio NO se revive. El cobro quedó registrado en
+      // VFP, pero decidir qué hacer con ese dinero es de una persona, no del sync.
+      if (actual.estado === EstadoPedido.CANCELADO) {
+        throw new ConflictException('El pedido se canceló durante el pago');
+      }
+      // El ADMIN humano solo marca desde PENDIENTE_PAGO; solo el agente puede venir de
+      // otro estado no terminal (y ya se verificó arriba que el pedido llegó al ERP).
+      if (!esAgente && actual.estado !== EstadoPedido.PENDIENTE_PAGO) {
+        throw new ConflictException('El estado del pedido cambió durante el pago');
+      }
+
       const result = await tx.pedido.updateMany({
-        // C3: la guarda de "ya está PAID" ahora vive dentro del WHERE del
-        // update (race-safe atómico). Si el pedido ya está PAID, updateMany
-        // no aplica y caemos al branch de result.count !== 1 → retorno
-        // idempotente. Mantenemos `estado: estadoAnterior` para el caso del
-        // agente (cualquier estado no-terminal) o del admin (PENDIENTE_PAGO).
-        // El `not: PAID` cubre la condición de "ya pagado".
-        where: { id: pedidoId, estado: { not: EstadoPedido.PAGADO } },
+        where: { id: pedidoId, estado: actual.estado },
         data: {
           estado: EstadoPedido.PAGADO,
           fechaPago,
@@ -181,12 +232,6 @@ export class AdminService {
         },
       });
       if (result.count !== 1) {
-        const actual = await tx.pedido.findUnique({
-          where: { id: pedidoId },
-          select: { estado: true },
-        });
-        // Idempotencia: si ya estaba PAID, no hay transición que anunciar.
-        if (actual?.estado === EstadoPedido.PAGADO) return { yaPagado: true as const };
         throw new ConflictException('El estado del pedido cambió durante el pago');
       }
       const pedidoActualizado = await tx.pedido.findUnique({ where: { id: pedidoId } });
@@ -195,11 +240,15 @@ export class AdminService {
       await tx.historialPedido.create({
         data: {
           pedidoId,
-          estadoAnterior,
+          estadoAnterior: actual.estado,
           estadoNuevo: EstadoPedido.PAGADO,
-          observacion: body?.referencia
-            ? `Pago confirmado (ref: ${body.referencia})`
-            : 'Pago confirmado por sistema externo',
+          // Un pago a mano debe poder distinguirse a simple vista de un cobro de VFP.
+          observacion: esAgente
+            ? referencia
+              ? `Pago confirmado (ref: ${referencia})`
+              : 'Pago confirmado por sistema externo'
+            : `Pago confirmado MANUALMENTE por ${usuario.nombre}` +
+              (referencia ? ` (ref: ${referencia})` : ' (sin referencia)'),
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
         },
@@ -209,16 +258,28 @@ export class AdminService {
       // emitirlos aquí los mandaría antes de confirmar, y un rollback
       // posterior dejaría a los clientes con un evento de un cambio que nunca
       // ocurrió.
-      return { yaPagado: false as const, pedido: pedidoActualizado, tiendaId: pedido.tiendaId };
+      return {
+        yaPagado: false as const,
+        pedido: pedidoActualizado,
+        tiendaId: pedido.tiendaId,
+        estadoAnterior: actual.estado,
+      };
     });
 
     // Idempotente: el pedido ya estaba pagado, no se emite nada.
     if (resultado.yaPagado) return resultado.pedido;
 
-    // `estadoAnterior` sale del pedido REAL, no de un literal. Antes el
-    // payload decía siempre `PENDING_PAID → PAID`, pero el agente puede
-    // llegar desde cualquier estado no-terminal (el cobro ya ocurrió en VFP),
-    // así que el evento mentía sobre el origen de la transición.
+    if (!esAgente) {
+      this.logger.warn(
+        `Pago MANUAL del pedido ${pedidoId} por ${usuario.nombre} (id ${usuario.userId})` +
+          (referencia ? ` ref=${referencia}` : ' sin referencia'),
+      );
+    }
+
+    // `estadoAnterior` sale del pedido REAL (el que se leyó en la transacción), no de un
+    // literal: el agente puede llegar desde cualquier estado no-terminal (el cobro ya
+    // ocurrió en VFP), así que el evento no debe mentir sobre el origen de la transición.
+    const estadoAnterior = resultado.estadoAnterior;
     this.realtime.emitToTienda(resultado.tiendaId, 'pedido.estado', {
       id: pedidoId,
       estadoAnterior,
@@ -229,6 +290,23 @@ export class AdminService {
       estadoAnterior,
       estadoNuevo: EstadoPedido.PAGADO,
     });
+
+    // Oct 2026: el pago por transferencia de este pedido (si lo hay) se entera. Va DESPUÉS del
+    // commit y con sus errores contenidos: el cobro de VFP ya quedó registrado y no debe
+    // deshacerse porque falle el módulo de pagos. Si esto falla, quien mira el pago lo corrige
+    // (`sanarSiYaSeCobro`).
+    try {
+      const cambioPago = await resolverPagoAlCobrarse(
+        this.prisma,
+        pedidoId,
+        esAgente ? ACTOR_AGENTE : { id: usuario.userId, rol: usuario.rol, nombre: usuario.nombre },
+      );
+      if (cambioPago) emitirCambioDePago(this.realtime, cambioPago);
+    } catch (err) {
+      this.logger.error(
+        `Pedido ${pedidoId} cobrado, pero no se pudo actualizar su pago por transferencia: ${(err as Error).message}`,
+      );
+    }
 
     const pedidoCompleto = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (pedidoCompleto) {

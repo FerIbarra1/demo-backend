@@ -32,7 +32,7 @@ export const PedidoRecordatorioRecoger = ({
   <PedidoEmailShell
     preview={`¿Aún quieres tu pedido ${folioVisible(pedido)}?`}
     title="¿Aún quieres tu pedido?"
-    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido ${folioVisible(pedido)} sigue apartado en tienda esperando a que pases por él.`}
+    greeting={`Hola, ${pedido.clienteNombre}. Tu pedido sigue apartado en tienda esperando a que pases por él.`}
     pedido={pedido}
     pedidoUrl={pedidoUrl}
     ctaLabel="Ver mi pedido"
@@ -40,10 +40,9 @@ export const PedidoRecordatorioRecoger = ({
     frontendUrl={frontendUrl}
     bodyExtras={
       <>
-        {pedido.tiendaNombre ? (
-          <Callout variant="info" label="Te esperamos en">
-            {pedido.tiendaNombre}
-            {pedido.tiendaTelefono ? `\nTel. ${pedido.tiendaTelefono}` : ''}
+        {pedido.tiendaDireccion ? (
+          <Callout variant="info" label="Dónde">
+            {pedido.tiendaDireccion}
           </Callout>
         ) : null}
         <Text
@@ -65,8 +64,7 @@ export const PedidoRecordatorioRecoger = ({
             lineHeight: '1.6',
           }}
         >
-          Si no recibimos respuesta, cancelaremos el pedido pasado un tiempo para regresar la
-          mercancía al anaquel.
+          Si no tenemos noticias tuyas, podremos cancelarlo para regresar la mercancía al anaquel.
         </Text>
       </>
     }
