@@ -187,20 +187,35 @@ export class LocalStore {
 
   // ---------------- folios reservados (parte B) ----------------
 
-  getFolioReservado(tiendaId: number, pedidoId: number): string | null {
+  /**
+   * El folio que este agente ya tomó para el pedido. `soloVigentes` descarta el ABANDONADO (`estado = 2`: la nube lo
+   * rechazó N veces, casi siempre `FOLIO_EN_USO` = ese número ya es de OTRO pedido de la tienda). `FolioProcessor` lo
+   * sigue viendo (reenvía el mismo y la nube lo vuelve a rechazar en rojo, para que una persona arregle el
+   * consecutivo); lo que NUNCA debe hacer es escribirse en el ERP: `DownProcessor` pide solo los vigentes, porque un
+   * folio duplicado en el Sistema Comercial (la fuente de verdad) no se arregla desde la nube.
+   */
+  getFolioReservado(tiendaId: number, pedidoId: number, soloVigentes = false): string | null {
     const row = this.db
-      .prepare(`SELECT folio FROM folio_reservado WHERE tienda_id = ? AND pedido_id = ?`)
+      .prepare(
+        `SELECT folio FROM folio_reservado WHERE tienda_id = ? AND pedido_id = ?${soloVigentes ? ' AND estado <> 2' : ''}`,
+      )
       .get(tiendaId, pedidoId) as { folio: string } | undefined;
     return row?.folio ?? null;
   }
 
-  /** Guarda el folio recién tomado de Firebird, ANTES de avisar a la nube. No pisa uno ya reservado. */
+  /**
+   * Guarda el folio recién tomado de Firebird, ANTES de avisar a la nube. No pisa uno ya reservado y vigente; SÍ
+   * reemplaza uno abandonado (vuelve a empezar: estado 0, sin rechazos): si no, el número nuevo que tomó
+   * `DownProcessor` no quedaría guardado y un reintento del grabado gastaría otro.
+   */
   setFolioReservado(tiendaId: number, pedidoId: number, folio: string): void {
     this.db
       .prepare(
         `INSERT INTO folio_reservado (tienda_id, pedido_id, folio, created_at)
          VALUES (?, ?, ?, ?)
-         ON CONFLICT (tienda_id, pedido_id) DO NOTHING`,
+         ON CONFLICT (tienda_id, pedido_id) DO UPDATE
+           SET folio = excluded.folio, estado = 0, intentos = 0, created_at = excluded.created_at
+           WHERE folio_reservado.estado = 2`,
       )
       .run(tiendaId, pedidoId, folio, Date.now());
   }

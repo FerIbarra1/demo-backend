@@ -7,13 +7,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { EstadoDtf, EstadoPreflight, Prisma, RolUsuario } from '@prisma/client';
+import { EstadoDtf, Prisma, RolUsuario } from '@prisma/client';
 import { createHash } from 'crypto';
 import { createReadStream } from 'fs';
-import { open, stat, unlink, mkdtemp, rm } from 'fs/promises';
+import { open, unlink, mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { pipeline } from 'stream/promises';
+import { DTF_MAX_BYTES } from '../../config/app.config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { UserContext } from '../../types/pedido.types';
 import { PreciosService } from '../precios/precios.service';
@@ -250,7 +251,7 @@ export class DtfTrabajoService {
           'Este trabajo ya no admite archivos nuevos (se está imprimiendo o ya terminó).',
         );
       }
-      const maxBytes = this.config.get<number>('app.dtf.maxBytes') ?? 300 * 1024 * 1024;
+      const maxBytes = this.config.get<number>('app.dtf.maxBytes') ?? DTF_MAX_BYTES;
       if (archivo.size <= 0) throw new BadRequestException('El archivo está vacío.');
       if (archivo.size > maxBytes)
         throw new BadRequestException(
@@ -286,62 +287,81 @@ export class DtfTrabajoService {
       const key = await this.storage.guardarDesdeRuta(archivo.path, t.id, version, formato);
       const ahora = new Date();
       const nuevoEstado: EstadoDtf = t.estado === 'BORRADOR' ? 'BORRADOR' : 'RECIBIDO';
-      const a = await this.prisma.$transaction(async (tx) => {
-        const fila = await tx.pedidoDtfArchivo.create({
-          data: {
-            dtfId: t.id,
-            version,
-            archivoKey: key,
-            nombreOriginal: archivo.originalname.slice(0, 200),
-            mime: formato === 'pdf' ? 'application/pdf' : 'image/png',
-            bytes: archivo.size,
-            sha256,
-            canal,
-            subidoPorId: actor.tipo === 'USUARIO' ? actor.user.userId : null,
-            subidoPorRol: actor.tipo === 'USUARIO' ? actor.user.rol : 'CELULAR',
-          },
+      const a = await this.prisma
+        .$transaction(async (tx) => {
+          const fila = await tx.pedidoDtfArchivo.create({
+            data: {
+              dtfId: t.id,
+              version,
+              archivoKey: key,
+              nombreOriginal: archivo.originalname.slice(0, 200),
+              mime: formato === 'pdf' ? 'application/pdf' : 'image/png',
+              bytes: archivo.size,
+              sha256,
+              canal,
+              subidoPorId: actor.tipo === 'USUARIO' ? actor.user.userId : null,
+              subidoPorRol: actor.tipo === 'USUARIO' ? actor.user.rol : 'CELULAR',
+            },
+          });
+          await tx.pedidoDtf.update({
+            where: { id: t.id },
+            data: {
+              versionVigente: version,
+              estado: nuevoEstado,
+              altoCm: null,
+              anchoCm: null,
+              metrosCobrados: null,
+              subtotal: 0,
+              asignadoAId: null,
+              asignadoAt: null,
+              aprobadoAt: null,
+              horaEstimadaAt: null,
+              correccionMotivos: Prisma.DbNull,
+              correccionNota: null,
+              aceptoRiesgo: false,
+              ...(t.estado !== 'BORRADOR' && !t.recibidoAt ? { recibidoAt: ahora } : {}),
+            },
+          });
+          await this.emisor.evento(
+            tx,
+            t.id,
+            version === 1 ? 'ARCHIVO_SUBIDO' : 'VERSION_NUEVA',
+            quien,
+            {
+              de: t.estado,
+              a: nuevoEstado,
+              detalle: { version, nombre: archivo.originalname, bytes: archivo.size, canal },
+            },
+          );
+          return fila;
+        })
+        .catch(async (err: unknown) => {
+          // El archivo YA está en el almacenamiento privado y la BD no lo registró: sin esto queda huérfano para siempre.
+          await this.storage.eliminar(key);
+          // Dos subidas al mismo borrador a la vez (web y celular por QR, un doble clic) calculan la misma versión desde
+          // una lectura sin bloqueo; la segunda choca con `@@unique([dtfId, version])`. Es una carrera, no un 500.
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+            throw new ConflictException(
+              'Se acaba de subir otro archivo a este trabajo al mismo tiempo. Vuelve a intentarlo.',
+            );
+          }
+          throw err;
         });
-        const cambia = nuevoEstado !== t.estado;
-        await tx.pedidoDtf.update({
-          where: { id: t.id },
-          data: {
-            versionVigente: version,
-            estado: nuevoEstado,
-            altoCm: null,
-            anchoCm: null,
-            metrosCobrados: null,
-            subtotal: 0,
-            asignadoAId: null,
-            asignadoAt: null,
-            aprobadoAt: null,
-            horaEstimadaAt: null,
-            correccionMotivos: Prisma.DbNull,
-            correccionNota: null,
-            aceptoRiesgo: false,
-            ...(t.estado !== 'BORRADOR' && !t.recibidoAt ? { recibidoAt: ahora } : {}),
-          },
-        });
-        await this.emisor.evento(
-          tx,
-          t.id,
-          version === 1 ? 'ARCHIVO_SUBIDO' : 'VERSION_NUEVA',
-          quien,
-          {
-            de: t.estado,
-            a: nuevoEstado,
-            detalle: { version, nombre: archivo.originalname, bytes: archivo.size, canal },
-          },
-        );
-        void cambia;
-        return fila;
-      });
       this.emisor.archivoRecibido(t, version);
       this.emisor.estado({ ...t, estado: nuevoEstado });
 
       const analisis = this.analizar(a.id);
-      const espera = new Promise<'tarde'>((r) => setTimeout(() => r('tarde'), ESPERA_PREFLIGHT_MS));
-      const r = await Promise.race([analisis, espera]);
-      void r;
+      let temporizador: NodeJS.Timeout | undefined;
+      const espera = new Promise<'tarde'>((r) => {
+        temporizador = setTimeout(() => r('tarde'), ESPERA_PREFLIGHT_MS);
+      });
+      try {
+        await Promise.race([analisis, espera]);
+      } finally {
+        // Sin esto cada subida dejaba un temporizador vivo 25 s (con la fila del trabajo en su cierre) aunque el
+        // análisis terminara antes.
+        clearTimeout(temporizador);
+      }
       return { duplicado: false, trabajo: await this.vistaPara(trabajoId, actor) };
     } finally {
       await unlink(archivo.path).catch(() => undefined);
@@ -636,9 +656,5 @@ export class DtfTrabajoService {
     });
     this.emisor.mensaje(t);
     return { id: m.id };
-  }
-
-  async tamanioArchivo(ruta: string) {
-    return (await stat(ruta)).size;
   }
 }

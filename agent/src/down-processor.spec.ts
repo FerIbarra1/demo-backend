@@ -323,6 +323,29 @@ describe('DownProcessor delivery', () => {
     assert.deepEqual(confirmados, ['50:409']);
   });
 
+  it('un folio ABANDONADO (la nube lo rechazó, ese número ya es de otro pedido) NO se graba en el ERP: toma el siguiente consecutivo', async () => {
+    const { fb, reservas, pedidoCalls } = firebirdFake([811]);
+    const reservados = new Map<string, string>([['50:411', '0000000555']]);
+    const abandonados = new Set(['50:411']);
+    const store = {
+      ...storeSimple(null, reservados),
+      // Igual que el LocalStore real: `soloVigentes` descarta el abandonado; guardar uno nuevo lo reemplaza.
+      getFolioReservado: (t: number, p: number, soloVigentes?: boolean) =>
+        soloVigentes && abandonados.has(`${t}:${p}`) ? null : (reservados.get(`${t}:${p}`) ?? null),
+      setFolioReservado: (t: number, p: number, f: string) => {
+        reservados.set(`${t}:${p}`, f);
+        abandonados.delete(`${t}:${p}`);
+      },
+    };
+    const dp = new DownProcessor(cfg, fb as any, nubeCon(pedido(411, 'l', null)) as any, store as any, logger());
+
+    await dp.runOnce();
+
+    assert.notEqual(pedidoCalls[0][2], '0000000555', 'el folio muerto jamás llega a GRABAR_PEDIDOS');
+    assert.equal(pedidoCalls[0][2], '0000000001');
+    assert.deepEqual(reservas, [50]);
+  });
+
   it('si el grabado falla y se reintenta, REUSA el folio ya tomado en vez de gastar otro', async () => {
     const { fb, reservas, pedidoCalls } = firebirdFake([803]);
     const reservados = new Map<string, string>([['50:403', '0000000555']]); // un intento anterior ya lo tomó

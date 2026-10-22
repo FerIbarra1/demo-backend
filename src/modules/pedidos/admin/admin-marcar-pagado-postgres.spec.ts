@@ -204,6 +204,25 @@ describe('marcarComoPagado contra PostgreSQL', () => {
     expect(notifications.enviar).toHaveBeenCalledTimes(1);
   });
 
+  // El de arriba pasa o falla según CÓMO se entrelacen las dos transacciones (con carga de la suite completa fallaba
+  // a veces): si las dos LEEN `PENDIENTE_PAGO` antes de que alguna escriba, la segunda espera la fila, al re-evaluar
+  // el `WHERE` ya no coincide (`count 0`) y lanzaba Conflict en lugar de ser idempotente. Una sola ronda no basta
+  // para fijarlo; muchas, sí.
+  it('carrera: en 30 rondas de dos cobros simultáneos NINGUNO lanza Conflict y cada pedido se cobra UNA vez', async () => {
+    for (let i = 0; i < 30; i++) {
+      notifications.enviar.mockClear();
+      const p = await crearPedido(EstadoPedido.PENDIENTE_PAGO);
+      const res = await Promise.allSettled([
+        servicio().marcarComoPagado(p.id, undefined, AGENTE),
+        servicio().marcarComoPagado(p.id, undefined, AGENTE),
+      ]);
+
+      expect(res.map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+      expect(await prisma.historialPedido.count({ where: { pedidoId: p.id } })).toBe(1);
+      expect(notifications.enviar).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('un CANCELADO ya cancelado sigue rechazándose', async () => {
     const p = await crearPedido(EstadoPedido.CANCELADO);
     await expect(servicio().marcarComoPagado(p.id, undefined, AGENTE)).rejects.toThrow(

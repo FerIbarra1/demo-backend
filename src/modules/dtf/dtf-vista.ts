@@ -129,12 +129,16 @@ export function vistaTrabajo(t: TrabajoCompleto, o: VistaOpts) {
         : null,
     aceptoRiesgo: t.aceptoRiesgo,
     reimpresiones: t.reimpresiones,
-    asignadoA: t.asignadoA
-      ? {
-          id: t.asignadoA.id,
-          nombre: `${t.asignadoA.nombre}${t.asignadoA.apellido ? ' ' + t.asignadoA.apellido : ''}`,
-        }
-      : null,
+    // Quién revisa el trabajo es dato del PERSONAL: lo pinta la consola de Impresión. El cliente no lo ve (mismo criterio
+    // que el historial que lee: el nombre de un empleado no le sirve y es dato del empleado). Antes llegaba también a
+    // `GET dtf/trabajos/:id`, al detalle del pedido y a la lista de borradores del cliente.
+    asignadoA:
+      o.mira === 'impresion' && t.asignadoA
+        ? {
+            id: t.asignadoA.id,
+            nombre: `${t.asignadoA.nombre}${t.asignadoA.apellido ? ' ' + t.asignadoA.apellido : ''}`,
+          }
+        : null,
     // Línea de tiempo para el cliente y la consola.
     fechas: {
       creado: t.createdAt,

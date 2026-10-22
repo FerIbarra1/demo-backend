@@ -59,12 +59,53 @@ describe('bolsaEnManosDeBodega', () => {
     const { where } = findFirst.mock.calls[0][0];
     expect(where.pedidoId).toBe(7);
     expect(where.estadoAnterior).toBe(EstadoPedido.EN_REVISION);
-    // Incluye PENDIENTE_PAGO: el domicilio salta el área de entrega.
+    // Incluye PENDIENTE_PAGO (el domicilio salta el área de entrega) y EN_DTF (el cierre de un pedido con DTF pendiente).
     expect(where.estadoNuevo.in).toEqual([
       EstadoPedido.REVISADO,
       EstadoPedido.ESPERANDO_APROBACION,
       EstadoPedido.PENDIENTE_PAGO,
+      EstadoPedido.EN_DTF,
     ]);
+  });
+
+  describe('con un historial real (no un mock que devuelve lo que se le diga)', () => {
+    type Fila = { estadoAnterior: EstadoPedido; estadoNuevo: EstadoPedido };
+    /** `findFirst` que EVALÚA el `where` contra un historial, como lo haría la BD. */
+    const prismaConHistorial = (historial: Fila[]) => ({
+      historialPedido: {
+        findFirst: jest.fn(async ({ where }) =>
+          historial.some(
+            (h) =>
+              h.estadoAnterior === where.estadoAnterior &&
+              where.estadoNuevo.in.includes(h.estadoNuevo),
+          )
+            ? { id: 1 }
+            : null,
+        ),
+      },
+    });
+
+    it('MIXTO (prendas + DTF) que volvió a bodega por un ajuste: su bolsa sigue en la mesa → NO está en manos de bodega', async () => {
+      const prisma = prismaConHistorial([
+        // Bodega cerró el surtido: el gate lo mandó a EN_DTF (nunca hubo EN_REVISION → REVISADO).
+        { estadoAnterior: EstadoPedido.EN_REVISION, estadoNuevo: EstadoPedido.EN_DTF },
+        { estadoAnterior: EstadoPedido.EN_DTF, estadoNuevo: EstadoPedido.REVISADO },
+        // Mostrador pidió un ajuste que sube cantidades: vuelve a la cola de bodega, sin asignar.
+        { estadoAnterior: EstadoPedido.REVISADO, estadoNuevo: EstadoPedido.EN_REVISION },
+      ]);
+      await expect(bolsaEnManosDeBodega(prisma, pedido(EstadoPedido.EN_REVISION))).resolves.toBe(
+        false,
+      );
+    });
+
+    it('el mismo pedido sin cierre de surtido (solo entró y salió a la cola) sí está en manos de bodega', async () => {
+      const prisma = prismaConHistorial([
+        { estadoAnterior: EstadoPedido.SOLICITADO, estadoNuevo: EstadoPedido.EN_REVISION },
+      ]);
+      await expect(bolsaEnManosDeBodega(prisma, pedido(EstadoPedido.EN_REVISION))).resolves.toBe(
+        true,
+      );
+    });
   });
 
   it.each([

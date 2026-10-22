@@ -169,7 +169,7 @@ export class DownProcessor {
       ? entregaPrevia!.externalFolio!
       : esFolio(pedido.folio)
         ? pedido.folio
-        : this.store.getFolioReservado(tiendaId, pedido.pedidoId);
+        : this.store.getFolioReservado(tiendaId, pedido.pedidoId, true); // solo vigentes: un folio abandonado NO se graba en el ERP
     if (!folio) {
       folio = await reservarFolioConReintentos(this.fb, localTiendaId, { waitTimeoutSec: 10 });
       this.store.setFolioReservado(tiendaId, pedido.pedidoId, folio);

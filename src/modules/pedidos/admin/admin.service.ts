@@ -243,6 +243,13 @@ export class AdminService {
         },
       });
       if (result.count !== 1) {
+        // Dos cobros simultáneos del mismo pedido (el agente reintenta, o llegan dos eventos): las dos transacciones
+        // LEYERON el mismo estado antes de que alguna escribiera; la segunda esperó la fila y, al re-evaluar el
+        // `WHERE`, ya no coincidió. Si quien ganó lo dejó cobrado es idempotencia, no un conflicto (la lectura de
+        // arriba solo la cubría cuando la segunda transacción EMPEZABA después del commit de la primera). Cualquier
+        // otro estado (cancelado, enviado a mano…) sí cambió "durante el pago".
+        const ahora = await tx.pedido.findUnique({ where: { id: pedidoId } });
+        if (ahora && yaFueCobrado(ahora.estado)) return { yaPagado: true as const, pedido: ahora };
         throw new ConflictException('El estado del pedido cambió durante el pago');
       }
       const pedidoActualizado = await tx.pedido.findUnique({ where: { id: pedidoId } });

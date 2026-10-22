@@ -215,6 +215,29 @@ describe('LocalStore — folios reservados', () => {
     assert.equal(store.getFolioReservado(1, 10), '0000000001');
   });
 
+  it('un folio ABANDONADO (la nube lo rechazó N veces) no se ofrece para grabar en el ERP, y un número nuevo lo reemplaza', () => {
+    store.setFolioReservado(1, 10, '0000000001');
+    store.rechazarFolio(1, 10, 2);
+    store.rechazarFolio(1, 10, 2); // 2 rechazos con tope 2 → estado 2 (abandonado)
+
+    assert.equal(store.getFolioReservado(1, 10), '0000000001', 'FolioProcessor lo sigue viendo: queda el rastro');
+    assert.equal(store.getFolioReservado(1, 10, true), null, 'pero NO es uno que se pueda grabar en el ERP');
+    assert.equal(store.foliosSinConfirmar().length, 0, 'ya no se reintenta solo');
+
+    store.setFolioReservado(1, 10, '0000000007'); // DownProcessor tomó uno nuevo
+    assert.equal(store.getFolioReservado(1, 10, true), '0000000007');
+    assert.equal(store.foliosSinConfirmar().length, 1, 'el nuevo vuelve a estar por confirmar, con los rechazos en cero');
+    assert.equal(store.foliosSinConfirmar()[0].intentos, 0);
+  });
+
+  it('un folio VIGENTE se ofrece con y sin `soloVigentes`, y un número nuevo no lo pisa', () => {
+    store.setFolioReservado(1, 10, '0000000001');
+    store.rechazarFolio(1, 10, 10); // un rechazo de 10: sigue vigente
+    assert.equal(store.getFolioReservado(1, 10, true), '0000000001');
+    store.setFolioReservado(1, 10, '0000000002');
+    assert.equal(store.getFolioReservado(1, 10), '0000000001');
+  });
+
   it('confirmar lo saca de los pendientes', () => {
     store.setFolioReservado(1, 10, '0000000001');
     assert.equal(store.foliosSinConfirmar().length, 1);

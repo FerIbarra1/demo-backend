@@ -53,7 +53,16 @@ export async function bolsaEnManosDeBodega(
       pedidoId: pedido.id,
       estadoAnterior: EstadoPedido.EN_REVISION,
       estadoNuevo: {
-        in: [EstadoPedido.REVISADO, EstadoPedido.ESPERANDO_APROBACION, EstadoPedido.PENDIENTE_PAGO],
+        in: [
+          EstadoPedido.REVISADO,
+          EstadoPedido.ESPERANDO_APROBACION,
+          EstadoPedido.PENDIENTE_PAGO,
+          // Un pedido con DTF por imprimir cierra el surtido hacia EN_DTF (el gate de la máquina de estados redirige el
+          // REVISADO / PENDIENTE_PAGO): ESE es su cierre. Sin él, un mixto que volvió a bodega por un ajuste parecía
+          // «nunca surtido», se contaba como «en las manos de bodega» y su cancelación no generaba reposición aunque la
+          // bolsa seguía en la mesa.
+          EstadoPedido.EN_DTF,
+        ],
       },
     },
     select: { id: true },

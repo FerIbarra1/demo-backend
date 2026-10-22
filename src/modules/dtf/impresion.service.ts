@@ -3,7 +3,6 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
-  NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EstadoDtf, Prisma } from '@prisma/client';
@@ -21,8 +20,6 @@ import {
   MOTIVOS_REIMPRESION,
   motivoCorreccionValido,
   motivoRechazoValido,
-  textoMotivoCorreccion,
-  textoMotivoRechazo,
 } from './core/dtf-motivos';
 import {
   ESTADOS_DTF_CON_HORA,

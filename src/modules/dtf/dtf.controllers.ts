@@ -13,6 +13,7 @@ import {
   Query,
   Res,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -25,17 +26,22 @@ import { tmpdir } from 'os';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { DTF_MAX_BYTES } from '../../config/app.config';
+import { DtfMovilGuard } from './dtf-movil.guard';
 import { UserContext } from '../../types/pedido.types';
 import { DtfConfigService } from './dtf-config.service';
 import { DtfTrabajoService } from './dtf-trabajo.service';
 import { ImpresionService, TabCola } from './impresion.service';
 
-/** Multer a DISCO (nunca a memoria): un PDF de DTF pesa decenas o cientos de MB. */
-const LIMITE = 300 * 1024 * 1024;
+/**
+ * Multer a DISCO (nunca a memoria): un PDF de DTF pesa decenas o cientos de MB. El tope es el MISMO que valida
+ * `subirArchivo` (`DTF_MAX_BYTES`, una sola constante): con dos copias, bajar una dejaba a Multer escribiendo hasta
+ * el tope viejo antes de que el servicio rechazara por tamaño.
+ */
 const subida = () =>
   FileInterceptor('file', {
     storage: diskStorage({ destination: tmpdir() }),
-    limits: { fileSize: LIMITE, files: 1, fields: 6 },
+    limits: { fileSize: DTF_MAX_BYTES, files: 1, fields: 6 },
   });
 
 function enviarArchivo(
@@ -86,6 +92,7 @@ export class DtfPublicoController {
   @Public()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('movil/:token/archivo')
+  @UseGuards(DtfMovilGuard)
   @UseInterceptors(subida())
   async subirDesdeMovil(@Param('token') token: string, @UploadedFile() file?: Express.Multer.File) {
     if (!file) throw new BadRequestException('Falta el archivo (campo "file").');
