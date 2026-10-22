@@ -46,10 +46,13 @@ export const MAX_COMPROBANTES_PENDIENTES = 3;
 /**
  * ¿Se puede pagar este pedido por transferencia?
  *
- * ÚNICO punto de control (decisión del dueño, 15-oct-2026): los pedidos a DOMICILIO quedan fuera
- * mientras se rediseña el flujo de envíos. Un domicilio verificado nunca llegaría a PAGADO: no
- * aparece en ninguna cola de caja, así que nadie vería que falta registrarlo en VFP. Cuando
- * existan los envíos nuevos, se cambia SOLO esta función.
+ * ÚNICO punto de control. El 15-oct-2026 los pedidos a DOMICILIO quedaban fuera "mientras se rediseña
+ * el flujo de envíos": un domicilio verificado nunca llegaba a PAGADO porque ninguna consola de caja
+ * lo mostraba (hallazgo H1). El 19-oct-2026 el dueño decidió que **a domicilio SOLO se paga por
+ * transferencia**, y el hueco se cerró en las tres partes que el plan (§18) pedía: (1) el método se
+ * fuerza al hacer el pedido (`cliente.service`) y se exige que haya una cuenta bancaria, porque a
+ * domicilio NO hay caja de respaldo; (2) las instrucciones salen solas al pasar a pago; (3) la
+ * pestaña «Por registrar» de caja incluye los domicilios verificados (`obtenerColaVentanilla`).
  *
  * El frontend no repite la regla: recibe el resultado (`puedePagarPorTransferencia`).
  */
@@ -60,12 +63,6 @@ export function transferenciaDisponible(pedido: {
   disponible: boolean;
   motivo: string | null;
 } {
-  if (pedido.modoEntrega === ModoEntrega.DOMICILIO) {
-    return {
-      disponible: false,
-      motivo: 'El pago por transferencia todavía no está disponible para pedidos a domicilio.',
-    };
-  }
   if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO) {
     // Instrucciones solo cuando el total es firme y el pedido ya existe en VFP (tiene folio):
     // antes, el monto puede cambiar en mostrador y la tienda no podría registrar el cobro.
@@ -96,8 +93,16 @@ export const MOTIVOS_RECHAZO = {
 export type MotivoRechazo = keyof typeof MOTIVOS_RECHAZO;
 export const CODIGOS_MOTIVO_RECHAZO = Object.keys(MOTIVOS_RECHAZO) as MotivoRechazo[];
 
+/** ¿Es un pedido que se envía por paquetería? Ahí «pagar en tienda» y «recoger» no existen. */
+export const esDomicilio = (modoEntrega: ModoEntrega | null | undefined): boolean =>
+  modoEntrega === ModoEntrega.DOMICILIO;
+
 /** Lo que ve el cliente por estado. Texto único: el frontend no lo reescribe. */
-export function mensajeParaCliente(estado: EstadoPagoTransferencia): string {
+export function mensajeParaCliente(
+  estado: EstadoPagoTransferencia,
+  opts: { domicilio?: boolean } = {},
+): string {
+  const domicilio = !!opts.domicilio;
   switch (estado) {
     case EstadoPagoTransferencia.PENDIENTE:
       return 'Transfiere el monto exacto con los datos de abajo y sube tu comprobante.';
@@ -105,18 +110,49 @@ export function mensajeParaCliente(estado: EstadoPagoTransferencia): string {
       return 'Recibimos tu comprobante y estamos confirmando que el dinero llegó.';
     case EstadoPagoTransferencia.VERIFICADO:
       // OJO: no dice "pagado". El pedido no lo está hasta que la tienda registra el cobro en VFP.
-      return 'Recibimos tu transferencia. En cuanto la tienda registre el pago podrás recoger tu pedido.';
+      return domicilio
+        ? 'Recibimos tu transferencia. En cuanto la tienda registre el pago, tu pedido sale a envío.'
+        : 'Recibimos tu transferencia. En cuanto la tienda registre el pago podrás recoger tu pedido.';
     case EstadoPagoTransferencia.APLICADO:
       return 'Tu pago por transferencia quedó registrado.';
     case EstadoPagoTransferencia.CANCELADO:
-      return 'Cancelaste el pago por transferencia. Puedes pagar en tienda.';
+      return domicilio
+        ? 'Se canceló el pago por transferencia.'
+        : 'Cancelaste el pago por transferencia. Puedes pagar en tienda.';
     case EstadoPagoTransferencia.VENCIDO:
-      return 'Las instrucciones de transferencia vencieron. Pide unas nuevas o paga en tienda.';
+      return domicilio
+        ? 'Estas instrucciones de transferencia ya no están activas. Pide unas nuevas.'
+        : 'Estas instrucciones de transferencia ya no están activas. Pide unas nuevas o paga en tienda.';
     case EstadoPagoTransferencia.REEMBOLSO_PENDIENTE:
       return 'Vamos a devolverte tu dinero. Te avisaremos por correo cuando lo hagamos.';
     case EstadoPagoTransferencia.REEMBOLSADO:
       return 'Te devolvimos el dinero de tu transferencia.';
   }
+}
+
+/**
+ * Cuánto lleva esperando un pago `PENDIENTE` (instrucciones emitidas y ningún comprobante). Sin plazo:
+ * no vence solo, así que lo único que se le dice a Tesorería y a caja es cuánto lleva, y ellos
+ * deciden. `null` en cualquier otro estado: con un comprobante en revisión ya no se espera al cliente.
+ *
+ * El texto lo arma el servidor (como `mensajeParaCaja`) para que las tres pantallas digan lo mismo.
+ */
+export function esperaDelPago(
+  pago: { estado: EstadoPagoTransferencia; createdAt: Date },
+  ahora = new Date(),
+): { desde: Date; dias: number; texto: string } | null {
+  if (pago.estado !== EstadoPagoTransferencia.PENDIENTE) return null;
+  const ms = Math.max(0, ahora.getTime() - pago.createdAt.getTime());
+  const horas = Math.floor(ms / 3_600_000);
+  const dias = Math.floor(horas / 24);
+  const unidad = (n: number, uno: string, varios: string) => `${n} ${n === 1 ? uno : varios}`;
+  const texto =
+    dias >= 1
+      ? `Lleva ${unidad(dias, 'día', 'días')} esperando`
+      : horas >= 1
+        ? `Lleva ${unidad(horas, 'hora', 'horas')} esperando`
+        : 'Lleva menos de una hora esperando';
+  return { desde: pago.createdAt, dias, texto };
 }
 
 /**
@@ -132,8 +168,8 @@ export function resumirPagoParaCaja(
         montoEsperado: { toString(): string };
         verificadoAt: Date | null;
         requiereRevision: string | null;
-        /** Si viene, caja sabe cuándo venció (ver `mensajeParaCaja`). */
-        venceAt?: Date;
+        /** Desde cuándo esperan las instrucciones (ver `esperaDelPago`). */
+        createdAt: Date;
       }
     | null
     | undefined,
@@ -147,31 +183,21 @@ export function resumirPagoParaCaja(
     montoEsperado: pago.montoEsperado.toString(),
     verificadoAt: pago.verificadoAt,
     requiereRevision: !!pago.requiereRevision,
-    caja: mensajeParaCaja(pago.estado, { vencido: !!pago.venceAt && pago.venceAt < ahora }),
+    caja: mensajeParaCaja(pago.estado),
+    espera: esperaDelPago(pago, ahora),
   };
 }
 
 /** Lo que lee el cajero/mostrador. También único y generado en el servidor. */
-export function mensajeParaCaja(
-  estado: EstadoPagoTransferencia,
-  /** `vencido`: las instrucciones ya pasaron su vigencia (solo importa en PENDIENTE). */
-  opciones: { vencido?: boolean } = {},
-): {
+export function mensajeParaCaja(estado: EstadoPagoTransferencia): {
   accion: 'NO_COBRAR' | 'REGISTRAR_EN_VFP' | null;
   mensaje: string;
 } {
   switch (estado) {
     case EstadoPagoTransferencia.PENDIENTE:
-      // Vencida y sin comprobante: nadie la va a pagar (o ya se arrepintió), pero el bloqueo de
-      // caja sigue hasta que Tesorería la CIERRE: cerrarla es una decisión humana, no automática.
-      // Se le dice a caja qué hacer en vez de dejarla ante un "no cobres" que no se va a quitar solo.
-      if (opciones.vencido) {
-        return {
-          accion: 'NO_COBRAR',
-          mensaje:
-            'La transferencia de este pedido ya venció y no llegó comprobante. Pide a Tesorería que la cierre y entonces cobra en caja: así no hay doble pago.',
-        };
-      }
+      // Sin plazo (decisión del dueño, oct 2026): el bloqueo de caja dura hasta que alguien cierre la
+      // transferencia (Tesorería la marca vencida, o caja la pasa a pagar en tienda). Cuánto lleva
+      // esperando viaja aparte (`espera`), no en el texto.
       return {
         accion: 'NO_COBRAR',
         mensaje:

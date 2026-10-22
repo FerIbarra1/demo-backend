@@ -45,7 +45,12 @@ beforeAll(async () => {
   });
   tiendaId = t.id;
   const c = await prisma.usuario.create({
-    data: { email: `cli-${suffix}@test.local`, password: 'x', nombre: 'Cli', rol: RolUsuario.CLIENTE },
+    data: {
+      email: `cli-${suffix}@test.local`,
+      password: 'x',
+      nombre: 'Cli',
+      rol: RolUsuario.CLIENTE,
+    },
   });
   clienteId = c.id;
   usuarioIds.push(c.id);
@@ -65,7 +70,10 @@ beforeEach(async () => {
   await prisma.ventanilla.deleteMany({ where: { tiendaId } });
   const v = await prisma.ventanilla.create({ data: { tiendaId, numero: 1, cajeroId: ana } });
   ventanillaId = v.id;
-  await prisma.usuario.update({ where: { id: ana }, data: { lastLogin: new Date(), ultimoHeartbeat: new Date() } });
+  await prisma.usuario.update({
+    where: { id: ana },
+    data: { lastLogin: new Date(), ultimoHeartbeat: new Date() },
+  });
 });
 
 async function pedidoDeAna() {
@@ -94,7 +102,9 @@ describe('Ventanilla — elegir una ocupada', () => {
     await expect(svc().elegir(luis, tiendaId, ventanillaId)).rejects.toMatchObject({
       response: { code: 'VENTANILLA_OCUPADA' },
     });
-    expect((await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId).toBe(ana);
+    expect((await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId).toBe(
+      ana,
+    );
   });
 
   it('con confirmación toma el control: avisa a quien la tenía y sus clientes regresan a la fila con su lugar', async () => {
@@ -103,7 +113,9 @@ describe('Ventanilla — elegir una ocupada', () => {
 
     await svc().elegir(luis, tiendaId, ventanillaId, true);
 
-    expect((await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId).toBe(luis);
+    expect((await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId).toBe(
+      luis,
+    );
     const despues = await prisma.pedido.findUnique({ where: { id: p.id } });
     expect(despues!.cajeroAsignadoId).toBeNull();
     expect(despues!.colaCajaDesdeAt).toEqual(antes);
@@ -129,25 +141,38 @@ describe('Ventanilla — elegir una ocupada', () => {
 describe('Ventanilla — barrido de inactividad', () => {
   it('suelta la del cajero sin señales en +15 min y regresa a la fila lo que atendía', async () => {
     const p = await pedidoDeAna();
-    await prisma.usuario.update({ where: { id: ana }, data: { lastLogin: hace(300), ultimoHeartbeat: hace(20) } });
+    await prisma.usuario.update({
+      where: { id: ana },
+      data: { lastLogin: hace(300), ultimoHeartbeat: hace(20) },
+    });
 
     const n = await svc().liberarInactivas();
 
     expect(n).toBeGreaterThanOrEqual(1);
-    expect((await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId).toBeNull();
+    expect(
+      (await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId,
+    ).toBeNull();
     expect((await prisma.pedido.findUnique({ where: { id: p.id } }))!.cajeroAsignadoId).toBeNull();
   });
 
   it('NO toca la del cajero que sigue mandando latidos', async () => {
-    await prisma.usuario.update({ where: { id: ana }, data: { lastLogin: hace(600), ultimoHeartbeat: hace(4) } });
+    await prisma.usuario.update({
+      where: { id: ana },
+      data: { lastLogin: hace(600), ultimoHeartbeat: hace(4) },
+    });
     await svc().liberarInactivas();
-    expect((await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId).toBe(ana);
+    expect((await prisma.ventanilla.findUnique({ where: { id: ventanillaId } }))!.cajeroId).toBe(
+      ana,
+    );
   });
 });
 
 describe('Ventanilla — listar muestra la actividad del ocupante', () => {
   it('marca `ocupanteInactivo` cuando lleva +15 min sin señales', async () => {
-    await prisma.usuario.update({ where: { id: ana }, data: { lastLogin: hace(300), ultimoHeartbeat: hace(40) } });
+    await prisma.usuario.update({
+      where: { id: ana },
+      data: { lastLogin: hace(300), ultimoHeartbeat: hace(40) },
+    });
     const [v] = await svc().listarPorTienda(tiendaId);
     expect(v.ocupanteInactivo).toBe(true);
     expect(v.ultimaActividad).not.toBeNull();

@@ -55,7 +55,11 @@ describe('construirPropuestaDeBodega — cantidades', () => {
 
   it('un NO_DISPONIBLE reporta la cantidad pedida, no 0', () => {
     const { items } = construirPropuestaDeBodega([
-      item({ estadoSurtido: EstadoSurtido.NO_DISPONIBLE, cantidadSurtida: 0, subtotal: new Prisma.Decimal(0) }),
+      item({
+        estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
+        cantidadSurtida: 0,
+        subtotal: new Prisma.Decimal(0),
+      }),
     ]);
 
     expect(items[0].tipo).toBe('no-disponible');
@@ -117,7 +121,7 @@ describe('construirPropuestaDeBodega — el total que se aprueba es el que se co
 
   it('EL BUG DE $200: un pedido de menudeo que baja de 12 piezas pierde la promo, y la propuesta lo refleja', () => {
     // 12 piezas de lista 1 (base $100, mayoreo $80). Con 12 piezas la promo
-    // aplica; bodega sólo tiene 10, así que el pedido baja del umbral.
+    // aplica; bodega solo tiene 10, así que el pedido baja del umbral.
     const items = [
       item({
         id: 1,
@@ -212,11 +216,32 @@ describe('construirPropuestaDeBodega — el total que se aprueba es el que se co
   it('el total de la propuesta cuadra con el cobro en un pedido mixto', () => {
     const items = [
       // Se queda completo.
-      item({ id: 1, cantidadPedida: 6, cantidad: 6, cantidadSurtida: 6, estadoSurtido: EstadoSurtido.COMPLETO, subtotal: new Prisma.Decimal(600) }),
+      item({
+        id: 1,
+        cantidadPedida: 6,
+        cantidad: 6,
+        cantidadSurtida: 6,
+        estadoSurtido: EstadoSurtido.COMPLETO,
+        subtotal: new Prisma.Decimal(600),
+      }),
       // Baja de 8 a 4: el pedido pasa de 14 a 10 piezas y pierde la promo.
-      item({ id: 2, cantidadPedida: 8, cantidad: 4, cantidadSurtida: 4, estadoSurtido: EstadoSurtido.PARCIAL, subtotal: new Prisma.Decimal(640) }),
+      item({
+        id: 2,
+        cantidadPedida: 8,
+        cantidad: 4,
+        cantidadSurtida: 4,
+        estadoSurtido: EstadoSurtido.PARCIAL,
+        subtotal: new Prisma.Decimal(640),
+      }),
       // No hay nada.
-      item({ id: 3, cantidadPedida: 3, cantidad: 3, cantidadSurtida: 0, estadoSurtido: EstadoSurtido.NO_DISPONIBLE, subtotal: new Prisma.Decimal(300) }),
+      item({
+        id: 3,
+        cantidadPedida: 3,
+        cantidad: 3,
+        cantidadSurtida: 0,
+        estadoSurtido: EstadoSurtido.NO_DISPONIBLE,
+        subtotal: new Prisma.Decimal(300),
+      }),
     ];
 
     const { total } = construirPropuestaDeBodega(items);

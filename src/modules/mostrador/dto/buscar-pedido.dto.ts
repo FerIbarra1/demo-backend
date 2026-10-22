@@ -35,4 +35,16 @@ export class BuscarPedidoDto {
   @Min(1)
   @Max(50)
   limite?: number;
+
+  /**
+   * Solo ADMIN: la tienda donde buscar. Va declarado aquí porque el `ValidationPipe` global tiene
+   * `forbidNonWhitelisted`: sin la propiedad, `?tiendaId=` daba 400 a TODOS los roles. El valor se lee
+   * crudo en `@TiendaConsola()` (que ignora este campo para un empleado); aquí solo se deja pasar.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Solo ADMIN: tienda donde buscar (obligatoria para él). Se ignora para el resto de roles.',
+  })
+  @IsOptional()
+  tiendaId?: string;
 }

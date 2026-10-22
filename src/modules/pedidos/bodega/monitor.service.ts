@@ -7,6 +7,7 @@ import { asignadoANombre } from '../core/pedido-mapper';
 import { derivarMotivoReingreso } from '../core/motivo-reingreso';
 import { clientePresenteEnTienda } from '../core/presencia.util';
 import { INACTIVIDAD_ESTACION_MS } from '../core/estacion.util';
+import { turnoCorto } from '../../pedidos/core/folio-erp.util';
 
 /**
  * Umbrales de antigüedad (en minutos) para asignar nivel de urgencia.
@@ -23,7 +24,7 @@ const UMBRALES_WEB = [5, 8, 11];
 const UMBRALES_BODEGUERO = [4, 7, 10];
 const BONO_TIENDA_MIN = 1;
 const TOP_SUGERENCIAS = 3;
-const UMBRAL_SUGERENCIA = 4; // al menos un match por producto, no sólo categoría + bono
+const UMBRAL_SUGERENCIA = 4; // al menos un match por producto, no solo categoría + bono
 
 @Injectable()
 export class MonitorService {
@@ -62,12 +63,23 @@ export class MonitorService {
     const limiteLatido = new Date(ahora.getTime() - INACTIVIDAD_ESTACION_MS);
     const bodeguerosRaw = await this.prisma.usuario.findMany({
       where: {
-        rol: RolUsuario.BODEGA,
-        tiendaId,
         activo: true,
         OR: [
-          { ultimoHeartbeat: { gte: limiteLatido } },
-          { pedidosAsignados: { some: { estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } } } },
+          {
+            rol: RolUsuario.BODEGA,
+            tiendaId,
+            OR: [
+              { ultimoHeartbeat: { gte: limiteLatido } },
+              { pedidosAsignados: { some: { estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } } } },
+            ],
+          },
+          // F3.5 ("cubrir puesto"): un ADMIN que trae pedidos de ESTA tienda sale en la TV como un bodeguero
+          // más, solo mientras los trae. Sin esto sus pedidos desaparecían: ya no salen en las columnas (viven
+          // en la ficha de quien los tiene) y el ADMIN no tiene ficha porque no es `rol BODEGA` con tienda.
+          {
+            rol: RolUsuario.ADMIN,
+            pedidosAsignados: { some: { tiendaId, estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } } },
+          },
         ],
       },
       select: {
@@ -78,12 +90,14 @@ export class MonitorService {
         pedidosAsignados: {
           // F12: incluir ESPERANDO_APROBACION para que el slot del
           // bodeguero muestre "esperando cliente" (el pedido sigue asignado).
-          where: { estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } },
+          // `tiendaId`: un ADMIN puede traer pedidos de otra tienda, que no son de esta TV.
+          where: { tiendaId, estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } },
           orderBy: { asignadoAt: 'desc' },
           take: MAX_PEDIDOS_POR_BODEGUERO,
           select: {
             id: true,
             numeroPedido: true,
+            folioErp: true,
             estado: true,
             asignadoAt: true,
             // Oct 2026: ¿el cliente de lo que está surtiendo ya llegó? El encargado lo ve en la
@@ -104,6 +118,7 @@ export class MonitorService {
         return {
           id: p.id,
           numeroPedido: p.numeroPedido,
+          turno: turnoCorto(p.folioErp),
           estado: p.estado,
           asignadoAt: p.asignadoAt ? p.asignadoAt.toISOString() : ahora.toISOString(),
           minutosEnProceso,
@@ -132,7 +147,7 @@ export class MonitorService {
     // Pero SÍ incluimos EN_REVISION sin asignado (recién liberados) y los
     // marcamos con `esLiberado=true` para que destaquen visualmente.
     //
-    // F11 (ago 2026): este monitor es SOLO de bodega. Sólo se listan
+    // F11 (ago 2026): este monitor es SOLO de bodega. Solo se listan
     // pedidos en estados accionables por bodega: SOLICITADO (esperando
     // tomar) y EN_REVISION sin asignar (recién liberado). F12: se quitaron
     // ESPERANDO_APROBACION (está asignado, no es accionable por otro
@@ -151,6 +166,7 @@ export class MonitorService {
       select: {
         id: true,
         numeroPedido: true,
+        folioErp: true,
         estado: true,
         canalOrigen: true,
         clienteNombre: true,
@@ -237,6 +253,7 @@ export class MonitorService {
       return {
         id: p.id,
         numeroPedido: p.numeroPedido,
+        turno: turnoCorto(p.folioErp),
         estado: p.estado,
         canalOrigen: p.canalOrigen,
         clienteNombre: p.clienteNombre,
@@ -350,8 +367,8 @@ export class MonitorService {
    *   match por categoría ...................... peso 1
    *   bono antigüedad .......................... +1 por minuto en cola
    *
-   * Sólo se devuelven entradas con `itemsCompartidos > 0` y `score >= UMBRAL_SUGERENCIA`
-   * (descarta sugerencias basadas sólo en categoría + antigüedad, que eran ruido).
+   * Solo se devuelven entradas con `itemsCompartidos > 0` y `score >= UMBRAL_SUGERENCIA`
+   * (descarta sugerencias basadas solo en categoría + antigüedad, que eran ruido).
    * El top N se aplica en el caller.
    */
   async calcularSugerencias(

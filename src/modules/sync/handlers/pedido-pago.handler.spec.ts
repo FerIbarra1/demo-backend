@@ -55,6 +55,8 @@ function crear(opts: {
     },
     // Sin pago por transferencia en estos casos.
     pedidoPagoTransferencia: { findFirst: jest.fn().mockResolvedValue(null) },
+    // Oct 2026: el handler cierra solo las tareas del Sistema Comercial que el ERP confirma.
+    tareaSistemaComercial: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
   };
   const adminService = { marcarComoPagado: jest.fn().mockResolvedValue({}) };
   const pedidoState = { cambiarEstadoPorSistema: jest.fn().mockResolvedValue({}) };

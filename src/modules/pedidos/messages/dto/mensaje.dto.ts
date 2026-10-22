@@ -43,7 +43,7 @@ export class CrearMensajeDto {
   @MaxLength(4000)
   contenido: string;
 
-  @ApiPropertyOptional({ description: 'Sólo BODEGA/CAJERO/ADMIN pueden setear false' })
+  @ApiPropertyOptional({ description: 'Solo BODEGA/CAJERO/ADMIN pueden setear false' })
   @IsOptional()
   @IsBoolean()
   visibleParaCliente?: boolean;

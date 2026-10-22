@@ -3,6 +3,7 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { EstadoPedido, ModoEntrega } from '@prisma/client';
 import { operadorActivo } from '../core/estacion.util';
 import { SELECT_ORDEN_COLA_CAJA, ordenarFilaDeCaja, whereFilaDeCaja } from '../core/cola-caja.util';
+import { turnoCorto } from '../../pedidos/core/folio-erp.util';
 
 /**
  * Monitor de ventanillas (jun 2026): snapshot por VENTANILLA (1, 2, 3…)
@@ -72,7 +73,7 @@ export class CajeroMonitorService {
 
     const ventanillas = await Promise.all(
       ventanillasRaw.map(async (v) => {
-        // Sólo se listan los pedidos del cajero si está "activo": con señal de vida (sesión o
+        // Solo se listan los pedidos del cajero si está "activo": con señal de vida (sesión o
         // latido) en los últimos 15 min (`core/estacion.util.ts`). Oct 2026: antes eran 12 HORAS, y
         // una ventanilla cuyo cajero cerró la pestaña se quedaba "Esperando cliente" medio día.
         // Si está libre o inactivo, la sección aparece vacía (la TV la pinta "Cerrada").
@@ -85,12 +86,16 @@ export class CajeroMonitorService {
                 // F16: sin filtro de canal (los web también se cobran aquí).
                 modoEntrega: { not: ModoEntrega.DOMICILIO },
               },
-              select: { id: true, numeroPedido: true },
+              select: { id: true, numeroPedido: true, folioErp: true },
               orderBy: { cajeroAsignadoAt: 'asc' },
             })
           : [];
 
-        const detallePedidos = pedidosRaw.map((p) => ({ id: p.id, numeroPedido: p.numeroPedido }));
+        const detallePedidos = pedidosRaw.map((p) => ({
+          id: p.id,
+          numeroPedido: p.numeroPedido,
+          turno: turnoCorto(p.folioErp),
+        }));
 
         return {
           ventanillaId: v.id,
@@ -120,12 +125,13 @@ export class CajeroMonitorService {
     // no distingue cómo paga cada quien, solo el folio. Domicilio nunca (`whereFilaDeCaja`).
     const colaRaw = await this.prisma.pedido.findMany({
       where: whereFilaDeCaja(tiendaId),
-      select: { ...SELECT_ORDEN_COLA_CAJA, numeroPedido: true },
+      select: { ...SELECT_ORDEN_COLA_CAJA, numeroPedido: true, folioErp: true },
     });
 
     const colaSinAsignar = ordenarFilaDeCaja(colaRaw).map((p) => ({
       id: p.id,
       numeroPedido: p.numeroPedido,
+      turno: turnoCorto(p.folioErp),
     }));
 
     const totalEnCaja = ventanillas.reduce((acc, v) => acc + v.pedidosAsignados, 0);

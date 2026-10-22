@@ -92,6 +92,39 @@ export async function pagoBloqueaCancelacion(db: Db, pedidoId: number) {
 }
 
 /**
+ * Oct 2026: el estado del pago que decide si el CLIENTE puede cancelar, de varios pedidos con UNA sola consulta
+ * (la lista de «Mis pedidos» pide una página entera). Lo lee `decidirCancelacionDelCliente`.
+ *
+ * Cuentan los tres que cambian la respuesta: PENDIENTE (dinero posiblemente en camino: el diálogo pregunta «¿ya
+ * transferiste?»), EN_REVISION y VERIFICADO (bloquean). A lo más hay UN pago vivo por pedido (índice parcial único);
+ * si por algún dato sucio hubiera más de uno, gana el que más protege el dinero.
+ */
+const PRIORIDAD_PAGO_PARA_CANCELAR: Record<string, number> = {
+  [Estado.VERIFICADO]: 3,
+  [Estado.EN_REVISION]: 2,
+  [Estado.PENDIENTE]: 1,
+};
+
+export async function pagosParaCancelar(db: Db, pedidoIds: number[]): Promise<Map<number, Estado>> {
+  const mapa = new Map<number, Estado>();
+  if (pedidoIds.length === 0) return mapa;
+  const pagos = await db.pedidoPagoTransferencia.findMany({
+    where: {
+      pedidoId: { in: pedidoIds },
+      estado: { in: [Estado.PENDIENTE, ...ESTADOS_BLOQUEAN_CANCELACION] },
+    },
+    select: { pedidoId: true, estado: true },
+  });
+  for (const p of pagos) {
+    const actual = mapa.get(p.pedidoId);
+    if (!actual || PRIORIDAD_PAGO_PARA_CANCELAR[p.estado] > PRIORIDAD_PAGO_PARA_CANCELAR[actual]) {
+      mapa.set(p.pedidoId, p.estado);
+    }
+  }
+  return mapa;
+}
+
+/**
  * El pedido se CANCELÓ (cliente, mostrador, propuesta o `SWCANCEL` de VFP). Se llama DENTRO de la
  * transacción de la cancelación: o quedan las dos cosas o ninguna. Dejar un pago con dinero sin
  * resolver porque falló el segundo paso sería perder el rastro de un dinero ajeno.
@@ -312,6 +345,24 @@ export function emitirCambioDePago(
 }
 
 /**
+ * ¿La tienda tiene una cuenta bancaria activa (la suya o la global) a la que el cliente pueda transferir? Misma
+ * regla que `CuentasBancariasService.hayCuentaVigente` y que `emitirTransferenciaAlPasarAPago`; vive aquí como función
+ * pura porque `PedidosModule` no puede inyectar el módulo de pagos (ciclo).
+ *
+ * A DOMICILIO es una condición para ACEPTAR el pedido: ahí la transferencia es el único medio de pago y no hay caja
+ * que cobre de respaldo; sin cuenta el pedido llegaría a `PENDIENTE_PAGO` sin ninguna forma de pagarse.
+ */
+export async function hayCuentaParaTienda(
+  db: Pick<Db, 'cuentaBancaria'>,
+  tiendaId: number,
+): Promise<boolean> {
+  const cuenta =
+    (await db.cuentaBancaria.findFirst({ where: { tiendaId, activa: true }, select: { id: true } })) ??
+    (await db.cuentaBancaria.findFirst({ where: { tiendaId: null, activa: true }, select: { id: true } }));
+  return !!cuenta;
+}
+
+/**
  * El cliente ELIGIÓ transferencia al hacer su pedido (`metodoPagoPreferido`): al pasar a
  * `PENDIENTE_PAGO` —cuando el total ya es firme y el pedido existe en VFP— se le crea el pago con
  * sus datos, SIN que nadie tenga que pedirlos. Así el pedido nunca queda como "de transferencia" sin
@@ -329,7 +380,6 @@ export async function emitirTransferenciaAlPasarAPago(
   tx: Db,
   pedidoId: number,
   actor: ActorPago,
-  venceHoras = Number(process.env.PAGO_TRANSFERENCIA_VENCE_HORAS) || 48,
 ): Promise<CambioPago | null> {
   const pedido = await tx.pedido.findUnique({
     where: { id: pedidoId },
@@ -344,8 +394,10 @@ export async function emitirTransferenciaAlPasarAPago(
   });
   if (!pedido || pedido.metodoPagoPreferido !== MetodoPago.TRANSFERENCIA) return null;
   if (
-    !transferenciaDisponible({ modoEntrega: pedido.modoEntrega, estado: EstadoPedido.PENDIENTE_PAGO })
-      .disponible
+    !transferenciaDisponible({
+      modoEntrega: pedido.modoEntrega,
+      estado: EstadoPedido.PENDIENTE_PAGO,
+    }).disponible
   ) {
     return null;
   }
@@ -387,7 +439,6 @@ export async function emitirTransferenciaAlPasarAPago(
       },
       referencia,
       concepto: pedido.numeroPedido.replace(/[^A-Za-z0-9]/g, '').slice(0, 30),
-      venceAt: new Date(Date.now() + venceHoras * 3_600_000),
       creadoPorId: actor.id,
       // `actor.rol` también puede ser 'AGENT' o 'SISTEMA', que no son un `RolUsuario`.
       creadoPorRol: Object.values(RolUsuario).includes(actor.rol as RolUsuario)

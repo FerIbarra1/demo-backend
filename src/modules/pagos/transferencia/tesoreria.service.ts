@@ -44,6 +44,7 @@ import {
   HORAS_SIN_REGISTRAR_POR_DEFECTO,
   MOTIVOS_RECHAZO,
   MotivoRechazo,
+  esperaDelPago,
   verificadoAtrasado,
 } from './reglas';
 import {
@@ -70,8 +71,6 @@ const ESTADOS_QUE_SE_PUEDEN_APROBAR: Estado[] = [
 const MAX_FILAS_CONCILIACION = 5000;
 /** Rango máximo del reporte, en días. */
 const MAX_DIAS_CONCILIACION = 93;
-/** Cuántas vencidas cierra "cerrar vencidas" de una vez. */
-const MAX_CIERRE_MASIVO = 200;
 
 /** Desde dónde se puede registrar un abono que llegó cuando el pedido ya no es pagable. */
 const ESTADOS_ABONO_SIN_PEDIDO: Estado[] = [
@@ -81,10 +80,7 @@ const ESTADOS_ABONO_SIN_PEDIDO: Estado[] = [
   Estado.VENCIDO,
 ];
 
-const GRUPOS: Record<
-  Exclude<GrupoPago, 'requieren-revision' | 'esperando' | 'vencidas'>,
-  Estado[]
-> = {
+const GRUPOS: Record<Exclude<GrupoPago, 'requieren-revision' | 'esperando'>, Estado[]> = {
   'por-revisar': [Estado.EN_REVISION],
   verificados: [Estado.VERIFICADO],
   reembolsos: [Estado.REEMBOLSO_PENDIENTE],
@@ -143,13 +139,10 @@ export class TesoreriaService {
   // ==================================================================
 
   private whereDeGrupo(grupo: GrupoPago): Prisma.PedidoPagoTransferenciaWhereInput {
-    // "Esperando" y "Vencidas" parten las instrucciones abiertas SIN comprobante por su vigencia:
-    // cada pago está en una sola pestaña, y lo vencido es lo que pide una decisión.
+    // "Esperando" = instrucciones abiertas SIN comprobante, de cualquier edad. No hay plazo (decisión
+    // del dueño, oct 2026): cuánto llevan esperando se ve en cada fila y Tesorería decide cuándo cerrar.
     if (grupo === 'esperando') {
-      return { estado: Estado.PENDIENTE, venceAt: { gte: new Date() } };
-    }
-    if (grupo === 'vencidas') {
-      return { estado: Estado.PENDIENTE, venceAt: { lt: new Date() } };
+      return { estado: Estado.PENDIENTE };
     }
     if (grupo === 'requieren-revision') {
       return {
@@ -178,6 +171,9 @@ export class TesoreriaService {
         { pedido: { clienteTelefono: { contains: q } } },
         { pedido: { pendienteEnvio: { externalFolio: texto() } } },
       ];
+      // Oct 2026 (B2): el folio del Sistema Comercial (HMO-0000152573, 0000152573 o sus últimos dígitos) sobre su parte numérica.
+      const digitosFolio = q.replace(/\D/g, '');
+      if (digitosFolio.length >= 3) or.push({ pedido: { folioErp: { contains: digitosFolio } } });
       if (/^\d+(\.\d{1,2})?$/.test(q)) or.push({ montoEsperado: new Prisma.Decimal(q) });
       and.push({ OR: or });
     }
@@ -188,10 +184,11 @@ export class TesoreriaService {
         where,
         // Lo que lleva más tiempo esperando va primero en las colas de trabajo.
         orderBy:
-          grupo === 'por-revisar' || grupo === 'esperando'
+          grupo === 'por-revisar'
             ? { updatedAt: 'asc' }
-            : grupo === 'vencidas'
-              ? { venceAt: 'asc' }
+            : // Las instrucciones que llevan más tiempo esperando van PRIMERO.
+              grupo === 'esperando'
+              ? { createdAt: 'asc' }
               : // Lo verificado que lleva más tiempo sin registrarse va PRIMERO: es lo que se olvida.
                 grupo === 'verificados'
                 ? { verificadoAt: 'asc' }
@@ -203,6 +200,8 @@ export class TesoreriaService {
             select: {
               id: true,
               numeroPedido: true,
+              tiendaId: true,
+              folioErp: true,
               clienteNombre: true,
               estado: true,
               tienda: { select: { id: true, nombre: true } },
@@ -223,10 +222,7 @@ export class TesoreriaService {
         referencia: p.referencia,
         createdAt: p.createdAt,
         updatedAt: p.updatedAt,
-        venceAt: p.venceAt,
-        vencido:
-          (p.estado === Estado.PENDIENTE || p.estado === Estado.EN_REVISION) &&
-          p.venceAt.getTime() < Date.now(),
+        espera: esperaDelPago(p),
         requiereRevision: !!p.requiereRevision,
         verificadoAt: p.verificadoAt,
         // Verificada y sin registrar en VFP demasiado tiempo: se calcula al leer, no hay aviso aparte.
@@ -237,6 +233,9 @@ export class TesoreriaService {
         pedido: {
           id: p.pedido.id,
           numeroPedido: p.pedido.numeroPedido,
+          // Con estas dos el servidor decora el pedido con su `folio` (HMO-0000152573).
+          tiendaId: p.pedido.tiendaId,
+          folioErp: p.pedido.folioErp,
           folioVfp: p.pedido.pendienteEnvio?.externalFolio ?? null,
           clienteNombre: p.pedido.clienteNombre,
           estado: p.pedido.estado,
@@ -254,7 +253,6 @@ export class TesoreriaService {
     const [
       porRevisar,
       esperando,
-      vencidas,
       verificados,
       verificadosAtrasados,
       reembolsos,
@@ -262,7 +260,6 @@ export class TesoreriaService {
     ] = await Promise.all([
       contar('por-revisar'),
       contar('esperando'),
-      contar('vencidas'),
       contar('verificados'),
       this.prisma.pedidoPagoTransferencia.count({
         where: {
@@ -276,7 +273,6 @@ export class TesoreriaService {
     return {
       porRevisar,
       esperando,
-      vencidas,
       verificados,
       verificadosAtrasados,
       reembolsos,
@@ -303,7 +299,7 @@ export class TesoreriaService {
         pedido: {
           select: {
             ...PEDIDO_PARA_PAGO,
-            tienda: { select: { id: true, nombre: true, telefono: true } },
+            tienda: { select: { id: true, nombre: true, telefono: true, serie: true } },
             usuario: { select: { telefono: true } },
             items: {
               where: { cancelada: false },
@@ -384,13 +380,8 @@ export class TesoreriaService {
     if (pago.estado === Estado.VENCIDO) {
       advertencias.push(
         otroActivo
-          ? `Estas instrucciones vencieron y el cliente ya pidió otras (pago ${otroActivo.id}, ${otroActivo.estado}). Si el abono de este pago llegó, resuélvelo en ese.`
-          : 'Estas instrucciones vencieron. Si el abono llegó después, se puede verificar igual: explica en la nota qué pasó.',
-      );
-    }
-    if (enCurso && pago.venceAt.getTime() < Date.now()) {
-      advertencias.push(
-        'Las instrucciones ya vencieron. Un abono tardío se puede verificar igual.',
+          ? `Estas instrucciones se marcaron vencidas y el cliente ya pidió otras (pago ${otroActivo.id}, ${otroActivo.estado}). Si el abono de este pago llegó, resuélvelo en ese.`
+          : 'Estas instrucciones se marcaron vencidas. Si el abono llegó después, se puede verificar igual: explica en la nota qué pasó.',
       );
     }
     if (pago.requiereRevision) advertencias.push(pago.requiereRevision);
@@ -431,9 +422,10 @@ export class TesoreriaService {
         pedido.total.equals(pago.montoEsperado),
       // Abono tardío: verificar un pago VENCIDO exige explicar qué pasó.
       aprobarRequiereNota: pago.estado === Estado.VENCIDO,
-      // Cerrar por vencimiento: solo instrucciones abiertas SIN comprobante y ya pasadas de vigencia.
-      // Con un comprobante en revisión puede haber dinero en camino: ahí se revisa, no se cierra.
-      puedeVencer: pago.estado === Estado.PENDIENTE && pago.venceAt.getTime() < Date.now(),
+      // Marcar vencida: solo instrucciones abiertas SIN comprobante, de cualquier edad (no hay plazo:
+      // lo decide Tesorería). Con un comprobante en revisión puede haber dinero en camino: ahí se
+      // revisa, no se cierra.
+      puedeVencer: pago.estado === Estado.PENDIENTE,
       puedeRechazar: pago.estado === Estado.EN_REVISION,
       puedeRegistrarAbonoSinPedido:
         ESTADOS_ABONO_SIN_PEDIDO.includes(pago.estado) && !pedidoPagable,
@@ -449,8 +441,7 @@ export class TesoreriaService {
       referencia: pago.referencia,
       concepto: pago.concepto,
       cuenta: pago.cuentaSnapshot,
-      venceAt: pago.venceAt,
-      vencido: enCurso && pago.venceAt.getTime() < Date.now(),
+      espera: esperaDelPago(pago),
       intentos: pago.intentos,
       requiereRevision: pago.requiereRevision,
       acciones,
@@ -460,6 +451,8 @@ export class TesoreriaService {
       pedido: {
         id: pedido.id,
         numeroPedido: pedido.numeroPedido,
+        tiendaId: pedido.tiendaId,
+        folioErp: pedido.folioErp,
         folioVfp: pedido.pendienteEnvio?.externalFolio ?? null,
         estado: pedido.estado,
         total: pedido.total.toString(),
@@ -527,58 +520,37 @@ export class TesoreriaService {
   }
 
   // ==================================================================
-  // Vencimiento (MANUAL por ahora)
+  // Vencimiento (MANUAL, sin plazo)
   // ==================================================================
 
   /**
-   * Cierra por vencimiento unas instrucciones que pasaron su vigencia sin que llegara nada.
+   * Marca como VENCIDAS unas instrucciones que nadie ha pagado.
    *
-   * Es MANUAL a propósito (decisión del dueño, oct 2026): nada las vence solo. Quien lo pide es
-   * Tesorería, mirando la pestaña "Vencidas". Cerrarla importa porque, mientras siga PENDIENTE, caja
-   * ve "no cobres, hay una transferencia" aunque nadie vaya a transferir; al cerrarla caja puede
-   * cobrar y el cliente puede pedir datos nuevos.
+   * Es MANUAL y SIN PLAZO (decisión del dueño, oct 2026): antes había una vigencia de 48 h que
+   * nadie entendía y que no cerraba nada sola; ahora no hay fecha límite, Tesorería ve cuánto lleva
+   * esperando cada una (`espera`) y decide. Cerrarla importa porque, mientras siga PENDIENTE, caja ve
+   * "no cobres, hay una transferencia" aunque nadie vaya a transferir; al cerrarla caja puede cobrar y
+   * el cliente puede pedir datos nuevos. Como ya no hay plazo que lo justifique, el MOTIVO es
+   * obligatorio y queda en el evento.
    *
-   * Solo cierra lo que NO tiene dinero posible: un pago con comprobante (`EN_REVISION`) no se cierra
-   * aunque haya pasado su vigencia, porque el dinero puede estar en camino. Un abono que llegue
-   * después de cerrada se verifica igual (ver `aprobar`, abono tardío).
+   * Solo cierra lo que NO tiene dinero posible: un pago con comprobante (`EN_REVISION`) no se cierra,
+   * porque el dinero puede estar en camino. Un abono que llegue después de cerrada se verifica igual
+   * (ver `aprobar`, abono tardío).
    *
-   * Todo vive en `cerrarPorVencimiento`, sin nada de HTTP, para que el día que se automatice
-   * (un proceso periódico) llame a lo mismo: solo cambia QUIÉN lo dispara.
+   * Todo vive en `cerrarPorVencimiento`, sin nada de HTTP, para que el día que se automatice (un
+   * proceso periódico) llame a lo mismo: solo cambia QUIÉN lo dispara.
    */
-  async vencer(pagoId: number, user: UserContext, ip?: string | null) {
-    const cambio = await this.cerrarPorVencimiento(pagoId, this.actorDe(user, ip));
+  async vencer(pagoId: number, motivo: string, user: UserContext, ip?: string | null) {
+    const cambio = await this.cerrarPorVencimiento(pagoId, motivo, this.actorDe(user, ip));
     this.emitir(cambio);
     return this.detalle(pagoId);
   }
 
-  /** "Cerrar todas las vencidas": cada una en su transacción; las que ya no aplican se omiten. */
-  async cerrarVencidas(user: UserContext, ip?: string | null) {
-    const candidatas = await this.prisma.pedidoPagoTransferencia.findMany({
-      where: this.whereDeGrupo('vencidas'),
-      orderBy: { venceAt: 'asc' },
-      take: MAX_CIERRE_MASIVO,
-      select: { id: true },
-    });
-    const actor = this.actorDe(user, ip);
-    let cerradas = 0;
-    let omitidas = 0;
-    for (const { id } of candidatas) {
-      try {
-        this.emitir(await this.cerrarPorVencimiento(id, actor));
-        cerradas++;
-      } catch (err) {
-        // Alguien la resolvió en medio (llegó un comprobante, la cerró otra persona): se omite.
-        if (err instanceof ConflictException || err instanceof NotFoundException) {
-          omitidas++;
-          continue;
-        }
-        throw err;
-      }
-    }
-    return { cerradas, omitidas, hayMas: candidatas.length === MAX_CIERRE_MASIVO };
-  }
-
-  private async cerrarPorVencimiento(pagoId: number, actor: ActorPago): Promise<CambioPago> {
+  private async cerrarPorVencimiento(
+    pagoId: number,
+    motivo: string,
+    actor: ActorPago,
+  ): Promise<CambioPago> {
     return this.prisma.$transaction(async (tx) => {
       const previo = await tx.pedidoPagoTransferencia.findUnique({
         where: { id: pagoId },
@@ -599,14 +571,10 @@ export class TesoreriaService {
       if (pago.estado !== Estado.PENDIENTE) {
         throw new ConflictException(`Este pago ya está ${pago.estado}.`);
       }
-      const ahora = new Date();
-      if (pago.venceAt.getTime() >= ahora.getTime()) {
-        throw new ConflictException('Estas instrucciones todavía están vigentes.');
-      }
       const r = await tx.pedidoPagoTransferencia.updateMany({
-        // El estado y la vigencia van en el `where`: si llegó un comprobante entre la lectura y la
-        // escritura, no se cierra (el pago ya no está PENDIENTE).
-        where: { id: pagoId, estado: Estado.PENDIENTE, venceAt: { lt: ahora } },
+        // El estado va en el `where`: si llegó un comprobante entre la lectura y la escritura, no se
+        // cierra (el pago ya no está PENDIENTE).
+        where: { id: pagoId, estado: Estado.PENDIENTE },
         // Sin dinero posible, lo que decía "revisa si llegó el abono" ya no tiene qué revisar.
         data: { estado: Estado.VENCIDO, requiereRevision: null },
       });
@@ -617,7 +585,11 @@ export class TesoreriaService {
         de: Estado.PENDIENTE,
         a: Estado.VENCIDO,
         actor,
-        detalle: { venceAt: pago.venceAt.toISOString(), manual: actor.rol !== 'SISTEMA' },
+        detalle: {
+          motivo,
+          diasEsperando: esperaDelPago(pago)?.dias ?? 0,
+          manual: actor.rol !== 'SISTEMA',
+        },
       });
       return {
         pagoId,
@@ -655,6 +627,7 @@ export class TesoreriaService {
         pedido: {
           select: {
             numeroPedido: true,
+            folioErp: true,
             clienteNombre: true,
             tienda: { select: { id: true, nombre: true } },
             pendienteEnvio: { select: { externalFolio: true } },
@@ -671,7 +644,7 @@ export class TesoreriaService {
       aplicadoAt: p.aplicadoAt,
       tienda: p.pedido.tienda.nombre,
       folioWeb: p.pedido.numeroPedido,
-      folioVfp: p.pedido.pendienteEnvio?.externalFolio ?? null,
+      folioVfp: p.pedido.folioErp ?? p.pedido.pendienteEnvio?.externalFolio ?? null,
       cliente: p.pedido.clienteNombre,
       referencia: p.referencia,
       claveRastreo: p.claveRastreo,

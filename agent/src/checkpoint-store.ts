@@ -60,6 +60,18 @@ export class LocalStore {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (tienda_id, pedido_id)
       );
+      -- Oct 2026 (parte B): los folios que el agente YA tomó de CONSECUTIVOS para la nube. Un número tomado no se
+      -- devuelve: si el ACK a la nube falla, el siguiente ciclo reusa ESTE en vez de gastar otro. estado: 0 =
+      -- por confirmar a la nube, 1 = confirmado, 2 = la nube lo rechazó N veces (se abandona; queda el rastro).
+      CREATE TABLE IF NOT EXISTS folio_reservado (
+        tienda_id INTEGER NOT NULL,
+        pedido_id INTEGER NOT NULL,
+        folio TEXT NOT NULL,
+        estado INTEGER NOT NULL DEFAULT 0,
+        intentos INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (tienda_id, pedido_id)
+      );
       CREATE TABLE IF NOT EXISTS ack_outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tienda_id INTEGER NOT NULL,
@@ -171,6 +183,59 @@ export class LocalStore {
       externalIdPEDIDOS: row.external_id_pedidos,
       externalFolio: row.external_folio,
     };
+  }
+
+  // ---------------- folios reservados (parte B) ----------------
+
+  getFolioReservado(tiendaId: number, pedidoId: number): string | null {
+    const row = this.db
+      .prepare(`SELECT folio FROM folio_reservado WHERE tienda_id = ? AND pedido_id = ?`)
+      .get(tiendaId, pedidoId) as { folio: string } | undefined;
+    return row?.folio ?? null;
+  }
+
+  /** Guarda el folio recién tomado de Firebird, ANTES de avisar a la nube. No pisa uno ya reservado. */
+  setFolioReservado(tiendaId: number, pedidoId: number, folio: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO folio_reservado (tienda_id, pedido_id, folio, created_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (tienda_id, pedido_id) DO NOTHING`,
+      )
+      .run(tiendaId, pedidoId, folio, Date.now());
+  }
+
+  /** Los reservados que la nube todavía no confirmó (su ACK se perdió o fue rechazado). */
+  foliosSinConfirmar(): Array<{ tiendaId: number; pedidoId: number; folio: string; intentos: number }> {
+    const rows = this.db
+      .prepare(
+        `SELECT tienda_id, pedido_id, folio, intentos FROM folio_reservado WHERE estado = 0 ORDER BY created_at ASC`,
+      )
+      .all() as Array<{ tienda_id: number; pedido_id: number; folio: string; intentos: number }>;
+    return rows.map((r) => ({
+      tiendaId: r.tienda_id,
+      pedidoId: r.pedido_id,
+      folio: r.folio,
+      intentos: r.intentos,
+    }));
+  }
+
+  confirmarFolio(tiendaId: number, pedidoId: number): void {
+    this.db
+      .prepare(`UPDATE folio_reservado SET estado = 1 WHERE tienda_id = ? AND pedido_id = ?`)
+      .run(tiendaId, pedidoId);
+  }
+
+  /** La nube lo rechazó: cuenta el intento y, pasado el tope, lo abandona para no insistir para siempre. */
+  rechazarFolio(tiendaId: number, pedidoId: number, maxIntentos: number): void {
+    this.db
+      .prepare(
+        `UPDATE folio_reservado
+            SET intentos = intentos + 1,
+                estado = CASE WHEN intentos + 1 >= ? THEN 2 ELSE estado END
+          WHERE tienda_id = ? AND pedido_id = ?`,
+      )
+      .run(maxIntentos, tiendaId, pedidoId);
   }
 
   // ---------------- ack outbox (cola durable de confirmaciones) ----------------

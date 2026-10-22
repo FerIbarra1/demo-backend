@@ -6,7 +6,12 @@ import { EstacionGuard } from './estacion.guard';
  * Oct 2026: "sin estación solo se mira". El servidor rechaza las acciones de atender del cajero sin
  * ventanilla y del operador sin mostrador — aunque llamen a la API directo.
  */
-function crear(opts: { ventanilla?: boolean; mostrador?: boolean; mostradoresEnTienda?: number; exige?: boolean }) {
+function crear(opts: {
+  ventanilla?: boolean;
+  mostrador?: boolean;
+  mostradoresEnTienda?: number;
+  exige?: boolean;
+}) {
   const prisma = {
     ventanilla: { findFirst: jest.fn().mockResolvedValue(opts.ventanilla ? { id: 1 } : null) },
     mostrador: {

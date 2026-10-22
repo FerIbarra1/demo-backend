@@ -89,7 +89,8 @@ export const MensajeBodeguero = ({
         }}
       >
         Hola, {pedido.clienteNombre}. {nombreBodeguero} te ha escrito sobre tu pedido{' '}
-        <strong>{folioVisible(pedido)}</strong>.
+        <strong>{folioVisible(pedido)}</strong>
+        {pedido.referenciaWeb ? ` (pedido en línea ${pedido.referenciaWeb}, el número de tu correo de confirmación)` : ''}.
       </Text>
 
       <Section

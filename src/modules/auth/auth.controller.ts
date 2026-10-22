@@ -184,6 +184,9 @@ export class AuthController {
     RolUsuario.VENTAS,
     // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
     RolUsuario.TESORERIA,
+    RolUsuario.IMPRESION,
+    // Oct 2026: el gerente también inicia/cierra sesión, ve su perfil, cambia su contraseña y manda latido.
+    RolUsuario.GERENTE,
     RolUsuario.ADMIN,
   )
   @HttpCode(HttpStatus.OK)
@@ -216,6 +219,9 @@ export class AuthController {
     RolUsuario.VENTAS,
     // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
     RolUsuario.TESORERIA,
+    RolUsuario.IMPRESION,
+    // Oct 2026: el gerente también inicia/cierra sesión, ve su perfil, cambia su contraseña y manda latido.
+    RolUsuario.GERENTE,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -241,6 +247,9 @@ export class AuthController {
     RolUsuario.VENTAS,
     // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
     RolUsuario.TESORERIA,
+    RolUsuario.IMPRESION,
+    // Oct 2026: el gerente también inicia/cierra sesión, ve su perfil, cambia su contraseña y manda latido.
+    RolUsuario.GERENTE,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -266,6 +275,9 @@ export class AuthController {
     RolUsuario.VENTAS,
     // Oct 2026: Tesorería también inicia/cierra sesión, ve su perfil y cambia su contraseña.
     RolUsuario.TESORERIA,
+    RolUsuario.IMPRESION,
+    // Oct 2026: el gerente también inicia/cierra sesión, ve su perfil, cambia su contraseña y manda latido.
+    RolUsuario.GERENTE,
     RolUsuario.ADMIN,
   )
   @ApiBearerAuth()
@@ -276,7 +288,7 @@ export class AuthController {
 
   // F7 (jul 2026): heartbeat del operador. Ping cada 5 min desde la tablet
   // para que el monitor sepa que el bodeguero/cajero/mostrador está en su
-  // estación AHORA, no sólo que se logueó en las últimas 12h. No permite
+  // estación AHORA, no solo que se logueó en las últimas 12h. No permite
   // CLIENTE porque no tiene sentido (no aparece en el monitor).
   @Post('heartbeat')
   @UseGuards(JwtAuthGuard)
@@ -293,6 +305,9 @@ export class AuthController {
     RolUsuario.CAJERO_MONITOR,
     RolUsuario.VENTAS,
     RolUsuario.TESORERIA,
+    RolUsuario.IMPRESION,
+    // Oct 2026: el gerente también inicia/cierra sesión, ve su perfil, cambia su contraseña y manda latido.
+    RolUsuario.GERENTE,
     RolUsuario.ADMIN,
   )
   @HttpCode(HttpStatus.OK)

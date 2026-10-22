@@ -46,6 +46,12 @@ const RESPONSABLES: Record<EstadoPedido, Responsable> = {
     label: 'Ventas',
     queHace: 'en asesoría',
   },
+  // Oct 2026 (impresión DTF): lo tiene Impresión hasta que todo su DTF esté impreso.
+  [EstadoPedido.EN_DTF]: {
+    rol: RolUsuario.IMPRESION,
+    label: 'Impresión DTF',
+    queHace: 'preparando la impresión DTF',
+  },
   [EstadoPedido.REVISADO]: {
     rol: RolUsuario.MOSTRADOR,
     label: 'Mostrador',

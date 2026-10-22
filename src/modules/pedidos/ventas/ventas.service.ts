@@ -4,7 +4,7 @@ import { StorageService } from '../../imagenes/storage.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { contarMensajesNoLeidos } from '../core/mensajes-no-leidos.util';
 import { UserContext } from '../../../types/pedido.types';
-import { EstadoPedido, EstadoPropuesta, Prisma } from '@prisma/client';
+import { EstadoPedido, EstadoPropuesta, Prisma, RolUsuario } from '@prisma/client';
 
 /**
  * F13 (sep 2026): servicio del dominio VENTAS (asesor de ventas).
@@ -272,13 +272,27 @@ export class VentasService {
    * se reanuda acumulando lo previo, igual que cuando el cliente aprueba una
    * contrapropuesta.
    */
-  async devolverABodega(pedidoId: number, usuario: UserContext, nota?: string) {
+  async devolverABodega(
+    pedidoId: number,
+    usuario: UserContext,
+    nota?: string,
+    /**
+     * Oct 2026 (destrabar): el GERENTE o el ADMIN lo devuelven desde el panel del pedido, no el asesor. El historial lo
+     * lee el CLIENTE, así que no puede decir "por el asesor" ni llevar el motivo interno: el caller manda su texto.
+     */
+    opts: { observacion?: string } = {},
+  ) {
     const pedido = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
       select: { id: true, estado: true, tiendaId: true, numeroPedido: true },
     });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
-    if (usuario.tiendaId && pedido.tiendaId !== usuario.tiendaId) {
+    // El ADMIN no tiene tienda (su acceso lo valida `cargarYValidar` en quien lo llama).
+    if (
+      usuario.rol !== RolUsuario.ADMIN &&
+      usuario.tiendaId &&
+      pedido.tiendaId !== usuario.tiendaId
+    ) {
       throw new BadRequestException('El pedido pertenece a otra tienda');
     }
     if (pedido.estado !== EstadoPedido.EN_ASESORIA) {
@@ -293,7 +307,8 @@ export class VentasService {
       pedidoId,
       {
         nuevoEstado: EstadoPedido.EN_REVISION,
-        observacion: `Devuelto a bodega por el asesor ${usuario.nombre}${sufijoNota}`,
+        observacion:
+          opts.observacion ?? `Devuelto a bodega por el asesor ${usuario.nombre}${sufijoNota}`,
       },
       usuario,
       {

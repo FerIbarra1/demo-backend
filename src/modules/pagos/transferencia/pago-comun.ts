@@ -5,11 +5,14 @@ import {
   type CuentaSnapshot,
   type InstruccionesTransferencia,
 } from './instrucciones.util';
+import { esFolioErp, formatearFolio } from '../../pedidos/core/folio-erp.util';
 
 /** Lo que el módulo de pagos necesita saber de un pedido. */
 export const PEDIDO_PARA_PAGO = {
   id: true,
   numeroPedido: true,
+  // Oct 2026 (B2): el folio del Sistema Comercial y la serie de su tienda: es el ID que ve el cliente y la caja.
+  folioErp: true,
   estado: true,
   modoEntrega: true,
   total: true,
@@ -20,13 +23,28 @@ export const PEDIDO_PARA_PAGO = {
   clienteTelefono: true,
   metodoPagoPreferido: true,
   pendienteEnvio: { select: { externalFolio: true } },
+  tienda: { select: { serie: true } },
 } satisfies Prisma.PedidoSelect;
 
-export type PedidoParaPago = Prisma.PedidoGetPayload<{ select: typeof PEDIDO_PARA_PAGO }>;
+// `tienda` es OPCIONAL en el tipo: quien arma un pedido para pagos a mano (o con otro `select`) no tiene por qué traer la
+// serie; sin ella el folio se muestra solo ("0000152573"), que es también lo que entiende el Sistema Comercial.
+export type PedidoParaPago = Omit<
+  Prisma.PedidoGetPayload<{ select: typeof PEDIDO_PARA_PAGO }>,
+  'tienda'
+> & { tienda?: { serie?: string | null; [otro: string]: unknown } | null };
 
-/** El folio que ve el cliente: el de VFP en cuanto existe, si no el web. */
-export function folioDe(p: Pick<PedidoParaPago, 'numeroPedido' | 'pendienteEnvio'>): string {
-  return p.pendienteEnvio?.externalFolio ?? p.numeroPedido;
+/**
+ * El folio que ve el cliente: el del Sistema Comercial con la serie de su tienda (`HMO-0000152573`) en cuanto existe; antes,
+ * el que dejó la bandeja de envío, y si no el número interno.
+ */
+export function folioDe(
+  p: Pick<PedidoParaPago, 'numeroPedido' | 'pendienteEnvio'> &
+    Partial<Pick<PedidoParaPago, 'folioErp' | 'tienda'>>,
+): string {
+  if (p.folioErp) return formatearFolio(p.tienda?.serie, p.folioErp);
+  // Un folio de bandeja que no sea de 10 dígitos (el "PD-2026-00" del agente anterior) no es un folio: se cae al número.
+  const deBandeja = p.pendienteEnvio?.externalFolio;
+  return esFolioErp(deBandeja) ? deBandeja : p.numeroPedido;
 }
 
 /**
@@ -82,9 +100,7 @@ export function enmascararEmail(email: string): string {
 }
 
 export interface ConfigPagos {
-  zonaHoraria: string;
   frontendUrl: string;
-  venceHoras: number;
 }
 
 /** Las instrucciones de un pago ya emitido, reconstruidas desde su SNAPSHOT. */
@@ -94,7 +110,6 @@ export function instruccionesDeUnPago(
     cuentaSnapshot: Prisma.JsonValue;
     referencia: string;
     concepto: string;
-    venceAt: Date;
   },
   pedido: PedidoParaPago,
   cfg: ConfigPagos,
@@ -105,8 +120,6 @@ export function instruccionesDeUnPago(
     cuenta: pago.cuentaSnapshot as unknown as CuentaSnapshot,
     referencia: pago.referencia,
     concepto: pago.concepto,
-    venceAt: pago.venceAt,
-    zonaHoraria: cfg.zonaHoraria,
     pedidoUrl: `${cfg.frontendUrl}/pedidos/${pedido.id}`,
   });
 }

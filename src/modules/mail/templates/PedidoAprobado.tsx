@@ -43,7 +43,7 @@ export const PedidoAprobado = ({
           {pedido.pagoPorTransferencia
             ? 'Elegiste pagar por transferencia: entra a tu pedido para ver los datos y subir tu comprobante.'
             : pedido.direccionEnvio
-              ? 'Tu pedido va a domicilio: ya puedes completar el pago y te avisaremos por correo en cuanto salga a camino.'
+              ? 'Tu pedido va a domicilio. Cuando se confirme el pago te avisaremos por correo en cuanto salga con la paquetería.'
               : qrDataUrl
                 ? 'Muestra este código en caja para pagar. Si ya estás en la tienda, acércate a la ventanilla que te indiquen.'
                 : 'Presenta tu folio en caja para pagar. Si ya estás en la tienda, acércate a la ventanilla que te indiquen.'}

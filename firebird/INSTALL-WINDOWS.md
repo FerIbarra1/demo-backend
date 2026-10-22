@@ -148,65 +148,29 @@ notepad agent.config.json
 
 ### Aplicar el script
 
+> **Oct 2026 — cambió el script.** Ya NO se aplica `02_sync_fixes_prefijo_folio.sql`: probado contra una copia de la BD
+> real, sobrescribe `TRG_TIENDAS_SYNC` y `TRG_USUARIOS_SYNC` (que la BD ya tiene, con otras columnas), agrega
+> `TIENDAS.PREFIJO` cuando la BD ya trae `TIENDAS.SERIE`, y crea `TRG_MOVPED_SYNC`, que la nube ya no usa.
+> Lo único que falta es `TRG_PEDIDOS_SYNC`: **`04_trg_pedidos_sync.sql`** (ver `INSTALL.md`).
+
 ```cmd
 "C:\Program Files\Firebird\Firebird_3_0\bin\isql.exe" -user SYSDBA -password masterkey ^
   localhost:C:\Datos\DATOSINV.FDB ^
-  -i "C:\Agentes\playerytees\sqls\02_sync_fixes_prefijo_folio.sql"
+  -i "C:\Agentes\playerytees\sqls\04_trg_pedidos_sync.sql"
 ```
 
-(Copia el archivo desde `demo-backend\firebird\02_sync_fixes_prefijo_folio.sql` del repo.)
+(Copia el archivo desde `demo-backend\firebird\04_trg_pedidos_sync.sql` del repo.)
 
-**Compatibilidad verificada**: el script usa `CREATE OR ALTER TRIGGER` (disponible
-desde Firebird 1.5) y `NEXT VALUE FOR` (disponible desde FB 2.0). Funciona en
-FB 3.0 y FB 4.0 sin cambios.
-
-El script es **idempotente**: lo puedes correr múltiples veces sin error. Si ya
-existen los triggers (por una corrida previa), los reemplaza con la misma
-definición. La columna PREFIJO solo se agrega si no existe.
-
-Lo que agrega:
-- Columna `TIENDAS.PREFIJO VARCHAR(5)` (auto-pobla con las primeras 3 letras del nombre).
-- Trigger `TRG_TIENDAS_SYNC` (sincroniza creación/edición/desactivación de tiendas).
-- Trigger `TRG_PEDIDOS_SYNC` (sincroniza cambios de estado en pedidos: pago, cancelación).
-- Trigger `TRG_MOVPED_SYNC` (sincroniza ajustes del bodeguero en items de pedido).
-- Trigger `TRG_USUARIOS_SYNC` (sincroniza empleados de tienda).
-
-Los 14 triggers originales de tu FDB (CLIENTES, PRODUCTOS, PRECIOS, etc.) NO se tocan.
+El script usa `CREATE OR ALTER TRIGGER` (Firebird ≥ 1.5), es **idempotente** y solo toca `TRG_PEDIDOS_SYNC`.
 
 ### Verificar
 
-```cmd
-"C:\Program Files\Firebird\Firebird_3_0\bin\isql.exe" -user SYSDBA -password masterkey ^
-  localhost:C:\Datos\DATOSINV.FDB
-```
-
-En el prompt de isql:
-
 ```sql
-SELECT TRIM(RDB$TRIGGER_NAME) FROM RDB$TRIGGERS
- WHERE RDB$TRIGGER_NAME LIKE 'TRG_%_SYNC'
- ORDER BY RDB$TRIGGER_NAME;
+SELECT TRIM(RDB$TRIGGER_NAME), RDB$TRIGGER_INACTIVE FROM RDB$TRIGGERS
+ WHERE TRIM(RDB$RELATION_NAME) = 'PEDIDOS' AND COALESCE(RDB$SYSTEM_FLAG,0) = 0;
 ```
 
-Deben aparecer 18 triggers:
-CLIENTES, CLIENTESCXC, CLITIEN, CLITIENCXC, COLORES, CONFTIENDAS, CORRIDAS,
-CORRIDASREN, LINEAS, MOVPED, PEDIDOS, PRECIOS, PRECIOSCO, PRODUCTOS, SUBLINEAS,
-TIENDAS, USUARIOS, USUARIOSTIENDAS, VENDEDORES.
-
-```sql
-SELECT IDTIENDA, NOMBRE, PREFIJO FROM TIENDAS ORDER BY IDTIENDA;
-```
-
-Las tiendas activas deben tener un PREFIJO de 3 chars. Ajústalo manualmente
-si el auto-fill basado en las primeras letras del nombre no es correcto:
-
-```sql
-UPDATE TIENDAS SET PREFIJO = 'MXL' WHERE IDTIENDA = 1;
-UPDATE TIENDAS SET PREFIJO = 'HMO' WHERE IDTIENDA = 2;
--- etc.
-```
-
-Salir de isql con `QUIT;` o `EXIT;`.
+Debe salir `TRG_PEDIDOS_SYNC` con `INACTIVE` en 0. Salir de isql con `QUIT;` o `EXIT;`.
 
 ## 7. Configurar el backend (Mac/Linux donde corre el Docker)
 

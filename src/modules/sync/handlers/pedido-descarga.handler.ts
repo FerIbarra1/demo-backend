@@ -45,7 +45,14 @@ export class PedidoDescargaHandler {
     const pendientes = await this.prisma.$transaction(async (tx) => {
       const candidatos = await tx.pedidoPendienteEnvio.findMany({
         where: {
-          pedido: { tiendaId: tiendaIdNube, estado: { not: 'CANCELADO' } },
+          pedido: {
+            tiendaId: tiendaIdNube,
+            estado: { not: 'CANCELADO' },
+            // Oct 2026 (parte B): si el agente tiene EN SUS MANOS la reserva del folio de este pedido, se espera a que
+            // la conteste (o venza su lease): mandarlo ahora haría que el agente tomara OTRO número en `GRABAR_PEDIDOS`
+            // y el ticket que bodega ya imprimió llevaría un folio distinto al que quedó en el ERP.
+            NOT: { folioSolicitud: { is: { estado: 'PROCESSING', leaseUntil: { gt: now } } } },
+          },
           nextAttemptAt: { lte: now },
           OR: [
             { estado: 'PENDIENTE' },
@@ -96,6 +103,7 @@ export class PedidoDescargaHandler {
             select: {
               id: true,
               numeroPedido: true,
+              folioErp: true,
               fechaPedido: true,
               estado: true,
               clienteNombre: true,
@@ -269,6 +277,8 @@ export class PedidoDescargaHandler {
           leaseUntil: leaseUntilByPedido.get(p.pedidoId),
           externalIdPEDIDOS: p.externalIdPEDIDOS,
           numeroPedido: p.pedido.numeroPedido,
+          // El folio REAL del ERP si ya llegó (null = el agente toma uno dentro de GRABAR_PEDIDOS).
+          folio: p.pedido.folioErp,
           fechaPedido: p.pedido.fechaPedido,
           clienteNombre: p.pedido.clienteNombre,
           clienteEmail: p.pedido.clienteEmail,

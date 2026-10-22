@@ -13,9 +13,12 @@ import { ApiKeyGuard } from '../../common/guards/api-key.guard';
 import { ApiKeyAuth } from '../../common/decorators/api-key.decorator';
 import { SkipThrottle } from '@nestjs/throttler';
 import { SyncAgentService } from './sync-agent.service';
+import { ConciliacionService } from './conciliacion.service';
+import { ConciliacionDto } from './dto/conciliacion.dto';
 import { HeartbeatDto } from './dto/heartbeat.dto';
 import { UploadBatchDto } from './dto/upload-batch.dto';
 import { PedidosAckDto } from './dto/pedidos-ack.dto';
+import { FoliosAckDto } from './dto/folios-ack.dto';
 
 /**
  * Controller del agente de sincronización (F9 ago 2026).
@@ -33,7 +36,10 @@ import { PedidosAckDto } from './dto/pedidos-ack.dto';
 @ApiKeyAuth()
 @SkipThrottle()
 export class SyncAgentController {
-  constructor(private readonly service: SyncAgentService) {}
+  constructor(
+    private readonly service: SyncAgentService,
+    private readonly conciliacion: ConciliacionService,
+  ) {}
 
   @Post('heartbeat')
   @ApiOperation({
@@ -63,6 +69,39 @@ export class SyncAgentController {
     return { tiendaId, pedidos: data };
   }
 
+  @Get('poll-folios')
+  @ApiOperation({
+    summary:
+      'Oct 2026 (parte B): solicitudes de FOLIO de la tienda. El agente reserva un consecutivo de CONSECUTIVOS por cada una y contesta en folios-ack. Query: ?limit=N',
+  })
+  async pollFolios(
+    @Headers('x-sucursal-id') sucursalIdHeader: string,
+    @Headers('x-agent-id') agentIdHeader: string,
+    @Query('limit') limitRaw?: string,
+  ) {
+    const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    const agentId = agentIdHeader?.trim();
+    if (!agentId) {
+      throw new BadRequestException('Header X-Agent-Id es obligatorio');
+    }
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '20', 10) || 20, 1), 100);
+    const data = await this.service.pollFolios(tiendaId, limit, agentId);
+    return { tiendaId, solicitudes: data };
+  }
+
+  @Post('folios-ack')
+  @ApiOperation({
+    summary:
+      'Oct 2026 (parte B): el agente reservó el consecutivo (o falló). La nube guarda el folio en el pedido y avisa a las pantallas.',
+  })
+  async foliosAck(@Body() dto: FoliosAckDto, @Headers('x-sucursal-id') sucursalIdHeader: string) {
+    const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    if (dto.tiendaId !== tiendaId) {
+      throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
+    }
+    return this.service.procesarFoliosAck(dto);
+  }
+
   @Post('upload')
   @ApiOperation({
     summary:
@@ -87,6 +126,38 @@ export class SyncAgentController {
       throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
     }
     return this.service.procesarPedidosAck(dto);
+  }
+
+  @Get('conciliacion')
+  @ApiOperation({
+    summary:
+      'Oct 2026: los pedidos de la tienda que conviene VERIFICAR contra el Sistema Comercial (ya viven allá y su estado puede diverger). Paginado por pedidoId (?despues=).',
+  })
+  async conciliacionPendientes(
+    @Headers('x-sucursal-id') sucursalIdHeader: string,
+    @Query('limit') limitRaw?: string,
+    @Query('despues') despuesRaw?: string,
+  ) {
+    const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    const limit = Math.min(Math.max(parseInt(limitRaw ?? '200', 10) || 200, 1), 500);
+    const despues = Math.max(parseInt(despuesRaw ?? '0', 10) || 0, 0);
+    return this.conciliacion.pendientes(tiendaId, limit, despues);
+  }
+
+  @Post('conciliacion')
+  @ApiOperation({
+    summary:
+      'Oct 2026: el estado REAL (SWCANCEL, FINALIZADA, TTOTAL) de esos pedidos en Firebird. La nube compara, corrige el cobro/cancelación que no supo y registra lo demás.',
+  })
+  async conciliar(
+    @Body() dto: ConciliacionDto,
+    @Headers('x-sucursal-id') sucursalIdHeader: string,
+  ) {
+    const tiendaId = this.parseTiendaId(sucursalIdHeader);
+    if (dto.tiendaId !== tiendaId) {
+      throw new BadRequestException('tiendaId no coincide con X-Sucursal-Id');
+    }
+    return this.conciliacion.aplicar(dto);
   }
 
   @Post('pedidos-error')

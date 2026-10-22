@@ -3,6 +3,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { nombreDeActor } from '../../../common/nombre-actor';
 
 interface JwtPayload {
   sub: number;
@@ -47,7 +48,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       // el permiso tiene que ser el de ahora, no el de cuando inició sesión.
       rol: usuario.rol,
       tiendaId: usuario.tiendaId,
-      nombre: usuario.nombre,
+      // Oct 2026 (PLAN-ADMIN-MULTITIENDA §4.5.3): este nombre es el que acaba en el historial, en los avisos y en
+      // los eventos de lo que se haga con esta sesión. Al ADMIN se le agrega su rol aquí, una sola vez, y no en
+      // cada sitio que escribe `usuario.nombre`: sus acciones en la tienda de otro no se confunden con las de un
+      // empleado de esa tienda.
+      nombre: nombreDeActor(usuario),
     };
   }
 }

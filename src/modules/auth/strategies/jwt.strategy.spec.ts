@@ -32,6 +32,22 @@ describe('JwtStrategy.validate', () => {
     expect(user).toMatchObject({ userId: 7, tiendaId: 3, nombre: 'Ana' });
   });
 
+  // PLAN-ADMIN-MULTITIENDA §4.5.3: el nombre del `UserContext` es el que se escribe en el historial, en
+  // los avisos y en los eventos. Resolverlo AQUÍ (y no en los ~16 sitios que escriben `usuario.nombre`)
+  // garantiza que ninguna acción del ADMIN se atribuya sin decir que fue un administrador.
+  it('al ADMIN se le agrega su rol al nombre: sus acciones no se confunden con las de un empleado', async () => {
+    const user = await crear({ ...base, rol: RolUsuario.ADMIN, nombre: 'Fernando' }).validate(
+      {} as never,
+      payload,
+    );
+    expect(user.nombre).toBe('Fernando (Administrador)');
+  });
+
+  it('un empleado conserva su nombre tal cual', async () => {
+    const user = await crear(base).validate({} as never, payload);
+    expect(user.nombre).toBe('Ana');
+  });
+
   it('un usuario degradado de ADMIN pierde el permiso en la siguiente petición', async () => {
     const user = await crear({ ...base, rol: RolUsuario.CAJERO }).validate({} as never, payload);
     expect(user.rol).not.toBe('ADMIN');

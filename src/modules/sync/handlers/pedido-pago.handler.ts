@@ -16,7 +16,8 @@ import {
   pedidoIdDesdeIdPreasignado,
 } from '../../pedidos/core/id-pedido-externo.util';
 import type { SyncEventoDto } from '../dto/upload-batch.dto';
-import { EstadoPedido } from '@prisma/client';
+import { EstadoPedido, TipoTareaErp } from '@prisma/client';
+import { cerrarTareasConfirmadasPorEl } from '../../pedidos/core/tareas-erp.util';
 import type { UserContext } from '../../../types/pedido.types';
 
 /**
@@ -167,6 +168,9 @@ export class PedidoPagoHandler {
       // Cancelación en Firebird
       if (esCancelacion) {
         await this.cancelarPedido(pedidoIdNube);
+        // Oct 2026: si la nube ya había cancelado el pedido y alguien lo canceló también en el Sistema Comercial, la
+        // tarea "cancelar en el Sistema Comercial" queda cumplida: se cierra sola.
+        await cerrarTareasConfirmadasPorEl(this.prisma, pedidoIdNube, TipoTareaErp.CANCELAR_EN_ERP);
         return {
           ok: true,
           mensaje: conAlertas('PEDIDO cancelado en Firebird → CANCELADO en nube'),
@@ -182,6 +186,13 @@ export class PedidoPagoHandler {
         if (yaFueCobrado(pedido.estado)) {
           this.logger.log(
             `Pedido ${pedidoIdNube} ya estaba ${pedido.estado} (sync idempotente), omitido`,
+          );
+          // Oct 2026: si la nube lo había marcado pagado a mano, esta es la confirmación del ERP: el cajero ya
+          // registró el cobro en el Sistema Comercial y la tarea queda cumplida.
+          await cerrarTareasConfirmadasPorEl(
+            this.prisma,
+            pedidoIdNube,
+            TipoTareaErp.REGISTRAR_COBRO_EN_ERP,
           );
           return { ok: true, mensaje: conAlertas(`PEDIDO ya estaba ${pedido.estado} — omitido`) };
         }
@@ -334,7 +345,7 @@ export class PedidoPagoHandler {
     // terminal (p.ej. ENTREGADO), la máquina lo rechaza con 400 en vez de
     // permitir una transición inválida.
     await this.pedidoState.cambiarEstadoPorSistema(pedidoIdNube, EstadoPedido.CANCELADO, {
-      observacion: 'Cancelado en Firebird (sincronizado por agente)',
+      observacion: 'Cancelado por la tienda',
       usuarioNombre: 'AGENT_EXTERNAL',
     });
   }

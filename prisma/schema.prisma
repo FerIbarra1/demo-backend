@@ -46,6 +46,15 @@ enum RolUsuario {
   // sí llegaron al banco. Multi-tienda: NO tiene `tiendaId`. No cobra, no marca pagado y no
   // cambia el estado de ningún pedido: el cobro sigue siendo de VFP. Ver PLAN-PAGOS-TRANSFERENCIA.md.
   TESORERIA
+  // Oct 2026 (impresión DTF): revisa los archivos de los clientes, pide correcciones, imprime y
+  // marca listo. Tiene `tiendaId` (varias personas por tienda). Ver PLAN-DTF.md.
+  IMPRESION
+  // Oct 2026 (17-oct, decisión del dueño): gerente de UNA tienda (con `tiendaId`, como el resto de
+  // empleados). Supervisa su tienda: torre de control, salud y búsqueda de pedidos; las acciones para
+  // destrabar pedidos llegan después. NO entra a Tesorería, a las consolas operativas ni a /admin; lo que
+  // solo hace el ADMIN (marcar gratis, cancelar pagados, cambiar precios, crear empleados) sigue siéndolo
+  // porque `RolesGuard` niega por defecto: GERENTE solo está donde se le nombra (ver `roles-contrato.spec`).
+  GERENTE
   ADMIN
 }
 
@@ -112,6 +121,14 @@ enum EstadoPedido {
   //          PENDIENTE_PAGO (enviar a pagar),
   //          CANCELADO.
   EN_ATENCION
+  // Oct 2026 (impresión DTF, PLAN-DTF.md D3): el pedido espera a que su DTF esté impreso. El
+  // pedido solo-DTF NACE aquí; el mixto llega cuando bodega cierra y aún hay DTF pendiente.
+  // Estado propio y no un filtro: ninguna consulta de bodega lo ve (filtran SOLICITADO/EN_REVISION).
+  //
+  // Salidas: REVISADO (todo impreso; el área de entrega), PENDIENTE_PAGO (solo DOMICILIO, con
+  //          encolado a Firebird) y CANCELADO. Desde REVISADO/EN_ATENCION se vuelve aquí si hay
+  //          que reimprimir.
+  EN_DTF
   PENDIENTE_PAGO
   PAGADO
   ENVIADO
@@ -201,8 +218,12 @@ enum TipoNotificacion {
   TRANSFERENCIA_COMPROBANTE_RECIBIDO
   TRANSFERENCIA_VERIFICADA
   TRANSFERENCIA_RECHAZADA
-  TRANSFERENCIA_POR_VENCER
   TRANSFERENCIA_REEMBOLSADA
+  // Oct 2026 (impresión DTF). El correo de "listo en tienda" del pedido ya cubre el final.
+  DTF_RECIBIDO
+  DTF_NECESITA_CORRECCION
+  DTF_APROBADO
+  DTF_RECHAZADO
 }
 
 enum EstadoSurtido {
@@ -269,6 +290,9 @@ model Tienda {
   // porque hay una sola BD Firebird central para todas las tiendas y la
   // relación nube↔local es 1:1 por tienda.
   externalId Int?     @unique @map("external_id")
+  // Oct 2026 (parte B): las iniciales de la tienda en el Sistema Comercial (TIENDAS.SERIE: HMO, MXL, CUL…). Es el
+  // prefijo VISUAL del folio ("HMO-0000152573"). Llega con el catálogo; NULL = aún no sincronizada (se muestra el folio solo).
+  serie      String?  @db.VarChar(10)
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
@@ -282,6 +306,7 @@ model Tienda {
   kioskos          Kiosko[]
   // SyncModule: checkpoint por tienda (último BANDEJA_SYNC.ID procesado).
   checkpoint       SyncCheckpoint?
+  hallazgosErp     ConciliacionHallazgo[]
   // F11 (ago 2026): ventanillas físicas del módulo de cajeros (1, 2, 3...).
   // Cada ventanilla puede estar asignada a un cajero a la vez.
   ventanillas      Ventanilla[]
@@ -292,6 +317,9 @@ model Tienda {
   syncEventInbox   SyncEventInbox[]
   // Oct 2026: cuenta bancaria propia de la tienda para transferencias (si no tiene, se usa la global).
   cuentasBancarias CuentaBancaria[]
+  // Oct 2026 (impresión DTF): qué tecnologías imprime esta tienda y los trabajos que le tocan.
+  tiendaDtf        TiendaDtf[]
+  trabajosDtf      PedidoDtf[]
 
   @@map("tiendas")
 }
@@ -358,6 +386,10 @@ model Usuario {
   pagosReembolsados       PedidoPagoTransferencia[] @relation("PagoReembolsador")
   comprobantesSubidos     PagoComprobante[]         @relation("ComprobanteSubidoPor")
   comprobantesRevisados   PagoComprobante[]         @relation("ComprobanteRevisadoPor")
+  // Oct 2026 (impresión DTF): trabajos propios, los que revisa/imprime y sus mensajes.
+  trabajosDtf             PedidoDtf[]               @relation("DtfDueno")
+  trabajosDtfAsignados    PedidoDtf[]               @relation("DtfAsignado")
+  mensajesDtf             PedidoDtfMensaje[]
 
   @@map("usuarios")
 }
@@ -456,6 +488,8 @@ model Producto {
   itemsPedido      ItemPedido[]
   favoritos        Favorito[]
   imagenesProducto ProductoImagen[]
+  // Oct 2026 (impresión DTF): el producto-servicio "DTF por metro" del ERP, si ya está dado de alta.
+  tiposDtf         DtfTipo[]
 
   @@map("productos")
 }
@@ -535,7 +569,9 @@ model Talla {
 model Color {
   id     Int     @id @default(autoincrement())
   codigo String  @unique @db.VarChar(10)
-  nombre String  @db.VarChar(30)
+  // 40 = el ancho de `COLORES.DESCRIP` en Firebird (el sistema que manda). Con 30, 44 colores reales ("FS/ NEGRO FC/ GRIS…")
+  // no se creaban y los pedidos con esos colores no podían guardar su línea.
+  nombre String  @db.VarChar(40)
   hex    String? @db.VarChar(7)
   activo Boolean @default(true)
 
@@ -585,7 +621,10 @@ model PrecioCO {
   tallaId    Int     @map("talla_id")
   colorId    Int     @map("color_id")
   precio     Decimal @db.Decimal(10, 2)
-  sku        String? @unique @db.VarChar(50)
+  // El SKU identifica la VARIANTE y el ERP lo repite en cada tienda (1 025 SKUs distintos en 7 733 filas de PRECIOSCO, cero
+  // repetidos DENTRO de una tienda): es único por tienda, no global. Con `@unique` a secas solo la primera tienda en
+  // sincronizar guardaba el precio de una variante y las demás fallaban (tiendas 4 a 8 casi sin precios).
+  sku        String? @db.VarChar(50)
 
   // F9 (ago 2026): 6 listas de precios sincronizadas desde Firebird
   // (PRECIOSCO.PRECIO1..6). `precio` sigue siendo sinónimo de lista1.
@@ -606,6 +645,8 @@ model PrecioCO {
   sustitucionesPropuestas ItemPedido[] @relation("SustitucionPropuesta")
 
   @@unique([productoId, tiendaId, corridaId, tallaId, colorId])
+  // Único por TIENDA (ver `sku`). Postgres deja pasar varios NULL: las variantes sin SKU no chocan.
+  @@unique([tiendaId, sku])
   @@map("preciosco")
 }
 
@@ -618,6 +659,12 @@ model PrecioCO {
 model Pedido {
   id           Int          @id @default(autoincrement())
   numeroPedido String       @unique @map("numero_pedido") @db.VarChar(20)
+  // Oct 2026 (parte B): el FOLIO REAL del Sistema Comercial (10 dígitos, "0000152573"), tomado del consecutivo de
+  // CONSECUTIVOS cuando bodega CIERRA EL SURTIDO (ver `PedidoFolioSolicitud`). Es el ID que ve el cliente, el que
+  // va en el ticket y en el QR; `numeroPedido` (PD-…) queda como llave interna. NULL = aún no llega del ERP.
+  // El prefijo que se muestra (HMO-, MXL-…) es `Tienda.serie` y es solo visual: aquí va el folio tal cual está en
+  // Firebird. Único POR TIENDA (el consecutivo es por tienda: el mismo número existe en cada una).
+  folioErp     String?      @map("folio_erp") @db.VarChar(10)
   usuarioId    Int          @map("usuario_id")
   tiendaId     Int          @map("tienda_id")
   estado       EstadoPedido @default(SOLICITADO)
@@ -639,7 +686,7 @@ model Pedido {
   modoEntrega ModoEntrega @default(DOMICILIO) @map("modo_entrega")
 
   // Envío
-  shippingDireccion          String?     @map("shipping_direccion") @db.Text
+  shippingDireccion String? @map("shipping_direccion") @db.Text
 
   // Oct 2026 (16-oct): QUIÉN recogió el pedido cuando NO es el titular — el mandadero que mandó su
   // patrón, un familiar. Lo captura el operador de mostrador al confirmar la entrega. `null` = lo
@@ -647,7 +694,7 @@ model Pedido {
   // que ya está en `clienteNombre`. Es constancia, no un permiso: sale en el historial, en el
   // detalle del pedido y en el correo de "entregado", donde el titular puede avisar si no reconoce a
   // quien lo recogió.
-  recogioNombre String? @map("recogio_nombre") @db.VarChar(150)
+  recogioNombre              String?     @map("recogio_nombre") @db.VarChar(150)
   shippingReferencia         String?     @map("shipping_referencia") @db.VarChar(255)
   // F8 (jul 2026): dirección estructurada para envío a domicilio. Requeridos
   // por el service cuando modoEntrega=DOMICILIO.
@@ -863,12 +910,25 @@ model Pedido {
   mensajeEnviado       MensajeBodegueroEnviado?
   // F9 (ago 2026): cola de envío hacia Firebird. 1:1 con Pedido.
   pendienteEnvio       PedidoPendienteEnvio?
+  // Oct 2026 (parte B): la solicitud del folio al agente (la nube pide, el agente sondea y reserva).
+  folioSolicitud       PedidoFolioSolicitud?
   // F13 (sep 2026): lista de reposición. 1:1 con Pedido, sólo existe si el
   // pedido se canceló por rechazo del cliente (los productos vuelven al anaquel).
   reposicion           PedidoReposicion?
   // Oct 2026: pagos por transferencia de este pedido (a lo más UNO activo; el resto es historial).
   pagosTransferencia   PedidoPagoTransferencia[]
+  intervenciones       PedidoIntervencion[]
+  // Oct 2026: por qué canceló el CLIENTE (opcional). Solo existe si dio un motivo. NO es columna de `Pedido` a propósito:
+  // muchas respuestas devuelven la fila completa y el motivo es para el negocio, no para el cliente ni las TV.
+  cancelacionCliente   PedidoCancelacionCliente?
+  tareasErp            TareaSistemaComercial[]
+  hallazgosErp         ConciliacionHallazgo[]
+  // Oct 2026 (impresión DTF): los trabajos de impresión del pedido (PLAN-DTF.md D1: carril propio).
+  trabajosDtf          PedidoDtf[]
 
+  // Oct 2026 (parte B): el folio es único dentro de la tienda (Postgres deja pasar los NULL: los pedidos sin folio
+  // no chocan). Atrapa una doble asignación y es el índice de la búsqueda por folio.
+  @@unique([tiendaId, folioErp], map: "pedidos_tienda_folio_erp_key")
   @@index([tiendaId, estado])
   @@index([usuarioId])
   @@index([cajeroAsignadoId])
@@ -939,7 +999,7 @@ model ItemPedido {
   productoCodigo String @map("producto_codigo") @db.VarChar(50)
   corridaNombre  String @map("corrida_nombre") @db.VarChar(50)
   tallaNombre    String @map("talla_nombre") @db.VarChar(10)
-  colorNombre    String @map("color_nombre") @db.VarChar(30)
+  colorNombre    String @map("color_nombre") @db.VarChar(40)
 
   // B2B: flags para auditoría de revisión
   original  Boolean @default(true) // false = agregado por revisión aceptada
@@ -1175,18 +1235,17 @@ model PedidoPagoTransferencia {
 
   // Snapshot al emitir las instrucciones: lo que se le dijo al cliente no cambia aunque cambien
   // la cuenta o (por error) el total del pedido.
-  montoEsperado    Decimal  @map("monto_esperado") @db.Decimal(12, 2)
-  cuentaSnapshot   Json     @map("cuenta_snapshot")
+  montoEsperado    Decimal @map("monto_esperado") @db.Decimal(12, 2)
+  cuentaSnapshot   Json    @map("cuenta_snapshot")
   // "Referencia" del SPEI: 7 dígitos (el límite del campo), aleatoria y única. No es el id del pedido.
-  referencia       String   @db.VarChar(7)
+  referencia       String  @db.VarChar(7)
   // "Concepto de pago": alfanumérico sin guiones (varios bancos los rechazan).
-  concepto         String   @db.VarChar(30)
-  venceAt          DateTime @map("vence_at")
+  concepto         String  @db.VarChar(30)
   // Cuántos comprobantes se han rechazado en este pago.
-  intentos         Int      @default(0)
+  intentos         Int     @default(0)
   // Si no es null, hay algo que aclarar antes de aprobar (el total cambió en VFP, el pedido se
   // canceló o se cobró en tienda teniendo un comprobante en revisión...). Texto para Tesorería.
-  requiereRevision String?  @map("requiere_revision") @db.Text
+  requiereRevision String? @map("requiere_revision") @db.Text
 
   // Resultado de la verificación (Tesorería).
   montoVerificado  Decimal?  @map("monto_verificado") @db.Decimal(12, 2)
@@ -1222,7 +1281,6 @@ model PedidoPagoTransferencia {
 
   @@unique([referencia])
   @@index([pedidoId])
-  @@index([estado, venceAt])
   @@index([estado, createdAt])
   @@map("pedidos_pagos_transferencia")
 }
@@ -1319,6 +1377,152 @@ model HistorialPedido {
   @@map("historial_pedidos")
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Oct 2026 — DESTRABAR PEDIDOS (gerente y admin).
+//
+// Cuando un pedido se atora (el cliente no paga, nadie lo cobra, una propuesta sin respuesta), el gerente de la
+// tienda o el admin lo resuelven desde el detalle del pedido. Cada acción deja una fila aquí: quién, con qué rol,
+// qué hizo y POR QUÉ (el motivo es obligatorio). Es la bitácora de esas decisiones, aparte del historial de estados
+// (`HistorialPedido`), que solo dice qué estado cambió: una acción que no cambia de estado (marcar vencida una
+// transferencia) también queda aquí.
+model PedidoIntervencion {
+  id             Int           @id @default(autoincrement())
+  pedidoId       Int           @map("pedido_id")
+  tiendaId       Int           @map("tienda_id")
+  // Slug de la acción (`CANCELAR_SIN_PAGO`, `MARCAR_VENCIDA`, `MARCAR_PAGADO`…). String y no enum: el catálogo de
+  // acciones crece sin migración, y la validación vive en el registro de acciones del servidor.
+  tipo           String        @db.VarChar(40)
+  // Para el personal. NUNCA se le muestra al cliente (decisión del dueño).
+  motivo         String        @db.Text
+  // Lo único que el cliente puede leer en SU pedido (si entra a verlo): texto estándar de la acción más lo que el
+  // gerente quiera agregar. No se manda por correo.
+  mensajeCliente String?       @map("mensaje_cliente") @db.Text
+  actorId        Int?          @map("actor_id")
+  actorRol       RolUsuario?   @map("actor_rol")
+  actorNombre    String        @map("actor_nombre") @db.VarChar(120)
+  estadoAntes    EstadoPedido? @map("estado_antes")
+  estadoDespues  EstadoPedido? @map("estado_despues")
+  detalle        Json?
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  pedido Pedido                  @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  tareas TareaSistemaComercial[]
+
+  @@index([pedidoId, createdAt])
+  @@index([tiendaId, createdAt])
+  @@map("pedido_intervenciones")
+}
+
+// Oct 2026 — por qué canceló el CLIENTE su pedido. Es OPCIONAL (como Amazon o Uber: la lista corta se puede omitir sin
+// fricción), así que la fila solo existe si el cliente eligió un motivo; omitirlo no deja nada.
+//
+// Es para el negocio (analítica) y para el gerente/admin en el detalle del pedido. NO va al historial del pedido ni
+// al correo del cliente: por eso es una tabla aparte y no una columna de `Pedido` (que muchas respuestas devuelven entera).
+//
+// `motivo` es un slug validado en el servidor (`core/motivos-cancelacion-cliente.ts`), no un enum de la BD: igual que
+// `PedidoIntervencion.tipo`, el catálogo puede crecer sin migración.
+model PedidoCancelacionCliente {
+  id               Int          @id @default(autoincrement())
+  pedidoId         Int          @unique @map("pedido_id")
+  tiendaId         Int          @map("tienda_id")
+  usuarioId        Int?         @map("usuario_id")
+  motivo           String       @db.VarChar(30)
+  // Solo con el motivo «Otro»: lo que el cliente escribió (máx. 200).
+  detalle          String?      @db.VarChar(200)
+  // En qué punto estaba el pedido al cancelar: no es lo mismo cancelar esperando a bodega que ya listo en tienda.
+  estadoAlCancelar EstadoPedido @map("estado_al_cancelar")
+  createdAt        DateTime     @default(now()) @map("created_at")
+
+  pedido Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+
+  @@index([tiendaId, createdAt])
+  @@index([motivo, createdAt])
+  @@map("pedido_cancelaciones_cliente")
+}
+
+// Oct 2026 — lo que la nube hizo y el Sistema Comercial todavía NO sabe.
+//
+// Si un pedido que YA tiene folio en el Sistema Comercial (su fila de `PedidoPendienteEnvio` está PROCESADO) se
+// cancela, o se marca pagado a mano, en la nube, el ERP no se entera: alguien tiene que reflejarlo allá. Esta tabla es
+// esa lista de pendientes. El que lo hace en la tienda es el cajero (es quien opera el Sistema Comercial). Se cierra
+// SOLA cuando el ERP lo confirma por el agente (`SWCANCEL` / `FINALIZADA`), o a mano ("ya lo hice" / "no aplica").
+model TareaSistemaComercial {
+  id                Int            @id @default(autoincrement())
+  pedidoId          Int            @map("pedido_id")
+  tiendaId          Int            @map("tienda_id")
+  tipo              TipoTareaErp
+  estado            EstadoTareaErp @default(PENDIENTE)
+  // Foto de lo que había al crearla: con qué folio buscarlo en el Sistema Comercial.
+  folio             String?        @db.VarChar(10)
+  erpIdPedido       Int?           @map("erp_id_pedido")
+  // Por qué existe (la observación de la cancelación o la referencia del cobro manual). Para el personal.
+  motivo            String         @db.Text
+  creadaPorId       Int?           @map("creada_por_id")
+  creadaPorRol      String?        @map("creada_por_rol") @db.VarChar(20)
+  creadaPorNombre   String?        @map("creada_por_nombre") @db.VarChar(120)
+  intervencionId    Int?           @map("intervencion_id")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  resueltaAt        DateTime?      @map("resuelta_at")
+  resueltaPorId     Int?           @map("resuelta_por_id")
+  resueltaPorNombre String?        @map("resuelta_por_nombre") @db.VarChar(120)
+  // 'ERP' (lo confirmó el agente), 'MANUAL' (alguien dijo "ya lo hice") o 'DESCARTADA' (no aplica, con nota).
+  resueltaVia       String?        @map("resuelta_via") @db.VarChar(12)
+  notaResolucion    String?        @map("nota_resolucion") @db.Text
+
+  pedido       Pedido              @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  intervencion PedidoIntervencion? @relation(fields: [intervencionId], references: [id], onDelete: SetNull)
+
+  @@index([tiendaId, estado, createdAt])
+  @@index([pedidoId, estado])
+  // Una sola tarea ABIERTA por pedido y tipo: el índice único parcial (`WHERE estado = 'PENDIENTE'`) vive en la
+  // migración, porque Prisma no sabe modelarlo.
+  @@map("tareas_sistema_comercial")
+}
+
+enum TipoTareaErp {
+  // La nube canceló el pedido y en el Sistema Comercial sigue vivo: hay que cancelarlo allá.
+  CANCELAR_EN_ERP
+  // La nube lo marcó pagado a mano y el Sistema Comercial no tiene el cobro: hay que registrarlo allá.
+  REGISTRAR_COBRO_EN_ERP
+  // La nube canceló un pedido que YA estaba cobrado (el ERP lo tiene FINALIZADO): hay que anular la venta allá y devolver
+  // el dinero. Es distinta de CANCELAR_EN_ERP: cancelar un pedido sin cobro no toca facturas ni caja.
+  ANULAR_VENTA_EN_ERP
+}
+
+// Oct 2026 (destrabar, etapa 3) — la CONCILIACIÓN ACTIVA: lo que el agente encuentra al comparar, pedido por pedido, la
+// nube contra el Sistema Comercial (el trigger de Firebird avisa de los CAMBIOS; esto verifica el RESULTADO, y cubre lo
+// que un evento perdido, un agente caído o un trigger sin instalar dejaron sin avisar).
+//
+// Una fila ABIERTA (`resueltoAt` null) por pedido y tipo (índice único parcial en la migración). Los tipos que la nube
+// corrige sola (`curado`: COBRO_PERDIDO, CANCELACION_PERDIDA) nacen ya resueltos: quedan para que se vea que pasó. El
+// resto pide a una persona; se cierran solos en cuanto la comparación siguiente ya no los encuentra.
+model ConciliacionHallazgo {
+  id           Int       @id @default(autoincrement())
+  tiendaId     Int       @map("tienda_id")
+  pedidoId     Int       @map("pedido_id")
+  // Slug (ver `conciliacion.util.ts`). String y no enum: el catálogo crece sin migración.
+  tipo         String    @db.VarChar(40)
+  // Qué dice cada lado (estado de la nube, SWCANCEL/FINALIZADA/total del ERP): para el personal.
+  detalle      Json?
+  curado       Boolean   @default(false)
+  primeraVezAt DateTime  @default(now()) @map("primera_vez_at")
+  ultimaVezAt  DateTime  @default(now()) @map("ultima_vez_at")
+  resueltoAt   DateTime? @map("resuelto_at")
+
+  pedido Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  tienda Tienda @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+
+  @@index([tiendaId, resueltoAt])
+  @@index([pedidoId])
+  @@map("conciliacion_hallazgos")
+}
+
+enum EstadoTareaErp {
+  PENDIENTE
+  HECHA
+  DESCARTADA
+}
+
 model LogActividad {
   id          Int      @id @default(autoincrement())
   usuarioId   Int?     @map("usuario_id")
@@ -1349,7 +1553,13 @@ model LogActividad {
 model Kiosko {
   id                  Int          @id @default(autoincrement())
   tiendaId            Int          @map("tienda_id")
-  nombre              String       @db.VarChar(50) // ej: "Kiosko Entrada", "Kiosko 1"
+  // Lo asigna el sistema por tienda ("Kiosko 1", "Kiosko 2"…): nadie lo teclea, así no hay duplicados ni
+  // erratas ("Kiosko 1" vs "kiosko 1") y el mostrador lee "Avisó: Kiosko 2".
+  nombre              String       @db.VarChar(50)
+  // Dónde está la tablet, para reconocerla ("Entrada", "Junto a caja"). Opcional y editable.
+  ubicacion           String?      @db.VarChar(40)
+  // ACTIVO/INACTIVO es solo el interruptor del admin o gerente. "Aún sin tablet" no es un estado: se deduce de
+  // `deviceTokenHash`/`primerConexionAt` (ver `calcularSaludKiosko`).
   estado              EstadoKiosko @default(ACTIVO)
   activadoAt          DateTime     @default(now()) @map("activado_at")
   activadoPorId       Int          @map("activado_por_id")
@@ -1556,14 +1766,18 @@ model ExternalRef {
 // que ya subió a la nube. El checkpoint es por tienda (no por instancia
 // de agente), para soportar reinstalación del agente sin perder progreso.
 model SyncCheckpoint {
-  id                Int       @id @default(autoincrement())
-  tiendaId          Int       @unique @map("tienda_id")
-  ultimoBANDEJAId   BigInt    @default(0) @map("ultimo_bandeja_id")
-  ultimoHeartbeatAt DateTime? @map("ultimo_heartbeat_at")
-  agentVersion      String?   @map("agent_version") @db.VarChar(20)
-  lastError         String?   @map("last_error") @db.Text
-  lastErrorAt       DateTime? @map("last_error_at")
-  updatedAt         DateTime  @updatedAt @map("updated_at")
+  id                          Int       @id @default(autoincrement())
+  tiendaId                    Int       @unique @map("tienda_id")
+  ultimoBANDEJAId             BigInt    @default(0) @map("ultimo_bandeja_id")
+  ultimoHeartbeatAt           DateTime? @map("ultimo_heartbeat_at")
+  agentVersion                String?   @map("agent_version") @db.VarChar(20)
+  lastError                   String?   @map("last_error") @db.Text
+  lastErrorAt                 DateTime? @map("last_error_at")
+  // Oct 2026: la última vez que el agente COMPARÓ los pedidos de esta tienda contra el Sistema Comercial (la
+  // conciliación activa) y cuántos revisó. Sin esto "no hay diferencias" y "nadie ha comparado" se ven igual.
+  ultimaConciliacionAt        DateTime? @map("ultima_conciliacion_at")
+  ultimaConciliacionRevisados Int?      @map("ultima_conciliacion_revisados")
+  updatedAt                   DateTime  @updatedAt @map("updated_at")
 
   tienda Tienda @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
 
@@ -1607,6 +1821,33 @@ model PedidoPendienteEnvio {
   // kiosko-llegada no haga seq scan cuando crezca el histórico.
   @@index([externalFolio])
   @@map("pedidos_pendientes_envio")
+}
+
+// Oct 2026 (parte B): la cola de FOLIOS. Cuando bodega cierra el surtido el pedido necesita su folio REAL del
+// Sistema Comercial (para el ticket y el QR) y la nube no puede llamar al agente: deja aquí la solicitud, el agente
+// la recoge en su siguiente ciclo (`GET sync/agent/poll-folios`), reserva el consecutivo en Firebird y la contesta
+// (`POST sync/agent/folios-ack`). Mismo patrón claim/lease que `PedidoPendienteEnvio`, pero NO envía el pedido: solo
+// toma un número (el pedido sigue sin existir en el ERP hasta que mostrador lo manda a pagar). 1:1 con el pedido.
+model PedidoFolioSolicitud {
+  id            Int       @id @default(autoincrement())
+  pedidoId      Int       @unique @map("pedido_id")
+  tiendaId      Int       @map("tienda_id")
+  // PENDIENTE → PROCESSING (el agente la tomó) → ASIGNADO. Un error del agente la regresa a PENDIENTE con su espera.
+  estado        String    @default("PENDIENTE") @db.VarChar(20)
+  intentos      Int       @default(0)
+  claimedBy     String?   @map("claimed_by") @db.VarChar(100)
+  leaseToken    String?   @map("lease_token") @db.VarChar(80)
+  leaseUntil    DateTime? @map("lease_until")
+  nextAttemptAt DateTime  @default(now()) @map("next_attempt_at")
+  ultimoError   String?   @map("ultimo_error") @db.Text
+  createdAt     DateTime  @default(now()) @map("created_at")
+  asignadoAt    DateTime? @map("asignado_at")
+
+  pedido Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+
+  // El poll del agente (por tienda, lo no asignado) y el semáforo de salud.
+  @@index([tiendaId, estado, nextAttemptAt])
+  @@map("pedido_folio_solicitudes")
 }
 
 // F13 (sep 2026): lista de reposición de bodega.
@@ -1728,4 +1969,225 @@ model ConfiguracionSitio {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("configuracion_sitio")
+}
+
+// ==================== IMPRESIÓN DTF (oct 2026) ====================
+//
+// Ver PLAN-DTF.md. Principio: el DTF NO es un `ItemPedido` (cantidad Int, variante obligatoria, promo
+// de 12 piezas, bodega/propuestas/reposición y el ERP asumen prendas). Es un carril paralelo colgado
+// del pedido, con su propia máquina de estados, y el pedido espera en `EN_DTF`.
+//
+// Los índices parciales que Prisma no sabe declarar (si hicieran falta) viven en la migración SQL.
+
+enum TecnologiaDtf {
+  TEXTIL
+  UV
+}
+
+enum EstadoDtf {
+  BORRADOR // en el carrito, sin pedido (expira)
+  ARCHIVO_PENDIENTE // el pedido existe pero el archivo llega después (USB / correo, subido por el personal)
+  RECIBIDO // archivo subido, en la cola de revisión
+  EN_REVISION // una persona de Impresión lo tomó
+  NECESITA_CORRECCION // se pidió otra versión: la pelota es del cliente
+  APROBADO // listo para imprimir
+  EN_IMPRESION
+  IMPRESO // listo en tienda (terminal del trabajo; la entrega es del pedido)
+  RECHAZADO // no se puede hacer (terminal)
+  CANCELADO // lo quitó el cliente / un operador antes de imprimir (terminal)
+  EXPIRADO // borrador abandonado (terminal)
+}
+
+enum EstadoPreflight {
+  PENDIENTE
+  OK
+  CON_AVISOS
+  BLOQUEADO
+  NO_CONCLUYENTE
+}
+
+// Catálogo de reglas y tarifas de cada tecnología. Lo edita el ADMIN (no es `ConfiguracionSitio`: son
+// datos estructurados). El precio sale de `productoId` (producto-servicio del ERP, con la lista del
+// cliente) y, si no hay, de `precioMetro` (tarifa manual). Ver PLAN-DTF.md D5.
+model DtfTipo {
+  id                Int           @id @default(autoincrement())
+  tecnologia        TecnologiaDtf @unique
+  nombre            String        @db.VarChar(60)
+  descripcion       String?       @db.Text
+  productoId        Int?          @map("producto_id")
+  precioMetro       Decimal?      @map("precio_metro") @db.Decimal(10, 2)
+  anchoUtilCm       Decimal       @default(57) @map("ancho_util_cm") @db.Decimal(6, 1)
+  toleranciaAnchoCm Decimal       @default(0.5) @map("tolerancia_ancho_cm") @db.Decimal(4, 1)
+  minimoCm          Decimal       @map("minimo_cm") @db.Decimal(6, 1)
+  maxAlturaCm       Decimal       @default(250) @map("max_altura_cm") @db.Decimal(6, 1)
+  // 100 = metro completo · 50 = medio metro · 20 = de 20 en 20 · 1 = exacto. Ver PLAN-DTF.md §8.
+  pasoCobroCm       Int           @map("paso_cobro_cm")
+  dpiMinimo         Int           @default(300) @map("dpi_minimo")
+  // Debajo de este tamaño de letra el texto "se desaparece" al imprimir (aviso, no bloqueo).
+  textoMinPt        Decimal       @default(6) @map("texto_min_pt") @db.Decimal(4, 1)
+  // D15: exigir pago antes de imprimir (apagado = se cobra al recoger/entregar, como las prendas).
+  pagoAntes         Boolean       @default(false) @map("pago_antes")
+  activo            Boolean       @default(true)
+  orden             Int           @default(0)
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  producto Producto?   @relation(fields: [productoId], references: [id], onDelete: SetNull)
+  tiendas  TiendaDtf[]
+  trabajos PedidoDtf[]
+
+  @@map("dtf_tipos")
+}
+
+// Qué tienda imprime qué tecnología, y con qué máquina. El ADMIN lo enciende en /admin/dtf (D16).
+model TiendaDtf {
+  id                  Int      @id @default(autoincrement())
+  tiendaId            Int      @map("tienda_id")
+  tipoId              Int      @map("tipo_id")
+  activo              Boolean  @default(true)
+  maquina             String?  @db.VarChar(60)
+  // Metros por hora: sirve para la hora estimada de entrega (la columna HORA del Excel).
+  velocidadMetrosHora Decimal? @map("velocidad_metros_hora") @db.Decimal(6, 2)
+  // "15:00": lo que llega después sale al día siguiente. Hora local de PAGOS_ZONA_HORARIA.
+  horaCorte           String?  @map("hora_corte") @db.VarChar(5)
+  cupoMetrosDia       Decimal? @map("cupo_metros_dia") @db.Decimal(8, 2)
+  fueraDeServicio     Boolean  @default(false) @map("fuera_de_servicio")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  tienda Tienda  @relation(fields: [tiendaId], references: [id], onDelete: Cascade)
+  tipo   DtfTipo @relation(fields: [tipoId], references: [id], onDelete: Cascade)
+
+  @@unique([tiendaId, tipoId])
+  @@map("tiendas_dtf")
+}
+
+// Un trabajo = un archivo = un renglón (como en la hoja de Excel). `pedidoId` es null mientras es
+// BORRADOR (vive en el servidor porque un archivo no cabe en el carrito del navegador).
+model PedidoDtf {
+  id          Int       @id @default(autoincrement())
+  pedidoId    Int?      @map("pedido_id")
+  usuarioId   Int       @map("usuario_id")
+  tiendaId    Int       @map("tienda_id")
+  tipoId      Int       @map("tipo_id")
+  estado      EstadoDtf @default(BORRADOR)
+  // "CÁNCER DE MAMA": la "descripción" de la hoja. Es el asa con la que el cliente distingue sus archivos.
+  nombre      String    @db.VarChar(80)
+  notaCliente String?   @map("nota_cliente") @db.Text
+  copias      Int       @default(1)
+
+  // Medidas del archivo vigente y cobro: SNAPSHOT congelado al cotizar.
+  anchoCm        Decimal? @map("ancho_cm") @db.Decimal(6, 1)
+  altoCm         Decimal? @map("alto_cm") @db.Decimal(7, 1)
+  metrosCobrados Decimal? @map("metros_cobrados") @db.Decimal(8, 2)
+  precioMetro    Decimal  @default(0) @map("precio_metro") @db.Decimal(10, 2)
+  subtotal       Decimal  @default(0) @db.Decimal(12, 2)
+
+  versionVigente Int       @default(0) @map("version_vigente")
+  // Reparto de trabajo entre varias personas de Impresión (guarda atómica, como bodega).
+  asignadoAId    Int?      @map("asignado_a_id")
+  asignadoAt     DateTime? @map("asignado_at")
+
+  correccionMotivos Json?   @map("correccion_motivos")
+  correccionNota    String? @map("correccion_nota") @db.Text
+  rechazoMotivo     String? @map("rechazo_motivo") @db.VarChar(40)
+  rechazoNota       String? @map("rechazo_nota") @db.Text
+  // El cliente siguió pese a un aviso de la revisión automática (p. ej. 150 dpi).
+  aceptoRiesgo      Boolean @default(false) @map("acepto_riesgo")
+
+  // Línea de tiempo. `recibidoAt` es EL LUGAR en la cola y NO se reinicia al subir una versión nueva.
+  recibidoAt     DateTime? @map("recibido_at")
+  aprobadoAt     DateTime? @map("aprobado_at")
+  planoBlancoAt  DateTime? @map("plano_blanco_at")
+  imprimiendoAt  DateTime? @map("imprimiendo_at")
+  impresoAt      DateTime? @map("impreso_at")
+  horaEstimadaAt DateTime? @map("hora_estimada_at")
+  ordenCola      Int?      @map("orden_cola")
+  reimpresiones  Int       @default(0)
+  expiraAt       DateTime? @map("expira_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  pedido    Pedido?            @relation(fields: [pedidoId], references: [id], onDelete: Restrict)
+  usuario   Usuario            @relation("DtfDueno", fields: [usuarioId], references: [id])
+  asignadoA Usuario?           @relation("DtfAsignado", fields: [asignadoAId], references: [id], onDelete: SetNull)
+  tienda    Tienda             @relation(fields: [tiendaId], references: [id])
+  tipo      DtfTipo            @relation(fields: [tipoId], references: [id])
+  archivos  PedidoDtfArchivo[]
+  eventos   PedidoDtfEvento[]
+  mensajes  PedidoDtfMensaje[]
+
+  @@index([tiendaId, estado])
+  @@index([pedidoId])
+  @@index([usuarioId, estado])
+  @@index([estado, expiraAt])
+  @@map("pedidos_dtf")
+}
+
+// Una fila por VERSIÓN del archivo; nunca se pisa. La BD guarda la KEY de almacenamiento PRIVADO,
+// jamás una URL (los diseños son propiedad intelectual del cliente).
+model PedidoDtfArchivo {
+  id              Int             @id @default(autoincrement())
+  dtfId           Int             @map("dtf_id")
+  version         Int
+  archivoKey      String          @map("archivo_key") @db.VarChar(255)
+  previewKey      String?         @map("preview_key") @db.VarChar(255)
+  nombreOriginal  String          @map("nombre_original") @db.VarChar(200)
+  // Detectado por la firma binaria del archivo, no el que declara el cliente.
+  mime            String          @db.VarChar(40)
+  bytes           Int
+  sha256          String          @db.VarChar(64)
+  // WEB | CELULAR_QR | ASISTIDO
+  canal           String          @db.VarChar(20)
+  subidoPorId     Int?            @map("subido_por_id")
+  subidoPorRol    String?         @map("subido_por_rol") @db.VarChar(20)
+  preflightEstado EstadoPreflight @default(PENDIENTE) @map("preflight_estado")
+  // Resultado por regla + mediciones (ver dtf/preflight). Es una AYUDA: la última palabra es de Impresión.
+  preflight       Json?
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  trabajo PedidoDtf @relation(fields: [dtfId], references: [id], onDelete: Cascade)
+
+  @@unique([dtfId, version])
+  @@index([sha256])
+  @@index([preflightEstado, createdAt])
+  @@map("pedidos_dtf_archivos")
+}
+
+// Bitácora de SOLO AGREGAR (el código nunca hace UPDATE ni DELETE aquí).
+model PedidoDtfEvento {
+  id          Int        @id @default(autoincrement())
+  dtfId       Int        @map("dtf_id")
+  tipo        String     @db.VarChar(40)
+  deEstado    EstadoDtf? @map("de_estado")
+  aEstado     EstadoDtf? @map("a_estado")
+  actorId     Int?       @map("actor_id")
+  actorRol    String?    @map("actor_rol") @db.VarChar(20)
+  actorNombre String?    @map("actor_nombre") @db.VarChar(100)
+  detalle     Json?
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  trabajo PedidoDtf @relation(fields: [dtfId], references: [id], onDelete: Cascade)
+
+  @@index([dtfId, createdAt])
+  @@map("pedidos_dtf_eventos")
+}
+
+// "Hablar con el diseñador": hilo por trabajo entre el cliente e Impresión. Es una tabla propia y no
+// `PedidoMensaje` a propósito (el chat de pedido es del asesor de ventas y trae sus reglas de
+// lectura/visibilidad); si luego se unifica, es una migración de datos.
+model PedidoDtfMensaje {
+  id        Int        @id @default(autoincrement())
+  dtfId     Int        @map("dtf_id")
+  autorId   Int        @map("autor_id")
+  autorRol  RolUsuario @map("autor_rol")
+  contenido String     @db.Text
+  createdAt DateTime   @default(now()) @map("created_at")
+
+  trabajo PedidoDtf @relation(fields: [dtfId], references: [id], onDelete: Cascade)
+  autor   Usuario   @relation(fields: [autorId], references: [id])
+
+  @@index([dtfId, createdAt])
+  @@map("pedidos_dtf_mensajes")
 }

@@ -12,7 +12,7 @@ import { estadoPedidoLabel } from '../../mail/estado-labels';
  * Búsqueda de pedido por folio (QR). Accesible por empleados (BODEGA, CAJERO,
  * MOSTRADOR, ADMIN). El folio puede ser el de VFP (externalFolio) o el interno
  * (numeroPedido). La búsqueda + validación de tienda vive en
- * PedidoAccessService.buscarPorFolio; el controller sólo orquesta.
+ * PedidoAccessService.buscarPorFolio; el controller solo orquesta.
  *
  * Clientes NO pueden usar este endpoint (RolesGuard lo rechaza).
  */
@@ -27,6 +27,8 @@ import { estadoPedidoLabel } from '../../mail/estado-labels';
   RolUsuario.CAJERO,
   RolUsuario.MOSTRADOR,
   RolUsuario.VENTAS,
+  // Oct 2026: el gerente busca y abre pedidos de SU tienda (la tienda sale del token, como en el resto).
+  RolUsuario.GERENTE,
   RolUsuario.ADMIN,
 )
 @ApiBearerAuth()
@@ -39,7 +41,7 @@ export class PedidoBusquedaController {
   @Get()
   @ApiOperation({
     summary:
-      'Busca un pedido por folio (VFP externalFolio o numeroPedido interno). Valida tienda del empleado.',
+      'Busca un pedido por folio del Sistema Comercial (HMO-0000152573, 0000152573 o 152573, acotado a la tienda del empleado) o por número interno. Valida tienda del empleado.',
   })
   @ApiQuery({ name: 'folio', required: true, type: String })
   async buscarPorFolio(@Query('folio') folio: string, @CurrentUser() user: any) {
@@ -83,6 +85,9 @@ export class PedidoBusquedaController {
       select: {
         id: true,
         numeroPedido: true,
+        // Oct 2026 (B2): con estas dos el servidor decora el pedido con su `folio` (HMO-0000152573).
+        tiendaId: true,
+        folioErp: true,
         clienteNombre: true,
         estado: true,
         canalOrigen: true,
@@ -104,6 +109,8 @@ export class PedidoBusquedaController {
       pedido: {
         id: pedido.id,
         numeroPedido: pedido.numeroPedido,
+        tiendaId: pedido.tiendaId,
+        folioErp: pedido.folioErp,
         clienteNombre: pedido.clienteNombre,
         estado: pedido.estado,
         estadoLabel: estadoPedidoLabel(pedido.estado),

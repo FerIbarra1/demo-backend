@@ -13,6 +13,7 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiHeader } from '@nestjs/swagger';
 import { ClienteService } from './cliente.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
+import { CancelarPedidoDto } from './dto/cancelar-pedido.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
@@ -119,6 +120,15 @@ export class ClienteController {
     );
   }
 
+  // Debe ir ANTES de `:id`: ParseIntPipe respondería 400 a "motivos-cancelacion".
+  @Get('motivos-cancelacion')
+  @ApiOperation({
+    summary: 'Lista corta de motivos del diálogo de cancelar (opcionales, para el negocio)',
+  })
+  motivosDeCancelacion() {
+    return this.clienteService.motivosDeCancelacion();
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Obtener detalle de mi pedido (mensajes, historial)' })
   async obtenerMiPedido(
@@ -130,8 +140,15 @@ export class ClienteController {
 
   @Post(':id/cancelar')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Cancelar mi pedido (sólo antes de PAID)' })
-  async cancelarPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
-    return this.clienteService.cancelarPedido(id, user.userId, user);
+  @ApiOperation({
+    summary:
+      'Cancelar mi pedido. Lo decide `puedeCancelar` (el mismo que trae Mis pedidos); 409 con el motivo si no.',
+  })
+  async cancelarPedido(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: any,
+    @Body() dto: CancelarPedidoDto,
+  ) {
+    return this.clienteService.cancelarPedido(id, user.userId, user, dto);
   }
 }

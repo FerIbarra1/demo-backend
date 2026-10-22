@@ -12,7 +12,7 @@ import { precioConPromoVolumen, COLUMNA_MAYOREO } from '../../precios/precio-lis
  * Es el caso que reportó el negocio, con sus números:
  *
  *   El cliente pide 10 de X, 5 de Y y 2 de Z.
- *   Bodega encuentra: X completa (10), Y sólo 3, Z ninguna (0).
+ *   Bodega encuentra: X completa (10), Y solo 3, Z ninguna (0).
  *   → se manda la propuesta al cliente.
  *   El cliente pide ajustes y entra el asesor de ventas, que puede:
  *     - quitar X aunque estuviera completa (el cliente se arrepintió),
@@ -128,6 +128,7 @@ async function cobrarComoProduccion(items: ItemEscenario[]) {
   }
 
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       update: jest.fn(async ({ where, data }: any) => {
         const prev = actualizados.get(where.id)!;
@@ -182,6 +183,7 @@ async function cobrarComoProduccion(items: ItemEscenario[]) {
 function crearTxPropuesta(items: ItemEscenario[]) {
   const updates: Array<{ id: number; data: any }> = [];
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: jest.fn(async ({ where }: any) => {
         const i = items.find((x) => x.id === where.id);
@@ -439,13 +441,10 @@ describe('F20 — paso 3: el dinero que se aprueba es el que se cobra', () => {
 
     // Lo que queda: solo Y con 3 piezas. La calculadora arma el total desde la
     // INTENCIÓN del asesor (quitar X y Z; Y se queda en lo que hay).
-    const totalPropuesta = calcularAjuste(
-      items as never,
-      [
-        { accion: 'QUITAR', itemId: 1 },
-        { accion: 'QUITAR', itemId: 3 },
-      ],
-    ).total;
+    const totalPropuesta = calcularAjuste(items as never, [
+      { accion: 'QUITAR', itemId: 1 },
+      { accion: 'QUITAR', itemId: 3 },
+    ]).total;
 
     // 3 piezas < 12 → la promo se revoca → $100/pieza.
     expect(totalPropuesta).toBe(300);

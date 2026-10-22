@@ -51,6 +51,12 @@ describe('puedeOperar', () => {
     expect(puedeOperar(EstadoPedido.EN_REVISION, RolUsuario.CAJERO)).toBe(false);
   });
 
+  it('el GERENTE ve quién tiene el pedido pero no lo opera (sus acciones llegan aparte, con bitácora)', () => {
+    for (const estado of Object.values(EstadoPedido)) {
+      expect(puedeOperar(estado, RolUsuario.GERENTE)).toBe(false);
+    }
+  });
+
   it('ADMIN puede operar cualquier estado no terminal', () => {
     expect(puedeOperar(EstadoPedido.EN_REVISION, RolUsuario.ADMIN)).toBe(true);
     expect(puedeOperar(EstadoPedido.PENDIENTE_PAGO, RolUsuario.ADMIN)).toBe(true);

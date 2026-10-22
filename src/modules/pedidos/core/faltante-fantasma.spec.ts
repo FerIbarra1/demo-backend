@@ -60,6 +60,7 @@ function crearSurtido(items: any[], opts: { propuestaAceptada?: boolean } = {}) 
       // faltantes y el pedido va al área de entrega.
       create: jest.fn(async () => ({ id: 88 })),
     },
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: jest.fn(async ({ where }: any) => {
         const it = items.find((i) => i.id === where.id);
@@ -205,6 +206,7 @@ function crearPropuesta(items: any[]) {
   const creates: any[] = [];
 
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: jest.fn(async ({ where }: any) => {
         const it = items.find((i) => i.id === where.id);

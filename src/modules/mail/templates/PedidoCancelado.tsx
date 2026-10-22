@@ -11,6 +11,10 @@ export interface PedidoCanceladoProps {
   frontendUrl: string;
 }
 
+/** El motivo que vale la pena decirle al cliente; el genérico de «lo cancelaste tú» no. */
+const motivoUtil = (m?: string | null): string | null =>
+  m && !/^cancelado por el cliente\.?$/i.test(m.trim()) ? m : null;
+
 export const PedidoCancelado = ({
   pedido,
   pedidoUrl,
@@ -27,8 +31,10 @@ export const PedidoCancelado = ({
     frontendUrl={frontendUrl}
     bodyExtras={
       <>
-        <Callout variant="danger" label={pedido.motivoCancelacion ? 'Motivo' : 'Aviso'}>
-          {pedido.motivoCancelacion ??
+        {/* Si lo canceló el propio cliente, «Motivo: Cancelado por el cliente» solo le repite lo que él hizo; lo útil
+            es el aviso por si NO fue él. */}
+        <Callout variant="danger" label={motivoUtil(pedido.motivoCancelacion) ? 'Motivo' : 'Aviso'}>
+          {motivoUtil(pedido.motivoCancelacion) ??
             'Si no solicitaste esta cancelación, responde a este correo o acércate a la tienda para ayudarte a resolverlo.'}
         </Callout>
         {/* La pregunta inmediata tras una cancelación en B2B es qué pasa con

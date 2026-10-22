@@ -20,7 +20,7 @@ import { EstadoPedido, ModoEntrega } from '@prisma/client';
  *     está en la tienda, no hay nada que mostrarle. Es el flujo de siempre.
  *   - KIOSKO / RECOGER_TIENDA → REVISADO SIN encolado. El pedido se aparta
  *     y espera a que el cliente lo revise; entra al ERP cuando mostrador lo
- *     libere. Así el ERP sólo ve pedidos que el cliente ya confirmó, y un
+ *     libere. Así el ERP solo ve pedidos que el cliente ya confirmó, y un
  *     ajuste o cancelación en mostrador nunca deja a Firebird desincronizado.
  */
 export function destinoTrasSurtido(modoEntrega: ModoEntrega): {

@@ -355,8 +355,39 @@ describe('MostradorService.cancelarVencidos', () => {
 
   it('ADMIN no queda acotado a una tienda', async () => {
     const { svc, findMany } = crearServicio({ vigentes: [], config });
-    await svc.cancelarVencidos({ userId: 1, nombre: 'Admin', rol: RolUsuario.ADMIN }, [10]);
+    await svc.cancelarVencidos(
+      { userId: 1, nombre: 'Admin', rol: RolUsuario.ADMIN },
+      [10],
+      'Pasó el plazo',
+    );
     expect(findMany.mock.calls[0][0].where).not.toHaveProperty('tiendaId');
+  });
+
+  // PLAN-ADMIN-MULTITIENDA §4.5.4: cancelar es destructivo y el ADMIN lo puede hacer en la tienda de
+  // cualquiera. El operador puede dejar el texto por defecto ("pasaron más de 3 días…"), que es lo que el
+  // cliente lee en su correo; el ADMIN debe decir POR QUÉ, con su propia boca, igual que en "marcar pagado manual".
+  it('el ADMIN debe escribir el motivo: sin él no se cancela nada (400) ni se consulta', async () => {
+    const { svc, findMany } = crearServicio({ vigentes: [{ id: 10 }], config });
+    const cancelar = jest.spyOn(svc, 'cancelar').mockResolvedValue({} as never);
+    const admin = { userId: 1, nombre: 'Fernando (Administrador)', rol: RolUsuario.ADMIN };
+
+    for (const motivo of [undefined, '', '   ', 'ab']) {
+      await expect(svc.cancelarVencidos(admin, [10], motivo)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+    }
+    expect(findMany).not.toHaveBeenCalled();
+    expect(cancelar).not.toHaveBeenCalled();
+  });
+
+  it('el ADMIN con motivo cancela, y el cliente lee SU motivo', async () => {
+    const { svc } = crearServicio({ vigentes: [{ id: 10 }], config });
+    const cancelar = jest.spyOn(svc, 'cancelar').mockResolvedValue({} as never);
+    const admin = { userId: 1, nombre: 'Fernando (Administrador)', rol: RolUsuario.ADMIN };
+
+    await svc.cancelarVencidos(admin, [10], 'Cliente pidió cancelar por teléfono');
+
+    expect(cancelar).toHaveBeenCalledWith(10, admin, 'Cliente pidió cancelar por teléfono');
   });
 
   it('un operador SIN tienda no ve ningún pedido (falla cerrado)', async () => {
@@ -452,6 +483,7 @@ describe('MostradorService.enviarAPagar — a dónde paga el cliente', () => {
     expect(emitToTienda).toHaveBeenCalledWith(5, 'pedido.enviado-a-pagar', {
       id: 1,
       numeroPedido: 'PD-2026-000321',
+      turno: null, // el pedido de la prueba aún no tiene folio del Sistema Comercial
     });
   });
 
@@ -466,6 +498,7 @@ describe('MostradorService.enviarAPagar — a dónde paga el cliente', () => {
     expect(emitToTienda).toHaveBeenCalledWith(5, 'pedido.enviado-a-pagar', {
       id: 1,
       numeroPedido: 'PD-2026-000321',
+      turno: null, // el pedido de la prueba aún no tiene folio del Sistema Comercial
     });
   });
 
@@ -473,7 +506,10 @@ describe('MostradorService.enviarAPagar — a dónde paga el cliente', () => {
     const { svc, emitToTienda } = crearServicio({ completo: completoWeb, pagoVivo: { id: 9 } });
     await svc.enviarAPagar(1, operador);
     const payload = emitToTienda.mock.calls.find((c) => c[1] === 'pedido.enviado-a-pagar')![2];
-    expect(Object.keys(payload).sort()).toEqual(['id', 'numeroPedido']);
+    // El folio COMPLETO no viaja: la TV recibe solo el turno (los últimos dígitos).
+    expect(Object.keys(payload).sort()).toEqual(['id', 'numeroPedido', 'turno']);
+    expect(payload).not.toHaveProperty('folioErp');
+    expect(payload).not.toHaveProperty('folio');
   });
 
   it('si no se puede consultar el pago, el pedido ya está en PENDIENTE_PAGO: cae a CAJA sin fallar', async () => {

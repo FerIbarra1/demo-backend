@@ -60,7 +60,7 @@ export class SurtidoService {
 
   /**
    * Devuelve el detalle del pedido con todos los items y su estado de surtido.
-   * Cualquier bodeguero de la tienda puede VERLO (read-only); sólo el asignado
+   * Cualquier bodeguero de la tienda puede VERLO (read-only); solo el asignado
    * (o un admin) puede MODIFICAR items.
    *
    * Si el pedido está en SOLICITADO o EN_REVISION, incluye `pedidosSimilares`:
@@ -126,7 +126,7 @@ export class SurtidoService {
       throw new BadRequestException('El pedido pertenece a otra tienda');
     }
     // Sanity check: el access service ya validó tienda/asignación, pero si no es
-    // admin y el pedido no está asignado a nadie, sólo el asignado puede mutar —
+    // admin y el pedido no está asignado a nadie, solo el asignado puede mutar —
     // aquí no mutamos, así que permitimos.
     void pedidoReducido;
 
@@ -145,7 +145,7 @@ export class SurtidoService {
       };
     }) as any;
 
-    // Banner "surtir juntos": sólo si el pedido está en estados accionables.
+    // Banner "surtir juntos": solo si el pedido está en estados accionables.
     let pedidosSimilares: Array<{
       id: number;
       numeroPedido: string;
@@ -190,7 +190,7 @@ export class SurtidoService {
     if (!pedidoActual) throw new NotFoundException('Pedido no encontrado');
     if (pedidoActual.estado !== EstadoPedido.EN_REVISION) {
       throw new BadRequestException(
-        `Sólo se puede surtir en estado EN_REVISION (actual: ${pedidoActual.estado})`,
+        `Solo se puede surtir en estado EN_REVISION (actual: ${pedidoActual.estado})`,
       );
     }
 
@@ -335,7 +335,7 @@ export class SurtidoService {
         items: {
           // F19 (oct 2026): se trae `producto` para poder resolver la imagen de
           // la propuesta. Antes el include era `items: true` y la propuesta de
-          // bodega salía SIN fotos (sólo el placeholder de iniciales), mientras
+          // bodega salía SIN fotos (solo el placeholder de iniciales), mientras
           // la de ventas sí las traía porque el frontend se las metía al armar
           // su borrador. Mismo criterio de imagen que `obtenerDetalle`.
           include: {
@@ -352,11 +352,11 @@ export class SurtidoService {
     });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
     if (!esAdmin && pedido.asignadoAId !== usuario.userId) {
-      throw new BadRequestException('Sólo el bodeguero asignado puede confirmar este surtido');
+      throw new BadRequestException('Solo el bodeguero asignado puede confirmar este surtido');
     }
     if (pedido.estado !== EstadoPedido.EN_REVISION) {
       throw new BadRequestException(
-        `Sólo se puede confirmar surtido en estado EN_REVISION (actual: ${pedido.estado})`,
+        `Solo se puede confirmar surtido en estado EN_REVISION (actual: ${pedido.estado})`,
       );
     }
 
@@ -553,7 +553,7 @@ export class SurtidoService {
         reloj: 'detener',
         // Obligatorio para PENDIENTE_PAGO: sin fila de cola el pedido es
         // invisible al agente. Para REVISADO va en false a propósito —
-        // el ERP sólo debe ver pedidos que el cliente ya confirmó.
+        // el ERP solo debe ver pedidos que el cliente ya confirmó.
         encolarFirebird: destino.encolarFirebird,
         // Los monitores deben recomputar (slot del bodeguero + cola de
         // cajeros + cola de mostrador).

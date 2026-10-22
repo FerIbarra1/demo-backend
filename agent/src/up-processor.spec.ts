@@ -231,4 +231,99 @@ describe('UpProcessor upload flow', () => {
     assert.ok(entidades.includes('PRECIOS'), 'subió PRECIOS');
     assert.ok(bootstrapDone, 'marcó bootstrap_catalogo=1');
   });
+
+  describe('bootstrap del catálogo: por páginas, reanudable y sin perder errores', () => {
+    /** Firebird con `n` PRODUCTOS (llaves 1..n) que respeta `WHERE pk > ?` y `FIRST N`; el resto de las tablas, vacías. */
+    function firebirdConProductos(n: number) {
+      const cursores: number[] = [];
+      return {
+        cursores,
+        fb: {
+          query: async (sql: string, params: any[] = []) => {
+            if (sql.includes('FROM TIENDAS')) return [{ IDTIENDA: 50 }];
+            if (sql.includes('RDB$RELATION_FIELDS')) return [{ COL: 'IDPRODUCTO' }, { COL: 'CODIGO' }];
+            if (sql.includes('FROM PRODUCTOS')) {
+              cursores.push(params[0]);
+              const primero = Number(/FIRST (\d+)/.exec(sql)![1]);
+              const filas: any[] = [];
+              for (let id = params[0] + 1; id <= n && filas.length < primero; id++) filas.push({ IDPRODUCTO: id, CODIGO: `C${id}` });
+              return filas;
+            }
+            return [];
+          },
+        },
+      };
+    }
+    function tienda() {
+      const meta = new Map<string, string>();
+      const encolados: any[] = [];
+      return {
+        meta,
+        encolados,
+        store: {
+          dueOutbox: () => [],
+          minCheckpointPorTienda: () => 0,
+          setCheckpoint: () => {},
+          enqueue: (_t: number, ev: any) => { encolados.push(ev); return 1; },
+          deleteOutbox: () => {},
+          scheduleOutboxRetry: () => {},
+          getMeta: (k: string) => meta.get(k) ?? null,
+          setMeta: (k: string, v: string) => { meta.set(k, v); },
+        },
+      };
+    }
+    const resolver = { resolverTodas: async () => [] };
+
+    it('avanza por páginas dentro de un presupuesto de tiempo, guarda dónde va y SE REANUDA en el siguiente ciclo', async () => {
+      const { fb, cursores } = firebirdConProductos(450);
+      const { store, meta } = tienda();
+      const subidos: number[] = [];
+      let reloj = 1_000_000;
+      const cloud = { upload: async (b: any) => { subidos.push(b.eventos.length); reloj += 6_000; return { procesados: b.eventos.length, errores: 0, checkpointAvanzado: true, fallidos: [] }; } };
+      const real = Date.now;
+      Date.now = () => reloj;
+      try {
+        const p = new UpProcessor(cfg, fb as any, cloud as any, store as any, resolver as any, logger());
+        await p.runOnce();
+        // 6 s por subida y 10 s de presupuesto: dos páginas y a otro ciclo (los pedidos de la web no esperan 6 minutos).
+        assert.deepEqual(subidos, [200, 200]);
+        assert.deepEqual(JSON.parse(meta.get('bootstrap_estado')!), { fase: 0, despues: 400 });
+        assert.equal(meta.get('bootstrap_catalogo'), undefined);
+
+        // Otro proceso (el agente se reinició): lee el avance y sigue en la llave 400, sin repetir lo subido.
+        const p2 = new UpProcessor(cfg, fb as any, cloud as any, store as any, resolver as any, logger());
+        await p2.runOnce();
+        assert.equal(cursores[2], 400);
+        assert.deepEqual(subidos, [200, 200, 50]);
+        assert.equal(meta.get('bootstrap_catalogo'), '1');
+      } finally {
+        Date.now = real;
+      }
+    });
+
+    it('lo que la nube dice que FALLÓ se guarda en el outbox para reintentarse; lo que salió bien no', async () => {
+      const { fb } = firebirdConProductos(3);
+      const { store, encolados, meta } = tienda();
+      const cloud = { upload: async () => ({ procesados: 2, errores: 1, checkpointAvanzado: false, fallidos: ['BOOT:PRODUCTOS:2'] }) };
+      await new UpProcessor(cfg, fb as any, cloud as any, store as any, resolver as any, logger()).runOnce();
+      assert.deepEqual(encolados.map((e) => e.eventId), ['BOOT:PRODUCTOS:2']);
+      // El bootstrap sí termina: lo fallido ya tiene su reintento en el outbox.
+      assert.equal(meta.get('bootstrap_catalogo'), '1');
+    });
+
+    it('si la subida no se pudo hacer (red, 5xx) NO avanza: la próxima vez reintenta la MISMA página', async () => {
+      const { fb, cursores } = firebirdConProductos(5);
+      const { store, meta } = tienda();
+      let cae = true;
+      const cloud = { upload: async (b: any) => { if (cae) throw new Error('sin red'); return { procesados: b.eventos.length, errores: 0, checkpointAvanzado: true }; } };
+      const p = new UpProcessor(cfg, fb as any, cloud as any, store as any, resolver as any, logger());
+      await p.runOnce();
+      assert.equal(meta.get('bootstrap_estado'), undefined);
+      assert.equal(meta.get('bootstrap_catalogo'), undefined);
+      cae = false;
+      await p.runOnce();
+      assert.deepEqual(cursores.slice(0, 2), [0, 0]);
+      assert.equal(meta.get('bootstrap_catalogo'), '1');
+    });
+  });
 });

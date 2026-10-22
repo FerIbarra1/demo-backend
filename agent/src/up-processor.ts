@@ -67,6 +67,21 @@ const ENTIDADES_SOPORTADAS = new Set([
  * escalado horizontal y causaba pérdida de progreso por tienda.
  */
 
+/** Tablas del catálogo en el orden en que la nube las necesita: primero las globales, luego los precios por tienda. */
+const FASES_BOOTSTRAP = [
+  'PRODUCTOS',
+  'CORRIDAS',
+  'CORRIDASREN',
+  'COLORES',
+  'LINEAS',
+  'SUBLINEAS',
+  'PRECIOS',
+  'PRECIOSCO',
+] as const;
+const PAGINA_BOOTSTRAP = 200;
+/** Cuánto del ciclo se le da al bootstrap: lo demás (bajar pedidos, conciliar) corre entre rebanadas. */
+const PRESUPUESTO_BOOTSTRAP_MS = 10_000;
+
 export class UpProcessor {
   constructor(
     private cfg: AgentConfig,
@@ -360,103 +375,114 @@ export class UpProcessor {
   }
 
   /**
-   * Carga inicial del catálogo: lee TODAS las tablas de catálogo (no solo
-   * BANDEJA_SYNC) y las sube a la nube. Se ejecuta una sola vez (flag en
-   * el LocalStore) porque BANDEJA_SYNC solo registra cambios; sin esto los
-   * productos/precios que nunca se han tocado jamás llegarían a la nube.
+   * Carga inicial del catálogo: lee las tablas de catálogo (no solo BANDEJA_SYNC) y las sube a la nube. `BANDEJA_SYNC` solo
+   * registra CAMBIOS: sin esto los productos/precios que nunca se han tocado no llegarían jamás.
+   *
+   * Oct 2026 — probado contra el Firebird real (94 389 eventos), tenía tres defectos que ya no tiene:
+   *  1. BLOQUEABA el ciclo ~6 min (los pedidos de la web no bajaban hasta terminar) y cargaba las 90 000 filas de precios en
+   *     memoria. Ahora avanza por PÁGINAS de `PAGINA_BOOTSTRAP` filas ordenadas por su llave y solo durante
+   *     `PRESUPUESTO_BOOTSTRAP_MS` por ciclo: el resto del ciclo (bajar pedidos, conciliar, BANDEJA_SYNC) corre entre rebanadas.
+   *  2. NO era reanudable: si el agente se reiniciaba a la mitad, volvía a empezar. El avance (`fase` + última llave) se guarda
+   *     en `meta.bootstrap_estado` después de CADA página.
+   *  3. Un lote con errores parciales se daba por hecho y esos eventos NO volvían a subir. Ahora la nube dice cuáles
+   *     fallaron (`fallidos`) y se guardan en el outbox, que los reenvía con retroceso. Un lote que no se pudo subir
+   *     (red, 5xx) no avanza: se reintenta la MISMA página en el próximo ciclo.
+   *
+   * Para volver a correrlo entero (idempotente: la nube salta lo ya procesado): `meta.bootstrap_catalogo = 0` y borrar
+   * `meta.bootstrap_estado`.
    */
   private async bootstrapCatalogo(): Promise<number> {
     if (this.store.getMeta('bootstrap_catalogo') === '1') return 0;
     const tiendaGlobal = await this.primeraTiendaActiva();
     if (tiendaGlobal === undefined) return 0;
 
-    const globales = ['PRODUCTOS', 'CORRIDAS', 'CORRIDASREN', 'COLORES', 'LINEAS', 'SUBLINEAS'];
-    const porTienda = ['PRECIOS', 'PRECIOSCO'];
-
-    const eventos: UploadEvent[] = [];
+    const inicio = Date.now();
+    const estado = this.leerEstadoBootstrap();
     let n = 0;
 
-    for (const tabla of globales) {
+    while (estado.fase < FASES_BOOTSTRAP.length) {
+      if (Date.now() - inicio >= PRESUPUESTO_BOOTSTRAP_MS) {
+        this.log.info(
+          { fase: FASES_BOOTSTRAP[estado.fase], de: FASES_BOOTSTRAP.length, subidos: n },
+          'up: bootstrap en curso (sigue en el próximo ciclo)',
+        );
+        return n;
+      }
+      const tabla = FASES_BOOTSTRAP[estado.fase];
+      const pk = this.pkDe(tabla);
       const cols = await this.columnas(tabla);
-      const rows = await this.fb.query<Record<string, unknown>>(
-        `SELECT ${cols} FROM ${tabla}`,
+      const filas = await this.fb.query<Record<string, unknown>>(
+        `SELECT FIRST ${PAGINA_BOOTSTRAP} ${cols} FROM ${tabla} WHERE ${pk} > ? ORDER BY ${pk}`,
+        [estado.despues],
       );
-      for (const row of rows) {
-        const pk = this.pkDe(tabla);
+
+      const porDestino = new Map<number, UploadEvent[]>();
+      for (const row of filas) {
         const id = Number(row[pk]);
         if (!id) continue;
-        eventos.push({
-          eventId: `BOOT:${tabla}:${id}`,
-          bandejaId: 0,
-          tipo: 'CATALOGO',
-          operacion: 'I',
-          entidad: tabla,
-          localId: id,
-          datos: row,
-        });
-        n++;
-      }
-    }
-
-    for (const tabla of porTienda) {
-      const cols = await this.columnas(tabla);
-      const rows = await this.fb.query<Record<string, unknown>>(
-        `SELECT ${cols} FROM ${tabla}`,
-      );
-      for (const row of rows) {
-        const pk = this.pkDe(tabla);
-        const id = Number(row[pk]);
         const idTienda = Number(row['IDTIENDA']);
-        if (!id || !idTienda) continue;
-        eventos.push({
+        const porTienda = tabla === 'PRECIOS' || tabla === 'PRECIOSCO';
+        if (porTienda && !idTienda) continue;
+        const ev: UploadEvent = {
           eventId: `BOOT:${tabla}:${id}`,
           bandejaId: 0,
           tipo: 'CATALOGO',
           operacion: 'I',
           entidad: tabla,
           localId: id,
-          localTiendaId: idTienda,
+          ...(porTienda ? { localTiendaId: idTienda } : {}),
           datos: row,
-        });
-        n++;
+        };
+        const destino = porTienda ? idTienda : tiendaGlobal;
+        if (!porDestino.has(destino)) porDestino.set(destino, []);
+        porDestino.get(destino)!.push(ev);
       }
-    }
 
-    // Subir en batches por tienda.
-    const porTiendaDest = new Map<number, UploadEvent[]>();
-    for (const ev of eventos) {
-      const dest = ev.localTiendaId ?? tiendaGlobal;
-      if (!porTiendaDest.has(dest)) porTiendaDest.set(dest, []);
-      porTiendaDest.get(dest)!.push(ev);
-    }
-    for (const [tiendaId, batch] of porTiendaDest.entries()) {
-      for (let i = 0; i < batch.length; i += this.cfg.sync.batchSize) {
-        const chunk = batch.slice(i, i + this.cfg.sync.batchSize);
+      for (const [tiendaId, eventos] of porDestino.entries()) {
         try {
-          const res = await this.cloud.upload({
-            tiendaId,
-            hastaBANDEJAId: 0,
-            eventos: chunk,
-          });
+          const res = await this.cloud.upload({ tiendaId, hastaBANDEJAId: 0, eventos });
+          n += eventos.length;
           if (res.errores > 0) {
+            const fallidos = new Set(res.fallidos ?? []);
+            for (const ev of eventos) if (fallidos.has(ev.eventId)) this.store.enqueue(tiendaId, ev);
             this.log.warn(
-              { tiendaId, ok: res.procesados, err: res.errores },
-              'up: bootstrap con errores parciales',
+              { tiendaId, tabla, ok: res.procesados, err: res.errores, aReintentar: fallidos.size },
+              'up: bootstrap con errores parciales (los fallidos quedan en el outbox para reintentarse)',
             );
           }
         } catch (err) {
           if (err instanceof AuthError) throw err;
+          // Nada avanzó: se reintenta ESTA página (la nube salta lo que ya procesó).
           this.log.warn(
-            { tiendaId, err: (err as Error).message },
+            { tiendaId, tabla, err: (err as Error).message },
             'up: bootstrap falló, se reintentará en el próximo ciclo',
           );
-          return 0; // no marcar como hecho; reintentar
+          return n;
         }
       }
+
+      // La página se subió: se avanza y se guarda (reanudable).
+      if (filas.length < PAGINA_BOOTSTRAP) {
+        estado.fase += 1;
+        estado.despues = 0;
+      } else {
+        estado.despues = Number(filas[filas.length - 1][pk]);
+      }
+      this.store.setMeta('bootstrap_estado', JSON.stringify(estado));
     }
 
     this.store.setMeta('bootstrap_catalogo', '1');
     return n;
+  }
+
+  private leerEstadoBootstrap(): { fase: number; despues: number } {
+    try {
+      const e = JSON.parse(this.store.getMeta('bootstrap_estado') ?? 'null');
+      if (e && Number.isInteger(e.fase) && Number.isFinite(e.despues)) return e;
+    } catch {
+      /* estado corrupto: se empieza de cero (la nube salta lo ya procesado) */
+    }
+    return { fase: 0, despues: 0 };
   }
 
   private tipoParaEntidad(entidad: string): 'CATALOGO' | 'CLIENTE' | 'PEDIDO' | 'PAGO' {

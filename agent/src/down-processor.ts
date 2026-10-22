@@ -4,6 +4,7 @@ import type { LocalStore } from './checkpoint-store';
 import type { Logger } from './logger-types';
 import type { AgentConfig } from './config';
 import { AuthError, TransientError } from './cloud-client';
+import { esFolio, notasParaErp, reservarFolioConReintentos } from './folio';
 
 /**
  * DOWN-processor: sincroniza Nube -> Firebird (pedidos nuevos).
@@ -154,18 +155,53 @@ export class DownProcessor {
       );
     }
 
+    // Oct 2026 (parte B): el FOLIO del ERP. Antes se mandaba `numeroPedido.slice(0,10)`: TODO pedido web quedaba con el
+    // folio "PD-2026-00" en el Sistema Comercial. Ahora, por orden de prioridad:
+    //   1. El que este agente ya grabó en un intento anterior (si el SQLite lo recuerda): lo que está en el ERP manda.
+    //   2. El que la nube tiene para el pedido (lo reservó `FolioProcessor` al cerrar el surtido).
+    //   3. Uno que este agente ya tomó para ese pedido y no llegó a grabar (se lo guardó en el SQLite).
+    //   4. Ninguno (el agente estaba caído al cerrar, un atajo del admin…): se toma el siguiente de `CONSECUTIVOS`.
+    //      Va en su PROPIA transacción corta, ANTES de la de `GRABAR_PEDIDOS`: dentro de ella el candado sobre la fila
+    //      del consecutivo duraría todo el grabado del pedido y sus líneas, y las cajas de VFP (que usan esa misma
+    //      fila) esperarían o perderían el turno. El costo: si el grabado falla queda un hueco; por eso el número se
+    //      guarda local y el reintento lo REUSA en vez de gastar otro.
+    let folio: string | null = esFolio(entregaPrevia?.externalFolio)
+      ? entregaPrevia!.externalFolio!
+      : esFolio(pedido.folio)
+        ? pedido.folio
+        : this.store.getFolioReservado(tiendaId, pedido.pedidoId);
+    if (!folio) {
+      folio = await reservarFolioConReintentos(this.fb, localTiendaId, { waitTimeoutSec: 10 });
+      this.store.setFolioReservado(tiendaId, pedido.pedidoId, folio);
+      this.log.info(
+        { tiendaId, pedidoId: pedido.pedidoId, folio },
+        'down: el pedido llegó sin folio, se tomó el siguiente de CONSECUTIVOS',
+      );
+    }
+    if (esFolio(entregaPrevia?.externalFolio) && esFolio(pedido.folio) && entregaPrevia!.externalFolio !== pedido.folio) {
+      this.log.warn(
+        { pedidoId: pedido.pedidoId, enErp: entregaPrevia!.externalFolio, enNube: pedido.folio },
+        'down: la nube tiene otro folio que el ya grabado en el ERP; manda el del ERP',
+      );
+    }
+
     const resultado = await this.fb.transaction(async (tx) => {
       const r1 = await tx.callScalar<{
         PEDIDO_ID: number;
         PEDIDO_FOLIO: string;
         CMENSAJEERROR: string;
       }>(
-        `SELECT PEDIDO_ID, PEDIDO_FOLIO, CMENSAJEERROR
-         FROM GRABAR_PEDIDOS(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        // Dos defectos que solo se ven contra el Firebird real (la transacción de mentira de los tests los esconde):
+        //  1. GRABAR_PEDIDOS recibe 16 parámetros (IDPEDIDO … IDUSUARIO) y este SQL declaraba 15 `?`: "Input
+        //     parameter mismatch".
+        //  2. Es un procedimiento EJECUTABLE (no tiene SUSPEND): `SELECT … FROM GRABAR_PEDIDOS(…)` da "not
+        //     selectable". Se llama con EXECUTE PROCEDURE, que devuelve UNA fila (ver `callScalar`).
+        // Con los dos, NINGÚN pedido de la web llegaba al Sistema Comercial.
+        `EXECUTE PROCEDURE GRABAR_PEDIDOS(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           externalId, // IDPEDIDO (0 = nuevo)
           localTiendaId,
-          pedido.numeroPedido.slice(0, 10), // FOLIO CHAR(10)
+          folio, // FOLIO CHAR(10): el del ERP (ver arriba)
           pedido.fechaPedido.split('T')[0], // FECHA (DATE)
           0, // IDCLIENTE (0 = pedido sin cliente local mapeado; ajustar)
           pedido.clienteNombre.slice(0, 80),
@@ -175,7 +211,9 @@ export class DownProcessor {
           (pedido.clienteTelefono ?? '').slice(0, 50),
           pedido.clienteEmail.slice(0, 100),
           localVendedorId,
-          (pedido.notas ?? '').slice(0, 2000),
+          // Origen WEB visible desde VFP: "WEB PD-2026-000123 | notas del cliente". El IDPEDIDO ≥ 1 000 000 000 ya lo
+          // marca para quien consulta la BD; esto es lo que se lee en pantalla.
+          notasParaErp(pedido.numeroPedido, pedido.notas),
           pedido.total,
           lista,
           localUsuarioId,
@@ -187,7 +225,17 @@ export class DownProcessor {
       }
 
       const pedidoIdLocal = Number(r1.PEDIDO_ID);
-      const folioLocal = r1.PEDIDO_FOLIO;
+      // El folio es CHAR(10): Firebird lo devuelve relleno de espacios ("PD-2026-00 "). La nube lo guarda tal cual
+      // llega (VARCHAR) y lo imprime en correos y en el buscador: se recorta aquí.
+      const folioLocal = String(r1.PEDIDO_FOLIO ?? '').trim();
+      if (folio && folioLocal !== folio) {
+        // No debería pasar: con IDPEDIDO ≠ 0 el procedimiento escribe el FOLIO que se le manda. Si pasa, el ACK lleva lo
+        // que quedó en el ERP (que es lo que manda) y la nube se ajusta.
+        this.log.warn(
+          { pedidoId: pedido.pedidoId, mandado: folio, enErp: folioLocal },
+          'down: GRABAR_PEDIDOS devolvió un folio distinto al que se le mandó',
+        );
+      }
 
       // Items.
       for (const item of pedido.items) {
@@ -199,7 +247,7 @@ export class DownProcessor {
           continue;
         }
         const r2 = await tx.callScalar<{ MOVPED_ID: number; CMENSAJEERROR: string }>(
-          `SELECT MOVPED_ID, CMENSAJEERROR FROM GRABAR_MOVPED(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `EXECUTE PROCEDURE GRABAR_MOVPED(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             0, // IDMOVPED = nuevo
             pedidoIdLocal,
@@ -237,6 +285,10 @@ export class DownProcessor {
       resultado.externalIdPEDIDOS,
       resultado.externalFolio,
     );
+    // El folio reservado (por el respaldo, o por `FolioProcessor`) ya quedó escrito en el ERP y la nube lo sabrá por el
+    // ACK de este pedido: no hay nada que confirmarle aparte. Sin esto el agente seguía reenviando a la nube, cada
+    // ciclo, un folio de un pedido que ella no pidió (el respaldo no tiene solicitud) y que rechazaba una y otra vez.
+    this.store.confirmarFolio(tiendaId, pedido.pedidoId);
     return resultado;
   }
 

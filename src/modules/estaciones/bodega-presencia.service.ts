@@ -81,32 +81,42 @@ export class BodegaPresenciaService {
    * de atención pausado como en `BodegaService.liberarPedido`: el tiempo que ya trabajó queda
    * acumulado y no se le cobra al siguiente. Idempotente: sin latido ni pedidos no hace nada.
    */
-  async salio(usuarioId: number): Promise<{ pedidosRegresados: number }> {
+  async salio(
+    usuarioId: number,
+    opts: { soloPedidos?: boolean } = {},
+  ): Promise<{ pedidosRegresados: number }> {
     const u = await this.prisma.usuario.findUnique({
       where: { id: usuarioId },
       select: { rol: true, nombre: true, tiendaId: true, ultimoHeartbeat: true },
     });
-    if (!u || u.rol !== RolUsuario.BODEGA) return { pedidosRegresados: 0 };
+    // F3.5 ("cubrir puesto"): el ADMIN también puede traer pedidos en las manos, y los devuelve igual que un
+    // bodeguero: al cerrar sesión, por inactividad o al cambiar de tienda. `soloPedidos` los devuelve SIN
+    // sacarlo de línea (cambiar de tienda no es irse).
+    if (!u || (u.rol !== RolUsuario.BODEGA && u.rol !== RolUsuario.ADMIN))
+      return { pedidosRegresados: 0 };
 
     const ahora = new Date();
     const regresados = await this.prisma.$transaction(async (tx) => {
-      await tx.usuario.update({
-        where: { id: usuarioId },
-        data: { ultimoHeartbeat: null },
-        select: { id: true },
-      });
+      if (!opts.soloPedidos) {
+        await tx.usuario.update({
+          where: { id: usuarioId },
+          data: { ultimoHeartbeat: null },
+          select: { id: true },
+        });
+      }
 
       const enManos = await tx.pedido.findMany({
         where: { asignadoAId: usuarioId, estado: { in: ESTADOS_OCUPAN_SLOT_BODEGA } },
         select: {
           id: true,
           numeroPedido: true,
+          tiendaId: true,
           tiempoAtencionBodegaMs: true,
           bodegaTurnoDesdeAt: true,
         },
       });
 
-      const hechos: { id: number; numeroPedido: string }[] = [];
+      const hechos: { id: number; numeroPedido: string; tiendaId: number }[] = [];
       for (const p of enManos) {
         // La guarda va en el `where`: si otro proceso lo movió entre la lectura y aquí (lo liberó
         // él mismo, lo tomó un admin), no se pisa.
@@ -135,24 +145,23 @@ export class BodegaPresenciaService {
             usuarioNombre: u.nombre,
           },
         });
-        hechos.push({ id: p.id, numeroPedido: p.numeroPedido });
+        hechos.push({ id: p.id, numeroPedido: p.numeroPedido, tiendaId: p.tiendaId });
       }
       return hechos;
     });
 
     // Realtime DESPUÉS del commit (ver CLAUDE.md: emitir adentro manda el aviso de algo que un
     // rollback puede deshacer). `pedido.liberado` es el mismo evento de "otro bodeguero lo soltó".
-    if (u.tiendaId) {
-      for (const p of regresados) {
-        this.realtime.emitToTienda(u.tiendaId, 'pedido.liberado', {
-          id: p.id,
-          numeroPedido: p.numeroPedido,
-          liberadoPor: u.nombre,
-        });
-        this.realtime.emitToPedido(p.id, 'pedido.liberado', { id: p.id });
-      }
+    // A la tienda de CADA pedido (un ADMIN no tiene tienda propia y pudo traer pedidos de varias).
+    for (const p of regresados) {
+      this.realtime.emitToTienda(p.tiendaId, 'pedido.liberado', {
+        id: p.id,
+        numeroPedido: p.numeroPedido,
+        liberadoPor: u.nombre,
+      });
+      this.realtime.emitToPedido(p.id, 'pedido.liberado', { id: p.id });
     }
-    this.avisar(u.tiendaId, 'bodeguero.salio', usuarioId);
+    if (!opts.soloPedidos) this.avisar(u.tiendaId, 'bodeguero.salio', usuarioId);
 
     if (regresados.length > 0) {
       this.logger.log(
@@ -169,7 +178,10 @@ export class BodegaPresenciaService {
   async salirInactivos(ahora: Date = new Date()): Promise<number> {
     const limite = new Date(ahora.getTime() - INACTIVIDAD_ESTACION_MS);
     const inactivos = await this.prisma.usuario.findMany({
-      where: { rol: RolUsuario.BODEGA, ultimoHeartbeat: { lt: limite } },
+      where: {
+        rol: { in: [RolUsuario.BODEGA, RolUsuario.ADMIN] },
+        ultimoHeartbeat: { lt: limite },
+      },
       select: { id: true },
     });
     for (const { id } of inactivos) await this.salio(id);

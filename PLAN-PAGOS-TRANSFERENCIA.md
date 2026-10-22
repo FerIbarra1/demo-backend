@@ -675,6 +675,10 @@ sin cron externo; idempotente porque puede haber más de una instancia):
   conciliación y reporte CSV.
 
 **Fase 2 — Dinero complicado** *(PARCIAL, 16-oct, sin commit)*
+- ⚠ **ACTUALIZACIÓN 17-oct-2026: el plazo de vigencia (`venceAt`, 48 h) se ELIMINÓ por completo** (columna, env, pantallas,
+  correos, pestaña "Vencidas", `cerrar-vencidas`, `TRANSFERENCIA_POR_VENCER`). Todo lo de abajo que hable de `venceAt`, de un
+  vencimiento automático o de un recordatorio "por vencer" quedó SUPERADO: ahora hay `espera` ("Lleva N días esperando", desde
+  `createdAt`) y "Marcar vencida" siempre disponible con motivo obligatorio. Ver CLAUDE.md, sección de pagos por transferencia.
 - ✔ **Vencimiento MANUAL** (decisión del dueño: automático después): pestaña "Vencidas", cerrar una o todas, abono tardío
   con nota. `cerrarPorVencimiento` está listo para que un proceso periódico lo llame.
 - ✔ **Verificadas atrasadas** (visibles al leer, sin proceso) y **reporte de conciliación** (JSON, CSV y pantalla
@@ -727,7 +731,14 @@ verificación.
 
 ---
 
-## 18. Pendiente — envíos a domicilio (FUERA DE ALCANCE)
+## 18. Envíos a domicilio — RESUELTO el 19-oct-2026 (con dos pendientes)
+
+> **Actualización 19-oct-2026.** El dueño decidió que **a domicilio SOLO se paga por transferencia**, así que el bloqueo de abajo se retiró y el hallazgo H1 se cerró así:
+> `transferenciaDisponible` ya no excluye DOMICILIO; al hacer el pedido se **fuerza** `metodoPagoPreferido = TRANSFERENCIA` y se **rechaza el pedido si la tienda no tiene cuenta bancaria** (no hay caja de
+> respaldo); las instrucciones salen solas al pasar a pago; y la pestaña «Por registrar» de caja incluye los domicilios con transferencia verificada (`soloRegistrar`) para que alguien los registre en VFP.
+> «Pagar en tienda» no existe a domicilio. **Siguen abiertos**: el costo de envío (no hay un monto de envío aparte; ver 4 abajo) y la caducidad (7). Lo que sigue es el texto original de esta sección.
+
+## 18. (original) Pendiente — envíos a domicilio (FUERA DE ALCANCE)
 
 Decisión del dueño (15-oct): el flujo de envíos se va a rediseñar por completo, así que
 esta feature **no** lo resuelve. Esto es lo que sí se hace ahora y lo que queda anotado

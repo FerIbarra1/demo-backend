@@ -41,11 +41,7 @@ function crearServicio(pedidos: any[] = []) {
 }
 
 /** Un pedido tal como lo devuelve la query del endpoint. */
-function pedido(opts: {
-  id?: number;
-  items?: any[];
-  estadoAnterior?: EstadoPedido | null;
-}) {
+function pedido(opts: { id?: number; items?: any[]; estadoAnterior?: EstadoPedido | null }) {
   return {
     id: opts.id ?? 1,
     numeroPedido: 'PD-2026-000123',

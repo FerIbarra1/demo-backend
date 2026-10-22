@@ -40,35 +40,31 @@ function crearServicio() {
 const usuario = (rol: RolUsuario) => ({ userId: 9, rol }) as never;
 
 describe('crear — quién puede escribir en el chat', () => {
-  it.each([
-    RolUsuario.BODEGA,
-    RolUsuario.BODEGA_MONITOR,
-    RolUsuario.CAJERO,
-    RolUsuario.MOSTRADOR,
-  ])('%s NO puede escribir', async (rol) => {
-    const { svc } = crearServicio();
-    await expect(
-      svc.crear(1, { contenido: 'hola' } as never, usuario(rol)),
-    ).rejects.toBeInstanceOf(BadRequestException);
-  });
+  it.each([RolUsuario.BODEGA, RolUsuario.BODEGA_MONITOR, RolUsuario.CAJERO, RolUsuario.MOSTRADOR])(
+    '%s NO puede escribir',
+    async (rol) => {
+      const { svc } = crearServicio();
+      await expect(
+        svc.crear(1, { contenido: 'hola' } as never, usuario(rol)),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    },
+  );
 });
 
 describe('crearConAdjunto — quién puede mandar una propuesta', () => {
-  it.each([
-    RolUsuario.BODEGA,
-    RolUsuario.BODEGA_MONITOR,
-    RolUsuario.CAJERO,
-    RolUsuario.MOSTRADOR,
-  ])('%s NO puede mandar propuesta con adjunto', async (rol) => {
-    // Este es el caso que estaba mal: BODEGA pasaba el filtro de
-    // `crearConAdjunto` aunque `crear` ya lo rechazaba.
-    const { svc } = crearServicio();
-    await expect(
-      svc.crearConAdjunto(1, { contenido: 'mira esto' } as never, usuario(rol)),
-    ).rejects.toBeInstanceOf(BadRequestException);
-  });
+  it.each([RolUsuario.BODEGA, RolUsuario.BODEGA_MONITOR, RolUsuario.CAJERO, RolUsuario.MOSTRADOR])(
+    '%s NO puede mandar propuesta con adjunto',
+    async (rol) => {
+      // Este es el caso que estaba mal: BODEGA pasaba el filtro de
+      // `crearConAdjunto` aunque `crear` ya lo rechazaba.
+      const { svc } = crearServicio();
+      await expect(
+        svc.crearConAdjunto(1, { contenido: 'mira esto' } as never, usuario(rol)),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    },
+  );
 
-  it('el mensaje de error nombra a bodega como sólo lectura', async () => {
+  it('el mensaje de error nombra a bodega como solo lectura', async () => {
     const { svc } = crearServicio();
     await expect(
       svc.crearConAdjunto(1, { contenido: 'x' } as never, usuario(RolUsuario.BODEGA)),

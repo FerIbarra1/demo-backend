@@ -53,6 +53,7 @@ function crearServicio() {
   const presencia = { retirarPorCliente: jest.fn().mockResolvedValue({ ok: true, pedidoId: 5 }) };
   const sinRecoger = { confirmarInteres: jest.fn().mockResolvedValue({ ok: true, pedidoId: 5 }) };
 
+  (prisma as any).$transaction = async (fn: (tx: unknown) => unknown) => fn(prisma); // crearPedido adjunta el DTF en la misma transacción (impresión DTF, oct 2026)
   const svc = new ClienteService(
     prisma as never,
     { enviar: jest.fn().mockResolvedValue(undefined) } as never,

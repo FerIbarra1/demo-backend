@@ -392,6 +392,7 @@ function bdEnMemoria(inicial: any[]) {
     },
   };
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: async ({ where }: any) => filas.find((f) => f.id === where.id) ?? null,
       findMany: async ({ where }: any) => filas.filter((f) => cumple(f, where)),

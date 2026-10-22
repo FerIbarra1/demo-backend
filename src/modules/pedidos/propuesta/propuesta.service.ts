@@ -37,6 +37,19 @@ import {
 } from './dto/propuesta.dto';
 
 /**
+ * La decisión de una propuesta dicha en palabras, para el historial que LEE el cliente. El valor del enum
+ * ("APROBAR", "CONTACTAR_ASESOR") es del código: antes se imprimía tal cual entre paréntesis.
+ */
+const ACCION_DE_LA_DECISION: Record<DecisionPropuesta, string> = {
+  APROBAR: 'aprobó la propuesta',
+  RECHAZAR: 'rechazó la propuesta',
+  CONTACTAR_ASESOR: 'pidió ajustes a la propuesta',
+  CANCELAR_PEDIDO: 'canceló el pedido desde la propuesta',
+};
+const accionDeLaDecision = (decision: DecisionPropuesta): string =>
+  ACCION_DE_LA_DECISION[decision] ?? 'respondió la propuesta';
+
+/**
  * F12/F13 (sep 2026): flujo de propuesta/contrapropuesta entre el negocio y
  * el cliente.
  *
@@ -86,6 +99,10 @@ export class PropuestaService {
     [RolUsuario.CAJERO_MONITOR]: [],
     // Tesorería no participa en propuestas (solo verifica transferencias).
     [RolUsuario.TESORERIA]: [],
+    // Oct 2026 (impresión DTF): Impresión habla con el cliente por su propio hilo, no por propuestas.
+    [RolUsuario.IMPRESION]: [],
+    // Oct 2026: el gerente supervisa; no crea propuestas (las decide el cliente o, en su nombre, el operador).
+    [RolUsuario.GERENTE]: [],
     // Oct 2026: MOSTRADOR NO aparece aquí, y es a propósito. Este mapa se indexa
     // por `propuesta.creadaPorRol` — quién CREÓ la propuesta (BODEGA o VENTAS),
     // no quién responde. El mostrador nunca crea propuestas, así que una entrada
@@ -207,7 +224,7 @@ export class PropuestaService {
     // ADMIN entra por la misma puerta que VENTAS: su propuesta se aplica como la
     // de ventas (`creadaPorRol` ≠ BODEGA → `aprobarPropuestaVentas`).
     if (usuario.rol !== RolUsuario.VENTAS && usuario.rol !== RolUsuario.ADMIN) {
-      throw new BadRequestException('Sólo el asesor de ventas puede enviar propuestas.');
+      throw new BadRequestException('Solo el asesor de ventas puede enviar propuestas.');
     }
 
     await this.access.cargarYValidar(pedidoId, usuario);
@@ -282,7 +299,7 @@ export class PropuestaService {
         pedidoId,
         {
           nuevoEstado: EstadoPedido.ESPERANDO_APROBACION,
-          observacion: `Propuesta del asesor de ventas enviada al cliente (${calculo.items.length} item(s))`,
+          observacion: `Propuesta del asesor de ventas enviada al cliente (${calculo.items.length} producto(s))`,
         },
         usuario,
         {
@@ -364,7 +381,7 @@ export class PropuestaService {
    * El cliente responde a una propuesta. La decisión debe ser legal para el
    * ORIGEN de la propuesta (ver `DECISIONES_POR_ORIGEN`).
    *
-   * Sólo el cliente dueño del pedido puede responder.
+   * Solo el cliente dueño del pedido puede responder.
    */
   async responderPropuesta(
     pedidoId: number,
@@ -403,6 +420,37 @@ export class PropuestaService {
   }
 
   /**
+   * Oct 2026 (destrabar): el GERENTE o el ADMIN responden EN NOMBRE del cliente que nunca contestó.
+   *
+   * Es el camino del operador (`enNombreDelCliente`: mismas reglas de estado y de decisiones legales, solo APROBAR y
+   * RECHAZAR) con tres diferencias, porque aquí el cliente NO está enfrente:
+   *  - el historial lo lee el cliente: dice "por la tienda", no "por <nombre> desde mostrador" ni lleva ningún motivo
+   *    (el motivo vive en la bitácora de intervenciones del que llama);
+   *  - rechazar una propuesta de bodega CANCELA el pedido, y esa cancelación no manda correo (decisión del dueño: el
+   *    cliente lo lee en su pedido). El resto de las transiciones notifican como siempre: si la tienda aprueba por él,
+   *    el cliente sigue necesitando el "tu pedido está listo";
+   *  - queda marcada como forzada (`forzadaPorId`/`forzadaAt`), la misma marca que ya existía para este caso.
+   *
+   * El caller (`DestrabarService`) exige rol y tienda; `resolverPropuesta` vuelve a validar el acceso al pedido.
+   */
+  async responderPorLaTienda(
+    pedidoId: number,
+    propuestaId: number,
+    decision: 'APROBAR' | 'RECHAZAR',
+    usuario: UserContext,
+  ) {
+    const resultado = await this.resolverPropuesta(pedidoId, propuestaId, { decision }, usuario, {
+      enNombreDelCliente: true,
+      porLaTienda: true,
+    });
+    await this.prisma.pedidoPropuesta.update({
+      where: { id: propuestaId },
+      data: { forzadaPorId: usuario.userId, forzadaAt: new Date() },
+    });
+    return resultado;
+  }
+
+  /**
    * El cuerpo compartido por los dos caminos (cliente y operador).
    *
    * `opts.enNombreDelCliente` solo cambia la AUDITORÍA: deja dicho en el
@@ -415,7 +463,11 @@ export class PropuestaService {
     propuestaId: number,
     dto: ResponderPropuestaDto,
     usuario: UserContext,
-    opts: { enNombreDelCliente?: boolean } = {},
+    opts: {
+      enNombreDelCliente?: boolean;
+      /** Oct 2026 (destrabar): lo responde la tienda (gerente/admin) y el cliente no está enfrente. */
+      porLaTienda?: boolean;
+    } = {},
   ) {
     await this.access.cargarYValidar(pedidoId, usuario);
 
@@ -424,7 +476,7 @@ export class PropuestaService {
     });
     if (!propuesta) throw new NotFoundException('Propuesta no encontrada');
     if (propuesta.estado !== EstadoPropuesta.PENDIENTE) {
-      throw new ConflictException(`Esta propuesta ya fue respondida (estado: ${propuesta.estado})`);
+      throw new ConflictException('Esta propuesta ya fue respondida.');
     }
 
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
@@ -513,9 +565,11 @@ export class PropuestaService {
           pedidoId,
           estadoAnterior: pedido.estado,
           estadoNuevo: pedido.estado,
-          observacion:
-            `Propuesta #${propuestaId} respondida (${dto.decision}) por ` +
-            `${usuario.nombre} en nombre del cliente, desde mostrador`,
+          // El cliente lee este historial: la decisión va en palabras ("aprobó la propuesta"), no con el valor interno del
+          // enum ("APROBAR") ni con el id de la propuesta.
+          observacion: opts.porLaTienda
+            ? `La tienda ${accionDeLaDecision(dto.decision)}, en nombre del cliente`
+            : `${usuario.nombre} ${accionDeLaDecision(dto.decision)} en nombre del cliente, desde mostrador`,
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
         },
@@ -531,7 +585,20 @@ export class PropuestaService {
 
         case 'RECHAZAR':
           return esDeBodega
-            ? this.rechazarPropuestaBodega(pedido, propuesta, dto, usuario, ahora)
+            ? this.rechazarPropuestaBodega(
+                pedido,
+                propuesta,
+                dto,
+                usuario,
+                ahora,
+                // Rechazar la de bodega CANCELA el pedido. Si lo hace la tienda: ni correo ni "Cliente rechazó…".
+                opts.porLaTienda
+                  ? {
+                      sinNotificar: true,
+                      observacion: 'La tienda rechazó la propuesta de bodega en nombre del cliente',
+                    }
+                  : undefined,
+              )
             : this.rechazarPropuestaVentas(
                 pedido,
                 propuesta,
@@ -674,7 +741,7 @@ export class PropuestaService {
         pedido.id,
         {
           nuevoEstado: EstadoPedido.EN_REVISION,
-          observacion: `Propuesta #${propuesta.id} aprobada pero quedaban ${itemsPendientesResidual.length} item(s) PENDIENTE — vuelve a bodega`,
+          observacion: `Propuesta aprobada, pero quedan ${itemsPendientesResidual.length} producto(s) por surtir — vuelve a bodega`,
         },
         usuario,
         {
@@ -735,8 +802,8 @@ export class PropuestaService {
       {
         nuevoEstado: destino.estado,
         observacion: enAreaDeEntrega
-          ? `Cliente aprobó la propuesta #${propuesta.id} de bodega — pasa a mostrador`
-          : `Cliente aprobó la propuesta #${propuesta.id} de bodega — pendiente de pago`,
+          ? 'Cliente aprobó la propuesta de bodega — pasa a mostrador'
+          : 'Cliente aprobó la propuesta de bodega — pendiente de pago',
       },
       usuario,
       {
@@ -772,7 +839,7 @@ export class PropuestaService {
                 estadoAnterior: destino.estado,
                 estadoNuevo: destino.estado,
                 observacion:
-                  `Propuesta #${propuesta.id} de bodega aprobada por ${usuario.nombre}` +
+                  `Propuesta de bodega aprobada por ${usuario.nombre}` +
                   ` — ${cambios.length} ajuste(s) aplicado(s) en el área de entrega`,
                 usuarioId: usuario.userId,
                 usuarioNombre: usuario.nombre,
@@ -832,7 +899,7 @@ export class PropuestaService {
       pedido.id,
       {
         nuevoEstado: EstadoPedido.EN_REVISION,
-        observacion: `Cliente aprobó la propuesta #${propuesta.id} del asesor de ventas — vuelve a bodega a surtir`,
+        observacion: 'Cliente aprobó la propuesta del asesor de ventas — vuelve a bodega a surtir',
       },
       usuario,
       {
@@ -883,7 +950,7 @@ export class PropuestaService {
      * así que el pedido iba directo a mostrador con la prenda de más todavía
      * dentro de la bolsa. Bodega nunca se enteraba, porque el checklist de
      * retiro vive en su tarjeta de ajustes del área de entrega y esa tarjeta se
-     * alimenta de `obtenerAjustesEntrega`, que sólo lista pedidos en
+     * alimenta de `obtenerAjustesEntrega`, que solo lista pedidos en
      * `EN_REVISION`.
      *
      * Mandarlo a bodega es lo que dispara ese checklist (`items: { some: {
@@ -899,8 +966,8 @@ export class PropuestaService {
           nuevoEstado: destino.estado,
           observacion:
             destino.estado === EstadoPedido.REVISADO
-              ? 'Propuesta de ventas aplicada sin items pendientes de surtir — pasa a mostrador'
-              : 'Propuesta de ventas aplicada sin items pendientes de surtir — pendiente de pago',
+              ? 'Propuesta de ventas aplicada, sin productos por surtir — pasa a mostrador'
+              : 'Propuesta de ventas aplicada, sin productos por surtir — pendiente de pago',
         },
         usuario,
         {
@@ -954,18 +1021,23 @@ export class PropuestaService {
     dto: { nota?: string },
     usuario: UserContext,
     ahora: Date,
+    /** Oct 2026 (destrabar): la rechaza la tienda por el cliente → sin correo y con su propio texto de historial. */
+    porLaTienda?: { sinNotificar: boolean; observacion: string },
   ) {
     await this.state.cambiarEstado(
       pedido.id,
       {
         nuevoEstado: EstadoPedido.CANCELADO,
-        observacion: `Cliente rechazó la propuesta #${propuesta.id} de bodega${dto.nota ? `: ${dto.nota}` : ''}`,
+        observacion:
+          porLaTienda?.observacion ??
+          `Cliente rechazó la propuesta de bodega${dto.nota ? `: ${dto.nota}` : ''}`,
       },
       usuario,
       {
         asignacion: 'limpiar',
         reloj: 'detener',
         invalidarMonitor: true,
+        sinNotificar: porLaTienda?.sinNotificar,
         efectos: async (tx) => {
           await tx.pedidoPropuesta.update({
             where: { id: propuesta.id },
@@ -1050,7 +1122,7 @@ export class PropuestaService {
       pedido.id,
       {
         nuevoEstado: EstadoPedido.EN_ASESORIA,
-        observacion: `Cliente rechazó la propuesta #${propuesta.id} del asesor — sigue en asesoría${textoCliente ? `: ${textoCliente}` : ''}`,
+        observacion: `Cliente rechazó la propuesta del asesor — sigue en asesoría${textoCliente ? `: ${textoCliente}` : ''}`,
       },
       usuario,
       {
@@ -1429,7 +1501,7 @@ export class PropuestaService {
    */
   async forzarAprobacion(pedidoId: number, propuestaId: number, usuario: UserContext) {
     if (usuario.rol !== RolUsuario.ADMIN) {
-      throw new BadRequestException('Sólo un admin puede forzar la aprobación.');
+      throw new BadRequestException('Solo un admin puede forzar la aprobación.');
     }
 
     const propuesta = await this.prisma.pedidoPropuesta.findFirst({

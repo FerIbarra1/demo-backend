@@ -1,16 +1,13 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Param,
-  Query,
-  ParseIntPipe,
-  BadRequestException,
-} from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { ReposicionService } from './reposicion.service';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
+import {
+  ApiTiendaConsola,
+  TiendaConsola,
+  TiendaConsolaGuard,
+} from '../../../common/tienda-consola';
 import { RolUsuario } from '@prisma/client';
 
 /**
@@ -20,6 +17,7 @@ import { RolUsuario } from '@prisma/client';
  * volver al anaquel. Bodega ve la lista y confirma cuando ya están repuestos.
  */
 @ApiTags('Pedidos - Reposición')
+@UseGuards(TiendaConsolaGuard)
 @Controller('bodega/reposicion')
 @Roles(RolUsuario.BODEGA, RolUsuario.ADMIN)
 @ApiBearerAuth()
@@ -30,20 +28,16 @@ export class ReposicionController {
   @ApiOperation({
     summary: 'Reposiciones pendientes de la tienda (mercancía por devolver al anaquel)',
   })
+  @ApiTiendaConsola()
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
   async listar(
-    @CurrentUser() user: any,
+    @TiendaConsola() tienda: number,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
   ) {
-    if (!user.tiendaId) {
-      throw new BadRequestException(
-        'Tu usuario no tiene tienda asignada. Contacta al administrador.',
-      );
-    }
     return this.reposicionService.listarPendientes(
-      user.tiendaId,
+      tienda,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
     );
@@ -51,9 +45,12 @@ export class ReposicionController {
 
   @Get('contador')
   @ApiOperation({ summary: 'Cuántas reposiciones pendientes tiene la tienda (badge)' })
-  async contador(@CurrentUser() user: any) {
-    if (!user.tiendaId) return { pendientes: 0 };
-    return { pendientes: await this.reposicionService.contarPendientes(user.tiendaId) };
+  @ApiTiendaConsola()
+  async contador(@TiendaConsola({ opcional: true }) tienda?: number) {
+    // Es un badge, no una lista: sin tienda (ADMIN que aún no elige, o un usuario mal configurado)
+    // dice 0 en vez de un error que la barra de la consola pintaría como falla.
+    if (!tienda) return { pendientes: 0 };
+    return { pendientes: await this.reposicionService.contarPendientes(tienda) };
   }
 
   @Post(':pedidoId/repuesto')

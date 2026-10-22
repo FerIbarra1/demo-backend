@@ -11,6 +11,7 @@ import {
 } from './dto/pairing.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import type { UserContext } from '../../types/pedido.types';
 import { RolUsuario } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
 
@@ -20,9 +21,10 @@ import { Public } from '../../common/decorators/public.decorator';
  * Los dos primeros endpoints son PÚBLICOS porque los llama la tablet cuando
  * NO tiene credencial (es justo el caso que resuelven). Su seguridad no
  * depende de estar autenticado, sino de que el reclamo exija el `deviceSecret`
- * que sólo la tablet física tiene en memoria.
+ * que solo la tablet física tiene en memoria.
  *
- * Los dos últimos son del admin: es él quien correlaciona el código y autoriza.
+ * Los demás son del ADMIN y del GERENTE (este último solo con kioskos y tablets de su tienda): son quienes
+ * correlacionan el código y autorizan.
  */
 @ApiTags('Kioskos')
 @Controller('kiosko/pairing')
@@ -68,7 +70,7 @@ export class KioskoPairingController {
   }
 
   /** El admin busca la solicitud por el código que le leyó el encargado. */
-  @Roles(RolUsuario.ADMIN)
+  @Roles(RolUsuario.ADMIN, RolUsuario.GERENTE)
   @ApiBearerAuth()
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Get('lookup')
@@ -78,24 +80,26 @@ export class KioskoPairingController {
   }
 
   /** El admin autoriza: elige a qué kiosko se vincula esta tablet. */
-  @Roles(RolUsuario.ADMIN)
+  @Roles(RolUsuario.ADMIN, RolUsuario.GERENTE)
   @ApiBearerAuth()
   @Post(':pairingId/aprobar')
   @ApiOperation({ summary: 'Autoriza la vinculación de la tablet a un kiosko (Admin)' })
   aprobar(
     @Param('pairingId') pairingId: string,
     @Body() dto: AprobarPairingDto,
-    @CurrentUser('userId') adminUserId: number,
+    @CurrentUser() user: UserContext,
   ) {
-    return this.pairing.aprobar(pairingId, dto.kioskoId, adminUserId);
+    return this.pairing.aprobar(pairingId, dto.kioskoId, user, {
+      confirmarOtraTienda: dto.confirmarOtraTienda,
+    });
   }
 
   /** El admin cancela una solicitud (p. ej. no reconoce la tablet). */
-  @Roles(RolUsuario.ADMIN)
+  @Roles(RolUsuario.ADMIN, RolUsuario.GERENTE)
   @ApiBearerAuth()
   @Post(':pairingId/cancelar')
   @ApiOperation({ summary: 'Cancela una solicitud de emparejamiento (Admin)' })
-  cancelar(@Param('pairingId') pairingId: string, @CurrentUser('userId') adminUserId: number) {
-    return this.pairing.cancelar(pairingId, adminUserId);
+  cancelar(@Param('pairingId') pairingId: string, @CurrentUser() user: UserContext) {
+    return this.pairing.cancelar(pairingId, user);
   }
 }

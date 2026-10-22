@@ -4,7 +4,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 
 /**
  * Intercepta requests HTTP para registrar mutaciones (POST, PUT, PATCH, DELETE)
- * en la tabla `LogActividad`. Sólo auditamos mutaciones; las lecturas no se
+ * en la tabla `LogActividad`. Solo auditamos mutaciones; las lecturas no se
  * registran para no inflar la tabla.
  *
  * Si la mutación falla, registramos la accion con metadata del error.
@@ -42,8 +42,19 @@ export class AuditLogInterceptor implements NestInterceptor {
       return next.handle();
     }
 
+    // Oct 2026 (etapa 3 del destrabar, probado contra el agente real): las rutas del agente de Firebird no se
+    // auditan aquí. (1) Cada petición intentaba escribir una fila con `usuarioId = 0` (el agente no es un `Usuario`) y
+    // fallaba por la llave foránea: una advertencia por heartbeat, cada 5 s por tienda. (2) Si "se arreglara" creando
+    // un usuario 0, `metadata.body` guardaría cada lote del agente —hasta 200 filas completas de clientes y catálogo—
+    // en esta tabla, y el heartbeat metería ~17 000 filas por tienda al día. El agente ya deja su rastro en
+    // `sync_event_inbox` y `sync_event_log`.
+    if (/\/sync\/agent\//.test(url)) {
+      return next.handle();
+    }
+
     const user = req.user;
-    const usuarioId = user?.userId ?? null;
+    // `userId` 0 = el sistema o el agente (ApiKeyGuard): no existe como Usuario y la FK lo rechazaría.
+    const usuarioId = user?.userId ? user.userId : null;
     const usuarioNombre = user?.nombre ?? null;
     const ipAddress =
       (req.headers['x-forwarded-for'] as string | undefined)?.split(',')[0]?.trim() ||

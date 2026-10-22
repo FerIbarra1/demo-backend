@@ -7,6 +7,7 @@ import {
   ParseIntPipe,
   Body,
   BadRequestException,
+  UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery, ApiResponse } from '@nestjs/swagger';
 import { BodegaService } from './bodega.service';
@@ -16,9 +17,15 @@ import { ConfirmarSurtidoDto, MarcarSurtidoItemDto } from './dto/surtido.dto';
 import { TomarGrupoDto } from './dto/tomar-grupo.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
+import {
+  ApiTiendaConsola,
+  TiendaConsola,
+  TiendaConsolaGuard,
+} from '../../../common/tienda-consola';
 import { RolUsuario, EstadoPedido } from '@prisma/client';
 
 @ApiTags('Pedidos - Bodega')
+@UseGuards(TiendaConsolaGuard)
 @Controller('bodega/pedidos')
 @Roles(RolUsuario.BODEGA, RolUsuario.ADMIN)
 @ApiBearerAuth()
@@ -31,7 +38,7 @@ export class BodegaController {
 
   @Get('pendientes')
   @ApiOperation({ summary: 'Obtener pedidos pendientes para bodega' })
-  @ApiQuery({ name: 'tiendaId', required: false, type: Number })
+  @ApiTiendaConsola()
   @ApiQuery({ name: 'estado', required: false, enum: EstadoPedido })
   @ApiQuery({
     name: 'estados',
@@ -50,8 +57,7 @@ export class BodegaController {
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
   async obtenerPendientes(
-    @CurrentUser() user: any,
-    @Query('tiendaId') tiendaId?: string,
+    @TiendaConsola() tienda: number,
     @Query('estado') estado?: EstadoPedido,
     @Query('estados') estadosCsv?: string,
     @Query('soloLibres') soloLibres?: string,
@@ -61,11 +67,8 @@ export class BodegaController {
     const estados = estadosCsv
       ? (estadosCsv.split(',').map((s) => s.trim()) as EstadoPedido[])
       : undefined;
-    const tiendaSolicitada = tiendaId ? parseInt(tiendaId, 10) : undefined;
-    const tiendaEfectiva =
-      user.rol === RolUsuario.ADMIN ? (tiendaSolicitada ?? user.tiendaId) : user.tiendaId;
     return this.bodegaService.obtenerPedidosBodega(
-      tiendaEfectiva,
+      tienda,
       estado,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
@@ -76,10 +79,11 @@ export class BodegaController {
 
   @Get('mis-pedidos')
   @ApiOperation({ summary: 'Pedidos asignados al bodeguero autenticado y en proceso' })
-  async misPedidos(@CurrentUser() user: any) {
+  @ApiTiendaConsola()
+  async misPedidos(@CurrentUser() user: any, @TiendaConsola() tienda: number) {
     return this.bodegaService.obtenerMisPedidosBodeguero(
       user.userId,
-      user.tiendaId,
+      tienda,
       this.surtidoService.maxPedidosPorBodeguero,
     );
   }
@@ -94,8 +98,9 @@ export class BodegaController {
     status: 200,
     description: 'Array (puede ser vacío). Cada elemento trae los items compartidos con detalle.',
   })
-  async surtirJuntos(@CurrentUser() user: any) {
-    return this.bodegaService.obtenerSurtirJuntos(user.userId, user.tiendaId);
+  @ApiTiendaConsola()
+  async surtirJuntos(@CurrentUser() user: any, @TiendaConsola() tienda: number) {
+    return this.bodegaService.obtenerSurtirJuntos(user.userId, tienda);
   }
 
   @Get('surtir-juntos/lote')
@@ -109,8 +114,9 @@ export class BodegaController {
     description:
       '{ zonas, pedidos } — zonas para el picking agrupado, pedidos para confirmar cada uno.',
   })
-  async surtirJuntosLote(@CurrentUser() user: any) {
-    return this.bodegaService.obtenerLoteSurtirJuntos(user.userId, user.tiendaId);
+  @ApiTiendaConsola()
+  async surtirJuntosLote(@CurrentUser() user: any, @TiendaConsola() tienda: number) {
+    return this.bodegaService.obtenerLoteSurtirJuntos(user.userId, tienda);
   }
 
   @Post('tomar-grupo')
@@ -119,13 +125,18 @@ export class BodegaController {
       'F11: toma un grupo de pedidos similares ("surtir juntos") de una sola vez. ' +
       'Valida el límite de pedidos simultáneos y que ninguno esté asignado a otro bodeguero.',
   })
-  async tomarGrupo(@Body() dto: TomarGrupoDto, @CurrentUser() user: any) {
+  @ApiTiendaConsola()
+  async tomarGrupo(
+    @Body() dto: TomarGrupoDto,
+    @CurrentUser() user: any,
+    @TiendaConsola() tienda: number,
+  ) {
     if (user.rol === RolUsuario.BODEGA_MONITOR) {
       throw new BadRequestException(
         'Tu rol es de monitor. No puedes tomar pedidos. Usa la tablet con un usuario BODEGA.',
       );
     }
-    return this.bodegaService.tomarGrupo(dto.ids, user);
+    return this.bodegaService.tomarGrupo(dto.ids, user, tienda);
   }
 
   @Get('ajustes-entrega')
@@ -140,8 +151,9 @@ export class BodegaController {
     description:
       'Array (puede ser vacío). Solo los que necesitan ajuste — un pedido liberado no aparece.',
   })
-  async ajustesEntrega(@CurrentUser() user: any) {
-    return this.bodegaService.obtenerAjustesEntrega(user.tiendaId);
+  @ApiTiendaConsola()
+  async ajustesEntrega(@TiendaConsola() tienda: number) {
+    return this.bodegaService.obtenerAjustesEntrega(tienda);
   }
 
   @Get('surtir-juntos/cola')
@@ -154,8 +166,9 @@ export class BodegaController {
     description:
       'Array de clusters. Cada cluster trae grupoId (estable), zonasCompartidas y los pedidos que lo componen.',
   })
-  async surtirJuntosCola(@CurrentUser() user: any) {
-    return this.bodegaService.obtenerSurtirJuntosCola(user.tiendaId);
+  @ApiTiendaConsola()
+  async surtirJuntosCola(@TiendaConsola() tienda: number) {
+    return this.bodegaService.obtenerSurtirJuntosCola(tienda);
   }
 
   @Get(':id')
@@ -198,7 +211,7 @@ export class BodegaController {
   @Post(':id/marcar-enviado')
   @ApiOperation({
     summary:
-      'PAID → SHIPPED. Sólo aplica a pedidos a domicilio (con shippingDireccion). Kiosko/web-recoger van al módulo Mostrador para entrega directa (PAID → COMPLETED).',
+      'PAID → SHIPPED. Solo aplica a pedidos a domicilio (con shippingDireccion). Kiosko/web-recoger van al módulo Mostrador para entrega directa (PAID → COMPLETED).',
   })
   async marcarEnviado(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.bodegaService.marcarEnviado(id, user);

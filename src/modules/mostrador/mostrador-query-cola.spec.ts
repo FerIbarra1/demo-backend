@@ -36,7 +36,11 @@ function crearServicio(filas: Array<Record<string, unknown>> = [], total = filas
   const findMany = jest.fn().mockResolvedValue(filas);
   const count = jest.fn().mockResolvedValue(total);
   const svc = new MostradorQueryService(
-    { pedido: { findMany, count } } as never,
+    // `pedidoDtf`: las filas ahora llevan su resumen de DTF; estos pedidos no tienen ninguno.
+    {
+      pedido: { findMany, count },
+      pedidoDtf: { findMany: jest.fn().mockResolvedValue([]) },
+    } as never,
     {} as never,
     config as never,
   );
@@ -195,6 +199,51 @@ describe('obtenerSinAviso — la bolsa apartada sin cliente', () => {
     const r = await svc.obtenerSinAviso(5);
     expect(r.meta.vencidoHoras).toBe(72);
     expect(r.meta.recordatorioHoras).toBe(24);
+  });
+
+  // Oct 2026 (F0 del plan ADMIN multitienda): "Sin aviso" era la única lista de mostrador sin
+  // `dtfResumen`. Un pedido solo-DTF apartado se pintaba como "0 producto(s)" y mostrador no
+  // sabía que la bolsa incluía una impresión (ni si ya estaba lista).
+  it('cada fila lleva su resumen de DTF (null si el pedido no tiene)', async () => {
+    const pedidoDtf = {
+      findMany: jest.fn().mockResolvedValue([
+        {
+          id: 11,
+          pedidoId: 1,
+          nombre: 'LOGO',
+          estado: 'IMPRESO',
+          copias: 1,
+          metrosCobrados: 0.5,
+          precioMetro: 220,
+          subtotal: 110,
+          tipo: { tecnologia: 'TEXTIL', nombre: 'DTF Textil' },
+        },
+      ]),
+    };
+    const svc = new MostradorQueryService(
+      {
+        pedido: {
+          findMany: jest.fn().mockResolvedValue([fila({ id: 1 }), fila({ id: 2 })]),
+          count: jest.fn().mockResolvedValue(2),
+        },
+        pedidoDtf,
+      } as never,
+      {} as never,
+      config as never,
+    );
+
+    const r = await svc.obtenerSinAviso(5);
+
+    expect(r.data[0].dtfResumen).toMatchObject({
+      total: 110,
+      cobrados: 1,
+      listos: 1,
+      pendientes: 0,
+    });
+    expect(r.data[1].dtfResumen).toBeNull();
+    // Una sola consulta para toda la lista, no una por pedido.
+    expect(pedidoDtf.findMany).toHaveBeenCalledTimes(1);
+    expect(pedidoDtf.findMany.mock.calls[0][0].where.pedidoId).toEqual({ in: [1, 2] });
   });
 });
 

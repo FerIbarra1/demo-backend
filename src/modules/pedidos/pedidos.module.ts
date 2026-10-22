@@ -109,6 +109,12 @@ import { KioskoModule } from '../kiosko/kiosko.module';
     AdminService,
     // F13: `mostrador` y otros módulos pueden necesitar consultar reposición.
     ReposicionService,
+    // Oct 2026 (destrabar): el gerente/admin reutilizan estas acciones desde `DestrabarService` en vez de copiarlas
+    // (responder una propuesta por el cliente, devolver a bodega, liberar de bodega y de caja).
+    PropuestaService,
+    VentasService,
+    BodegaService,
+    CajeroService,
   ],
 })
 export class PedidosModule {}

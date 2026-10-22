@@ -1,4 +1,10 @@
 -- ============================================================================
+-- ⚠ NO APLICAR contra la BD real. SUPERADO por 04_trg_pedidos_sync.sql (oct 2026).
+--   Se probó contra una copia de DATOSINV.FDB: este script sobrescribiría TRG_TIENDAS_SYNC / TRG_USUARIOS_SYNC (la
+--   BD real ya los tiene, con otras columnas), agrega TIENDAS.PREFIJO cuando la BD ya trae TIENDAS.SERIE y crea
+--   TRG_MOVPED_SYNC, que la nube ya no usa. Lo único que le falta a la BD real es TRG_PEDIDOS_SYNC: ver 04.
+-- ============================================================================
+-- ============================================================================
 -- Eliminar TRG_MOVPED_SYNC — el pedido llega a Firebird con cantidades finales
 -- ============================================================================
 -- El nuevo flujo: bodeguero surte en la WEB; al confirmarSurtido (PENDING_PAID)

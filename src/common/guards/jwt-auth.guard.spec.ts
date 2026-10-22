@@ -28,7 +28,11 @@ describe('JwtAuthGuard en rutas de API key', () => {
   const guardCon = (meta: { publica?: boolean; apiKey?: boolean }) => {
     const reflector = {
       getAllAndOverride: (key: string) =>
-        key === IS_PUBLIC_KEY ? !!meta.publica : key === IS_API_KEY_AUTH_KEY ? !!meta.apiKey : false,
+        key === IS_PUBLIC_KEY
+          ? !!meta.publica
+          : key === IS_API_KEY_AUTH_KEY
+            ? !!meta.apiKey
+            : false,
     };
     return new JwtAuthGuard(reflector as never);
   };

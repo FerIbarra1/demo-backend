@@ -97,10 +97,7 @@ export function datosDeRetiroPorDecision(item: {
  * ser `COMPLETO` (bodega la surtió entera) o `PARCIAL` (surtió parte): en los
  * dos casos hay algo que sacar de la bolsa.
  */
-export function seRetiraronPiezas(item: {
-  cancelada: boolean;
-  cantidadSurtida: number;
-}): boolean {
+export function seRetiraronPiezas(item: { cancelada: boolean; cantidadSurtida: number }): boolean {
   return item.cancelada && item.cantidadSurtida > 0;
 }
 

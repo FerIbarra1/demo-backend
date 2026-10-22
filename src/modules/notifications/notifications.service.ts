@@ -14,6 +14,7 @@ import {
   type LineaCorreo,
   type VarianteTransferencia,
 } from '../mail/mail.templates';
+import { referenciaWebDelPrimerCorreo } from '../mail/referencia-web';
 import { generarQrDataUrl } from '../pedidos/core/qr.util';
 import { firmarLlegoQr } from '../pedidos/core/qr-llegada.util';
 
@@ -24,7 +25,7 @@ import { firmarLlegoQr } from '../pedidos/core/qr-llegada.util';
  * el envío a `MailService` (que se encarga de render + SMTP + persistencia).
  *
  * Reglas de alcance:
- *   - Sólo se notifica a clientes (campo `pedido.clienteEmail`).
+ *   - Solo se notifica a clientes (campo `pedido.clienteEmail`).
  *   - No se notifica a BODEGA / CAJERO / ADMIN / MOSTRADOR.
  *   - Cada tipo de notificación tiene su propia plantilla React Email y su
  *     propio subject.
@@ -235,7 +236,7 @@ export class NotificationsService {
    *      principal del producto. El catálogo y el kiosko ya lo hacen así; el
    *      correo mostraba siempre la general. La cadena es
    *      `ItemPedido.precioCOId → PrecioCO.colorId → ProductoImagen.colorId`
-   *      (ItemPedido no guarda colorId, sólo el nombre como snapshot).
+   *      (ItemPedido no guarda colorId, solo el nombre como snapshot).
    *   2. **Folio VFP**: se expone `externalFolio` para que las plantillas
    *      muestren el mismo número que el cliente ve en tienda y en el ERP.
    *   3. **Datos que existían pero nunca se pasaban**: motivo de cancelación
@@ -275,6 +276,8 @@ export class NotificationsService {
     const logoUrl = await this.configuracion.obtenerLogoUrl();
     const frontendUrl = this.config.get<string>('app.mail.frontendUrl') ?? '';
     const pedidoUrl = `${frontendUrl}/pedidos/${pedido.id}`;
+    // Solo el primer correo con folio lleva el "Pedido en línea: PD-…" que une los dos números (ver `referencia-web.ts`).
+    const referenciaWeb = await referenciaWebDelPrimerCorreo(this.prisma, pedido);
 
     return {
       ctx: { logoUrl, frontendUrl },
@@ -282,7 +285,11 @@ export class NotificationsService {
       pedidoData: {
         pedidoId: pedido.id,
         numeroPedido: pedido.numeroPedido,
+        referenciaWeb,
         externalFolio: pendienteEnvio?.externalFolio ?? null,
+        // Oct 2026 (B2): el folio del Sistema Comercial con la serie de la tienda (ver `folioVisible`).
+        folioErp: pedido.folioErp ?? null,
+        serieTienda: tienda?.serie ?? null,
         clienteNombre: pedido.clienteNombre,
         estado: pedido.estado,
         total: pedido.total,
@@ -422,11 +429,7 @@ export class NotificationsService {
       const instrucciones = instruccionesDeUnPago(
         pagoVivo,
         { ...pedido, pendienteEnvio: { externalFolio } },
-        {
-          zonaHoraria: this.config.get<string>('app.pagos.zonaHoraria') ?? 'America/Mexico_City',
-          frontendUrl: this.config.get<string>('app.mail.frontendUrl') ?? '',
-          venceHoras: this.config.get<number>('app.pagos.transferenciaVenceHoras') ?? 48,
-        },
+        { frontendUrl: this.config.get<string>('app.mail.frontendUrl') ?? '' },
       );
       await this.enviarTransferencia(pedido, TipoNotificacion.TRANSFERENCIA_INSTRUCCIONES, {
         lineas: lineasParaCorreo(instrucciones),
@@ -467,7 +470,9 @@ export class NotificationsService {
 
     await this.mail.sendEmail({
       to: pedido.clienteEmail,
-      subject: mailSubjects.REVISION_APROBADA(externalFolio),
+      // El mismo número que el cuerpo del correo (`HMO-0000152573`). Antes el asunto llevaba el folio crudo del ACK
+      // ("0000152573", sin serie) y el cuerpo el folio con serie: el mismo correo con dos nombres para el pedido.
+      subject: mailSubjects.REVISION_APROBADA(folioVisible(pedidoData)),
       template,
       tipoNotificacion: TipoNotificacion.REVISION_APROBADA,
       pedidoId: pedido.id,

@@ -47,6 +47,7 @@ function crearServicio(items: any[]) {
       })),
       update: jest.fn(async () => ({})),
     },
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: jest.fn(async ({ where }: any) => {
         const it = items.find((i) => i.id === where.id);

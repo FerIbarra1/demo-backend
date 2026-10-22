@@ -69,6 +69,7 @@ function makeSyncService() {
     { procesar: jest.fn() } as any,
     { poll: jest.fn() } as any,
     { enviarListoParaPagar: jest.fn().mockResolvedValue(undefined) } as any,
+    { poll: jest.fn(), ack: jest.fn(), avisarFolioAsignado: jest.fn() } as any,
   );
 }
 

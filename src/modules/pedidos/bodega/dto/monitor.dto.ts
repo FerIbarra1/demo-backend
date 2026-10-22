@@ -5,6 +5,12 @@ import type { MotivoReingreso } from '../../core/motivo-reingreso';
 export class MonitorPedidoDto {
   @ApiProperty() id: number;
   @ApiProperty() numeroPedido: string;
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'Últimos dígitos del folio del Sistema Comercial (null = aún sin folio).',
+  })
+  turno: string | null;
   @ApiProperty({ enum: EstadoPedido }) estado: EstadoPedido;
   @ApiProperty({ enum: CanalOrigen }) canalOrigen: CanalOrigen;
   @ApiProperty() clienteNombre: string;
@@ -23,7 +29,7 @@ export class MonitorPedidoDto {
   asignadoAId: number | null;
   @ApiProperty({ nullable: true, type: String })
   asignadoANombre: string | null;
-  // Cajero (monitor de ventanillas): sólo aplica a pedidos KIOSKO en PENDIENTE_PAGO.
+  // Cajero (monitor de ventanillas): solo aplica a pedidos KIOSKO en PENDIENTE_PAGO.
   @ApiProperty({ nullable: true, type: String })
   cajeroAsignadoId: number | null;
   @ApiProperty({ nullable: true, type: String })
@@ -103,6 +109,12 @@ export class MonitorPedidoDto {
 export class MonitorBodegueroPedidoSlotDto {
   @ApiProperty() id: number;
   @ApiProperty() numeroPedido: string;
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'Últimos dígitos del folio del Sistema Comercial (null = aún sin folio).',
+  })
+  turno: string | null;
   @ApiProperty({ enum: EstadoPedido }) estado: EstadoPedido;
   @ApiProperty({ description: 'Timestamp ISO del momento en que tomó este pedido' })
   asignadoAt: string;

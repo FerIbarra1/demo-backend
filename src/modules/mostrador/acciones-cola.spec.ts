@@ -178,6 +178,7 @@ describe('MostradorService.ajustar — la propuesta huérfana', () => {
       },
       historialPedido: { create: jest.fn() },
       pedidoPropuesta: { updateMany },
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         findUnique: jest.fn().mockResolvedValue({ id: 10, precioUnitario: 100 }),
         update: jest.fn().mockResolvedValue({}),

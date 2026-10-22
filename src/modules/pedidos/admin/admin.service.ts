@@ -19,6 +19,7 @@ import {
 } from '../../pagos/transferencia/hooks';
 import { ESTADOS_NO_COBRAR } from '../../pagos/transferencia/reglas';
 import { UserContext } from '../../../types/pedido.types';
+import { reflejarCobroManualEnErp } from '../core/tareas-erp.util';
 import { EstadoPedido, Prisma, TipoNotificacion } from '@prisma/client';
 
 /**
@@ -100,7 +101,17 @@ export class AdminService {
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
     if (pedido.estado !== EstadoPedido.CANCELADO) {
-      throw new BadRequestException('Sólo se pueden eliminar pedidos en estado CANCELADO');
+      throw new BadRequestException('Solo se pueden eliminar pedidos en estado CANCELADO');
+    }
+    // Oct 2026: con una tarea abierta, el Sistema Comercial todavía tiene el pedido vivo y borrarlo de la web
+    // borraría también el único recordatorio de cancelarlo allá.
+    const abiertas = await this.prisma.tareaSistemaComercial.count({
+      where: { pedidoId, estado: 'PENDIENTE' },
+    });
+    if (abiertas > 0) {
+      throw new ConflictException(
+        'Este pedido tiene pendientes en el Sistema Comercial. Ciérralos antes de eliminarlo.',
+      );
     }
     await this.prisma.pedido.delete({ where: { id: pedidoId } });
     return { mensaje: 'Pedido eliminado', pedidoId };
@@ -138,7 +149,7 @@ export class AdminService {
     usuario: UserContext,
   ) {
     // Validar propiedad: ADMIN o sistema externo. Si es ADMIN humano,
-    // validar tienda. Si es el agente externo (no tiene tienda), sólo
+    // validar tienda. Si es el agente externo (no tiene tienda), solo
     // validar que el pedido exista.
     const pedido = await this.prisma.pedido.findUnique({ where: { id: pedidoId } });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
@@ -159,7 +170,7 @@ export class AdminService {
     if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO) {
       if (!esAgente || pedido.estado === EstadoPedido.CANCELADO) {
         throw new BadRequestException(
-          `Sólo se marca como pagado un pedido en PENDIENTE_PAGO (actual: ${pedido.estado})`,
+          `Solo se marca como pagado un pedido en PENDIENTE_PAGO (actual: ${pedido.estado})`,
         );
       }
       // El agente solo puede saltarse el gate si el pedido ya fue encolado a
@@ -258,6 +269,18 @@ export class AdminService {
       // emitirlos aquí los mandaría antes de confirmar, y un rollback
       // posterior dejaría a los clientes con un evento de un cambio que nunca
       // ocurrió.
+      // Oct 2026: el cobro lo registró una PERSONA en la nube (no vino del Sistema Comercial): si el pedido ya está en el
+      // ERP, allá no hay cobro. Se abre la tarea para que el cajero lo registre. Si el cajero ya lo había cobrado
+      // en el Sistema Comercial, el agente lo confirma y la tarea se cierra sola (ver `PedidoPagoHandler`).
+      if (!esAgente) {
+        await reflejarCobroManualEnErp(
+          tx,
+          pedidoId,
+          { id: usuario.userId, rol: usuario.rol, nombre: usuario.nombre },
+          referencia ? `Cobro manual (ref: ${referencia})` : 'Cobro manual sin referencia',
+        );
+      }
+
       return {
         yaPagado: false as const,
         pedido: pedidoActualizado,

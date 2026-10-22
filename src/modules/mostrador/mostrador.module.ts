@@ -5,6 +5,7 @@ import { MostradorController } from './mostrador.controller';
 import { MostradorMonitorService } from './mostrador-monitor.service';
 import { MostradorMonitorController } from './mostrador-monitor.controller';
 import { PedidoConsultaController } from '../pedidos/core/pedido-consulta.controller';
+import { PedidoBusquedaGlobalController } from '../pedidos/core/pedido-busqueda-global.controller';
 import { PedidosModule } from '../pedidos/pedidos.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { KioskoModule } from '../kiosko/kiosko.module';
@@ -49,10 +50,20 @@ import { MostradoresModule } from '../mostradores/mostradores.module';
  *
  * El controller tiene ruta propia (`pedidos/consulta`) y no comparte prefijo
  * con los de mostrador, así que el orden de registro no importa aquí.
+ *
+ * N2 (oct 2026): `PedidoBusquedaGlobalController` (`admin/busqueda/pedidos`, solo ADMIN) — la búsqueda
+ * en TODAS las tiendas. Misma razón para vivir aquí; ruta propia, así que tampoco depende del orden.
  */
 @Module({
   imports: [PedidosModule, RealtimeModule, KioskoModule, MostradoresModule],
-  controllers: [MostradorMonitorController, MostradorController, PedidoConsultaController],
+  controllers: [
+    MostradorMonitorController,
+    MostradorController,
+    PedidoConsultaController,
+    PedidoBusquedaGlobalController,
+  ],
   providers: [MostradorService, MostradorQueryService, MostradorMonitorService],
+  // Oct 2026 (destrabar): `DestrabarService` reutiliza `ajustar` para quitar productos con el cliente ausente.
+  exports: [MostradorService],
 })
 export class MostradorModule {}

@@ -164,6 +164,19 @@ export class RegistrarReembolsoDto {
   nota?: string;
 }
 
+/** Marcar vencidas unas instrucciones. Sin plazo que lo justifique, el motivo es obligatorio. */
+export class VencerPagoDto {
+  @ApiProperty({
+    example: 'El cliente avisó que ya no va a transferir.',
+    description: 'Por qué se cierran. Queda en la bitácora del pago.',
+  })
+  @Transform(limpiar)
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  motivo: string;
+}
+
 export class ResolverRevisionDto {
   @ApiProperty({ description: 'Qué se aclaró. Queda en la bitácora.' })
   @Transform(limpiar)
@@ -187,7 +200,6 @@ export class ReenviarInstruccionesDto {
 export const GRUPOS_PAGO = [
   'por-revisar',
   'esperando',
-  'vencidas',
   'verificados',
   'reembolsos',
   'requieren-revision',

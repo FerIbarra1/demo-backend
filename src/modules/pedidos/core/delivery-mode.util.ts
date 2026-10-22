@@ -73,7 +73,7 @@ export function resolverModoEntrega(
     }
     if (!tienePaqueteria && !dejaAdmin) {
       throw new BadRequestException(
-        'Para envío a domicilio debes elegir una paquetería o "Dejar que el administrador decida"',
+        'Para envío a domicilio elige una paquetería o deja que la tienda la elija por ti.',
       );
     }
   }

@@ -14,7 +14,12 @@ import { ReposicionService } from '../reposicion/reposicion.service';
 import { bolsaEnManosDeBodega } from '../core/bolsa-en-bodega.util';
 import { resolverModoEntrega } from '../core/delivery-mode.util';
 import { avisoDeLlegadaSirve, motivoNoAvisable } from '../core/llegada-aviso.util';
+import { turnoParaElCliente } from '../core/folio-erp.util';
+import { hayCuentaParaTienda } from '../../pagos/transferencia/hooks';
+import { historialParaCliente } from '../core/historial-cliente.util';
 import { construirItemPedido } from '../core/item-pedido.util';
+import { adjuntarBorradoresAPedido } from '../../dtf/dtf-pedido.service';
+import { dtfDelPedido } from '../../dtf/dtf-vista';
 import { contarMensajesNoLeidos } from '../core/mensajes-no-leidos.util';
 import { PreciosService } from '../../precios/precios.service';
 import {
@@ -25,11 +30,26 @@ import {
 import { KioskoService } from '../../kiosko/kiosko.service';
 import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
 import { PresenciaService } from '../core/presencia.service';
-import { pagoBloqueaCancelacion } from '../../pagos/transferencia/hooks';
+import { pagosParaCancelar } from '../../pagos/transferencia/hooks';
+import { ESTADOS_BLOQUEAN_CANCELACION } from '../../pagos/transferencia/reglas';
+import {
+  banderasDeCancelacion,
+  decidirCancelacionDelCliente,
+} from '../core/cancelacion-cliente.util';
+import { MOTIVOS_CANCELACION_CLIENTE, motivoElegido } from '../core/motivos-cancelacion-cliente';
 import { SinRecogerService } from '../core/sin-recoger.service';
 import { CreatePedidoDto } from './dto/create-pedido.dto';
+import { CancelarPedidoDto } from './dto/cancelar-pedido.dto';
 import { UserContext } from '../../../types/pedido.types';
-import { EstadoPedido, TipoNotificacion, Prisma, CanalOrigen, ModoEntrega } from '@prisma/client';
+import {
+  EstadoPedido,
+  EstadoPropuesta,
+  TipoNotificacion,
+  Prisma,
+  CanalOrigen,
+  ModoEntrega,
+  MetodoPago,
+} from '@prisma/client';
 
 /**
  * Servicio del dominio CLIENTE.
@@ -96,7 +116,7 @@ export class ClienteService {
     const tiendaId = usuario.tiendaIdHeader ?? usuario.tiendaId;
 
     if (!tiendaId) {
-      throw new BadRequestException('Debe seleccionar una tienda para crear el pedido');
+      throw new BadRequestException('Elige una tienda para hacer tu pedido.');
     }
 
     const tienda = await this.prisma.tienda.findFirst({
@@ -125,7 +145,7 @@ export class ClienteService {
         where: { id: kioskoIdHeader, tiendaId, estado: 'ACTIVO' },
       });
       if (!kiosko) {
-        throw new BadRequestException('Kiosko inválido o inactivo para esta tienda');
+        throw new BadRequestException('Este kiosko no está activo en esta tienda. Pide ayuda al personal.');
       }
       // Validar device token (timing-safe en el service).
       const tokenValido = await this.kioskoService.validarDeviceToken(
@@ -142,16 +162,27 @@ export class ClienteService {
     }
 
     // Si el cliente intenta mandar KIOSKO sin kioskoId real → reject.
-    // Sólo permitimos que dto.canalOrigen diga KIOSKO si fue forzado por
+    // Solo permitimos que dto.canalOrigen diga KIOSKO si fue forzado por
     // un kioskoIdHeader válido (ya validado arriba).
     if (dto.canalOrigen === CanalOrigen.KIOSKO && !kioskoIdFinal) {
       throw new BadRequestException(
-        'Para pedidos de kiosko se requiere un kiosko activo (header X-Kiosko-Id)',
+        'Este kiosko no está activo. Pide ayuda al personal de la tienda.',
       );
     }
 
     // F8 (jul 2026): validación centralizada del modo de entrega.
     const modoEntregaFinal = resolverModoEntrega(dto, canalOrigenFinal, kioskoIdFinal);
+
+    // Oct 2026: a DOMICILIO solo se paga por transferencia (decisión del dueño, 19-oct). Sin cuenta bancaria el pedido
+    // llegaría a pago sin ninguna forma de cobrarse (no hay caja que lo cobre de respaldo), así que no se acepta.
+    if (
+      modoEntregaFinal === ModoEntrega.DOMICILIO &&
+      !(await hayCuentaParaTienda(this.prisma, tiendaId))
+    ) {
+      throw new ConflictException(
+        'Por ahora no podemos recibir pedidos a domicilio en esta tienda. Puedes recoger tu pedido en tienda o intentarlo más tarde.',
+      );
+    }
 
     // A partir de aquí, modoEntregaFinal es la fuente de verdad. Limpiamos
     // los campos de envío que no aplican para no almacenarlos.
@@ -174,15 +205,24 @@ export class ClienteService {
         modoEntregaFinal === ModoEntrega.DOMICILIO && dto.dejarAdminDecidePaqueteria === true,
     };
 
+    // Oct 2026 (impresión DTF): las prendas son opcionales, pero el pedido no puede ir vacío.
+    const itemsDto = dto.items ?? [];
+    const dtfDto = dto.dtf ?? [];
+    if (itemsDto.length === 0 && dtfDto.length === 0) {
+      throw new BadRequestException('Agrega al menos un producto o un trabajo de impresión DTF.');
+    }
+    // Un pedido solo-DTF NACE en EN_DTF (no pasa por bodega): ver PLAN-DTF.md D3.
+    const soloDtf = itemsDto.length === 0;
+
     const preciosCO = await this.prisma.precioCO.findMany({
       where: {
-        id: { in: dto.items.map((i) => i.precioCOId) },
+        id: { in: itemsDto.map((i) => i.precioCOId) },
         tiendaId,
       },
       include: { producto: true, talla: true, color: true, corrida: true },
     });
 
-    if (preciosCO.length !== dto.items.length) {
+    if (preciosCO.length !== itemsDto.length) {
       throw new BadRequestException('Algunos productos no están disponibles en esta tienda');
     }
 
@@ -202,10 +242,10 @@ export class ClienteService {
     // garantizar que el precio congelado sea punto fijo del recálculo: con dos
     // gates distintos (uno por columna, otro por precio) el pedido cambiaría de
     // precio solo cuando Firebird tiene una lista sin capturar.
-    const totalPiezas = dto.items.reduce((acc, i) => acc + i.cantidad, 0);
+    const totalPiezas = itemsDto.reduce((acc, i) => acc + i.cantidad, 0);
 
     let subtotal = new Prisma.Decimal(0);
-    const itemsData = dto.items.map((item) => {
+    const itemsData = itemsDto.map((item) => {
       const pco = preciosCO.find((p) => p.id === item.precioCOId)!;
       // El snapshot de precios y nombres vive en `construirItemPedido`, la
       // misma función que usan mostrador y propuesta al agregar un producto.
@@ -227,52 +267,73 @@ export class ClienteService {
       try {
         // El pedido vive SOLO en la nube hasta que bodega confirma el surtido
         // (confirmarSurtido → PENDIENTE_PAGO crea la entrada en pedidos_pendientes_envio).
-        // Así Firebird sólo recibe pedidos con cantidades finales y no hace falta
+        // Así Firebird solo recibe pedidos con cantidades finales y no hace falta
         // re-sincronizar ajustes (trigger MOVPED eliminado).
-        pedido = await this.prisma.pedido.create({
-          data: {
-            numeroPedido,
-            usuarioId: usuario.userId,
-            tiendaId,
-            estado: EstadoPedido.SOLICITADO,
-            canalOrigen: canalOrigenFinal,
-            kioskoId: kioskoIdFinal,
-            modoEntrega: modoEntregaFinal,
-            // Preferencia NO vinculante (ver `Pedido.metodoPagoPreferido`). En domicilio no aplica
-            // todavía: se guarda null para no prometer algo que ese flujo no puede cumplir.
-            metodoPagoPreferido:
-              modoEntregaFinal === ModoEntrega.DOMICILIO ? null : (dto.metodoPagoPreferido ?? null),
-            // F22: un pedido de kiosko se hace con el cliente EN la tienda, así que
-            // su lugar en la cola de mostrador cuenta desde ahora. (Un web empieza
-            // sin lugar: lo toma cuando avisa su llegada.) Es la llave de orden de
-            // la cola — antes todo web con aviso pasaba delante de cualquier kiosko.
-            ...(canalOrigenFinal === CanalOrigen.KIOSKO ? { presenteDesdeAt: new Date() } : {}),
-            ...envioFields,
-            subtotal,
-            total: subtotal,
-            clienteNombre: dto.clienteNombre,
-            clienteEmail: dto.clienteEmail,
-            clienteTelefono: dto.clienteTelefono,
-            notas: dto.notas,
-            idempotencyKey,
-            items: { create: itemsData },
-            historial: {
-              create: {
-                estadoNuevo: EstadoPedido.SOLICITADO,
-                observacion: kioskoIdFinal
-                  ? `Pedido creado desde kiosko ${kioskoIdFinal}`
-                  : 'Pedido creado por cliente',
-                usuarioId: usuario.userId,
-                usuarioNombre: usuario.nombre,
+        pedido = await this.prisma.$transaction(async (tx) => {
+          const creado = await tx.pedido.create({
+            data: {
+              numeroPedido,
+              usuarioId: usuario.userId,
+              tiendaId,
+              estado: soloDtf ? EstadoPedido.EN_DTF : EstadoPedido.SOLICITADO,
+              canalOrigen: canalOrigenFinal,
+              kioskoId: kioskoIdFinal,
+              modoEntrega: modoEntregaFinal,
+              // Preferencia NO vinculante (ver `Pedido.metodoPagoPreferido`)... salvo a DOMICILIO: ahí la
+              // transferencia es el único medio (oct 2026), así que se fuerza sin importar lo que mande el
+              // cliente. Al pasar a pago se le crea sola con sus datos (`emitirTransferenciaAlPasarAPago`).
+              metodoPagoPreferido:
+                modoEntregaFinal === ModoEntrega.DOMICILIO
+                  ? MetodoPago.TRANSFERENCIA
+                  : (dto.metodoPagoPreferido ?? null),
+              // F22: un pedido de kiosko se hace con el cliente EN la tienda, así que
+              // su lugar en la cola de mostrador cuenta desde ahora. (Un web empieza
+              // sin lugar: lo toma cuando avisa su llegada.) Es la llave de orden de
+              // la cola — antes todo web con aviso pasaba delante de cualquier kiosko.
+              ...(canalOrigenFinal === CanalOrigen.KIOSKO ? { presenteDesdeAt: new Date() } : {}),
+              ...envioFields,
+              subtotal,
+              total: subtotal,
+              clienteNombre: dto.clienteNombre,
+              clienteEmail: dto.clienteEmail,
+              clienteTelefono: dto.clienteTelefono,
+              notas: dto.notas,
+              idempotencyKey,
+              items: { create: itemsData },
+              historial: {
+                create: {
+                  estadoNuevo: soloDtf ? EstadoPedido.EN_DTF : EstadoPedido.SOLICITADO,
+                  // El cliente lee este historial: el id del kiosko es de la BD y no le dice nada.
+                  observacion: kioskoIdFinal
+                    ? 'Pedido creado desde un kiosko de la tienda'
+                    : 'Pedido creado por cliente',
+                  usuarioId: usuario.userId,
+                  usuarioNombre: usuario.nombre,
+                },
               },
             },
-          },
-          include: {
-            items: true,
-            tienda: true,
-            kiosko: { select: { id: true, nombre: true } },
-            pendienteEnvio: true,
-          },
+            include: {
+              items: true,
+              tienda: true,
+              kiosko: { select: { id: true, nombre: true } },
+              pendienteEnvio: true,
+            },
+          });
+          // Oct 2026 (impresión DTF): los borradores se adjuntan EN LA MISMA transacción: o hay pedido
+          // con sus trabajos, o no hay nada. Y el total del pedido incluye el DTF.
+          if (dtfDto.length > 0) {
+            const dtf = await adjuntarBorradoresAPedido(tx, {
+              pedidoId: creado.id,
+              usuarioId: usuario.userId,
+              tiendaId,
+              trabajos: dtfDto,
+            });
+            const total = subtotal.plus(dtf.total);
+            await tx.pedido.update({ where: { id: creado.id }, data: { subtotal: total, total } });
+            creado.subtotal = total as never;
+            creado.total = total as never;
+          }
+          return creado;
         });
       } catch (err) {
         if ((err as { code?: string }).code !== 'P2002') throw err;
@@ -305,6 +366,9 @@ export class ClienteService {
       numeroPedido: pedido.numeroPedido,
       canalOrigen: pedido.canalOrigen,
     });
+    // Oct 2026: los trabajos DTF entran a la cola de Impresión.
+    if (dtfDto.length > 0)
+      this.realtime.emitToTienda(pedido.tiendaId, 'dtf.cola', { pedidoId: pedido.id });
 
     // Fire-and-forget: no bloqueamos la respuesta del cliente si el email tarda
     void this.notifications
@@ -349,6 +413,11 @@ export class ClienteService {
             where: { estado: 'PENDIENTE' },
             select: { id: true, estado: true, creadaPorRol: true },
           },
+          // Oct 2026 (impresión DTF): para pintar el resumen de DTF en la lista.
+          trabajosDtf: {
+            where: { estado: { notIn: ['BORRADOR', 'EXPIRADO'] } },
+            select: { id: true, nombre: true, estado: true, subtotal: true, metrosCobrados: true },
+          },
         },
         orderBy: { fechaPedido: 'desc' },
         skip,
@@ -363,8 +432,15 @@ export class ClienteService {
       pedidos.map((p) => p.id),
       'cliente',
     );
+    // Oct 2026: el servidor dice qué pedidos se pueden cancelar (la MISMA decisión que la cancelación real; una sola
+    // consulta de pagos para toda la página). La pantalla ya no mantiene su lista de estados.
+    const cancelables = await this.decisionesDeCancelacion(pedidos);
     return {
-      data: pedidos.map((p) => ({ ...p, mensajesNoLeidos: noLeidos.get(p.id) ?? 0 })),
+      data: pedidos.map((p) => ({
+        ...p,
+        mensajesNoLeidos: noLeidos.get(p.id) ?? 0,
+        ...banderasDeCancelacion(cancelables.get(p.id)!),
+      })),
       meta: { total, pagina, limite, totalPaginas: Math.ceil(total / limite) },
     };
   }
@@ -423,78 +499,106 @@ export class ClienteService {
     }) as any;
     // Oct 2026: el servidor dice si la tarjeta "¿Ya estás en la tienda?" tiene sentido en este estado
     // (ver `avisoDeLlegadaSirve`); la pantalla no deduce a mano en qué estados mostrarla.
-    return { ...pedido, puedeAvisarLlegada: avisoDeLlegadaSirve(pedido) };
+    const dtf = await dtfDelPedido(this.prisma, pedido.id, 'cliente', usuarioId);
+    // Oct 2026: lo que la tienda le dejó dicho en SU pedido al destrabarlo (p. ej. "Cancelamos tu pedido porque no
+    // recibimos el pago."). No se manda por correo: lo lee quien entra a ver su pedido. El motivo INTERNO nunca sale.
+    const aviso = await this.prisma.pedidoIntervencion.findFirst({
+      where: { pedidoId: pedido.id, mensajeCliente: { not: null } },
+      orderBy: { id: 'desc' },
+      select: { mensajeCliente: true, createdAt: true },
+    });
+    const cancelable = (await this.decisionesDeCancelacion([pedido])).get(pedido.id)!;
+    return {
+      ...pedido,
+      ...banderasDeCancelacion(cancelable),
+      // Oct 2026: lo que el cliente lee es SU versión del historial (sin números internos ni nombres de procesos).
+      historial: historialParaCliente(pedido.historial),
+      dtf,
+      // Oct 2026: los últimos dígitos del folio, que es lo que dicen las TV de pared. El servidor decide cuándo aplica.
+      turno: turnoParaElCliente(pedido),
+      puedeAvisarLlegada: avisoDeLlegadaSirve(pedido),
+      avisoDeTienda: aviso ? { texto: aviso.mensajeCliente, fecha: aviso.createdAt } : null,
+    };
   }
 
   /**
-   * F20 (oct 2026): el cliente cancela su propio pedido.
+   * Oct 2026: la decisión de cancelar de varios pedidos a la vez, con UNA sola consulta de pagos.
    *
-   * DOS bugs que esto arregla:
-   *
-   * 1. NO validaba el estado. El controller promete "sólo antes de PAID" pero
-   *    el código no lo cumplía: el cliente podía cancelar un pedido ya PAGADO
-   *    (y hasta ENVIADO), porque `TRANSICIONES[PAGADO]` incluye CANCELADO.
-   *
-   *    Ese arco existe A PROPÓSITO y NO se toca: lo usa Firebird (SWCANCEL)
-   *    cuando el ERP cancela un pedido. La regla del negocio es que la web se
-   *    adecúa al ERP, no al revés — así que el límite va aquí, en el camino del
-   *    CLIENTE, no en la tabla de transiciones.
-   *
-   *    El corte es `PENDIENTE_PAGO`: hasta ahí el pedido todavía no entró a
-   *    Firebird (el encolado al ERP ocurre justo al pasar a ese estado), así que
-   *    cancelarlo es seguro. Desde `PAGADO` en adelante el cobro ya ocurrió en
-   *    VFP y la cancelación tiene que venir del ERP.
-   *
-   * 2. NO creaba la lista de reposición. Mostrador y las propuestas sí la crean
-   *    (`crearDesdePedido`), pero este camino no — así que la mercancía que
-   *    bodega había apartado se quedaba sin que nadie la devolviera al anaquel.
-   *    Es justo el trabajo que el negocio necesita que bodega vea.
+   * ÚNICO camino hacia `decidirCancelacionDelCliente`: lo usan la lista, el detalle y la cancelación real. Por eso el
+   * botón de la pantalla no puede contradecir al servidor: no hay dos lugares donde se decida.
    */
-  async cancelarPedido(pedidoId: number, usuarioId: number, usuario: UserContext) {
-    const pedido = await this.prisma.pedido.findUnique({
-      where: { id: pedidoId },
-      select: { estado: true, asignadoAId: true },
+  private async decisionesDeCancelacion(
+    pedidos: Array<{ id: number; estado: EstadoPedido; modoEntrega: ModoEntrega | null }>,
+  ) {
+    const pagos = await pagosParaCancelar(
+      this.prisma,
+      pedidos.map((p) => p.id),
+    );
+    return new Map(
+      pedidos.map((p) => [p.id, decidirCancelacionDelCliente(p, pagos.get(p.id) ?? null)] as const),
+    );
+  }
+
+  /** La lista corta de motivos del diálogo de cancelar. Vive aquí y no en la pantalla (ver `motivos-cancelacion-cliente`). */
+  motivosDeCancelacion() {
+    return MOTIVOS_CANCELACION_CLIENTE;
+  }
+
+  /**
+   * F20 (oct 2026): el cliente cancela su propio pedido. Reescrito en oct 2026 sobre UNA decisión
+   * (`decidirCancelacionDelCliente`, la misma que pinta el botón en «Mis pedidos» y en el detalle).
+   *
+   * Bugs que esto arregló (F20):
+   *
+   * 1. NO validaba el estado. El controller prometía "solo antes de PAID" pero el código no lo cumplía: el cliente
+   *    podía cancelar un pedido ya PAGADO (y hasta ENVIADO), porque `TRANSICIONES[PAGADO]` incluye CANCELADO. Ese arco
+   *    existe A PROPÓSITO (lo usa Firebird con SWCANCEL; la web se adecúa al ERP), así que el límite va aquí, en el
+   *    camino del CLIENTE, no en la tabla de transiciones.
+   * 2. NO creaba la lista de reposición: la mercancía que bodega había apartado se quedaba sin que nadie la devolviera
+   *    al anaquel.
+   *
+   * Lo de oct 2026:
+   *
+   * 3. Una sola regla (ya no 4 en 3 pantallas + 7 estados aquí) y «En atención» se cierra: el cliente está con el
+   *    operador. El servidor responde 409 con el motivo que lee el cliente y un `codigo` estable.
+   * 4. La propiedad se comprueba PRIMERO. Antes se leía el pedido a secas y la propiedad la comprobaba recién
+   *    `cambiarEstado`: un cliente recibía "ya fue pagado" o "comprobante en revisión" (409) sobre el pedido de OTRO,
+   *    que además revelaba que existía y en qué estado estaba.
+   * 5. La decisión se re-comprueba DENTRO de la transacción (`desdeEstados` y el pago): entre la lectura y la escritura
+   *    el operador pudo llamar al cliente (EN_ATENCION) o llegar un comprobante.
+   * 6. La propuesta pendiente se cierra (RECHAZADA) en la misma transacción. Cancelar desde ESPERANDO_APROBACION
+   *    dejaba la propuesta PENDIENTE sobre un pedido cancelado: «Mis pedidos» pintaba «Pendiente de aprobación» en un
+   *    pedido cancelado. Es lo que hacía la cancelación por la propuesta; ahora hay UN solo camino para cancelar.
+   * 7. El motivo (opcional) se guarda aparte y solo si el cliente lo dio. NO va al historial ni al correo.
+   */
+  async cancelarPedido(
+    pedidoId: number,
+    usuarioId: number,
+    usuario: UserContext,
+    dto: CancelarPedidoDto = {},
+  ) {
+    // 404 (no 403 ni 409) para no revelar que el pedido existe ni en qué estado está a un cliente ajeno.
+    const pedido = await this.prisma.pedido.findFirst({
+      where: { id: pedidoId, usuarioId },
+      select: { id: true, estado: true, asignadoAId: true, modoEntrega: true, tiendaId: true },
     });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
-    /**
-     * Estados donde el cliente todavía puede cancelar.
-     *
-     * `PENDIENTE_PAGO` entra: el pedido está encolado al ERP pero el cobro no
-     * ha ocurrido. `PAGADO` y posteriores quedan fuera — ahí manda Firebird.
-     */
-    const CANCELABLES_POR_EL_CLIENTE: EstadoPedido[] = [
-      EstadoPedido.SOLICITADO,
-      EstadoPedido.EN_REVISION,
-      EstadoPedido.REVISADO,
-      EstadoPedido.EN_ATENCION,
-      EstadoPedido.ESPERANDO_APROBACION,
-      EstadoPedido.EN_ASESORIA,
-      EstadoPedido.PENDIENTE_PAGO,
-    ];
+    // Lo mal formado se rechaza antes de consultar el dinero.
+    const motivo = motivoElegido(dto);
 
-    if (!CANCELABLES_POR_EL_CLIENTE.includes(pedido.estado)) {
-      throw new BadRequestException(
-        pedido.estado === EstadoPedido.PAGADO ||
-          pedido.estado === EstadoPedido.ENVIADO ||
-          pedido.estado === EstadoPedido.ENTREGADO
-          ? 'Tu pedido ya fue pagado, así que no se puede cancelar desde aquí. ' +
-              'Acércate a mostrador para cualquier cambio.'
-          : `No se puede cancelar un pedido en estado ${pedido.estado}.`,
-      );
+    const decision = (await this.decisionesDeCancelacion([pedido])).get(pedido.id)!;
+    if (!decision.puede) {
+      throw new ConflictException({ codigo: decision.codigo, message: decision.motivo });
     }
-
-    // Oct 2026 (pagos por transferencia): con un comprobante en revisión o dinero ya verificado,
-    // cancelar deja un dinero sin dueño. Primero se resuelve el dinero (Tesorería / mostrador).
-    // Si el comprobante llega justo después de esta lectura, la cancelación pasa y el hook de la
-    // máquina de estados deja el pago marcado para que Tesorería lo resuelva: nunca se pierde.
-    const pagoEnCurso = await pagoBloqueaCancelacion(this.prisma, pedidoId);
-    if (pagoEnCurso) {
-      throw new ConflictException(
-        pagoEnCurso.estado === 'VERIFICADO'
-          ? 'Tu transferencia ya fue verificada, así que no puedes cancelar el pedido desde aquí. Acércate a mostrador.'
-          : 'Ya enviaste un comprobante de transferencia y lo estamos revisando. Espera a que lo confirmemos, o contacta a la tienda.',
-      );
+    // Dinero posiblemente en camino: el diálogo ya preguntó «¿ya transferiste?». Se exige la confirmación también
+    // aquí: una pantalla desfasada o un cliente de la API no pueden cancelar a ciegas una transferencia pendiente.
+    if (decision.preguntarTransferencia && dto.noHeTransferido !== true) {
+      throw new ConflictException({
+        codigo: 'CONFIRMAR_TRANSFERENCIA',
+        message:
+          'Tienes una transferencia pendiente. Si ya transferiste, no canceles: acércate a la tienda para que revisemos tu pago.',
+      });
     }
 
     // Oct 2026: si bodega lo tiene en las manos (sin surtir o a medias) NO hay
@@ -507,11 +611,15 @@ export class ClienteService {
       asignadoAId: pedido.asignadoAId,
     });
 
-    return this.state.cambiarEstado(
+    // Se llena dentro de la transacción; un objeto y no un `let` para que TypeScript no lo dé por `null` al leerlo después.
+    const cierre: { propuestaId: number | null } = { propuestaId: null };
+    const resultado = await this.state.cambiarEstado(
       pedidoId,
       { nuevoEstado: EstadoPedido.CANCELADO, observacion: 'Cancelado por el cliente' },
       usuario,
       {
+        // Si el pedido ya no está donde lo vio el cliente (lo llamaron a mostrador, bodega lo movió), 409.
+        desdeEstados: [pedido.estado],
         asignacion: 'limpiar',
         reloj: 'detener',
         invalidarMonitor: true,
@@ -519,12 +627,64 @@ export class ClienteService {
         // pero la lista falla, quedaría mercancía apartada sin nadie que la
         // devuelva. Mismo patrón que `MostradorService.cancelar`.
         efectos: async (tx) => {
+          // Un comprobante que llegó entre la lectura y aquí: se re-lee con la transacción. (Si llega DESPUÉS de esta
+          // línea, el hook de la máquina de estados deja el pago marcado para Tesorería: el dinero nunca se pierde.)
+          const pagoAhora = await tx.pedidoPagoTransferencia.findFirst({
+            where: { pedidoId, estado: { in: [...ESTADOS_BLOQUEAN_CANCELACION] } },
+            select: { estado: true },
+          });
+          if (pagoAhora) {
+            const d = decidirCancelacionDelCliente(pedido, pagoAhora.estado);
+            throw new ConflictException({ codigo: d.codigo, message: d.motivo });
+          }
+
           await this.reposicion.crearDesdePedido(tx, pedidoId, 'Cancelado por el cliente', {
             bolsaEnManosDeBodega: enManosDeBodega,
           });
+
+          // La propuesta que esperaba la decisión del cliente ya no tiene nada que decidir. A lo más hay una.
+          const propuesta = await tx.pedidoPropuesta.findFirst({
+            where: { pedidoId, estado: EstadoPropuesta.PENDIENTE },
+            select: { id: true },
+          });
+          if (propuesta) {
+            const cerro = await tx.pedidoPropuesta.updateMany({
+              where: { id: propuesta.id, estado: EstadoPropuesta.PENDIENTE },
+              data: { estado: EstadoPropuesta.RECHAZADA, respondidaAt: new Date() },
+            });
+            if (cerro.count === 1) cierre.propuestaId = propuesta.id;
+          }
+
+          // Solo si el cliente lo dio: omitirlo no deja nada. No se escribe en el historial ni en `notaCliente`
+          // (el cliente y la tienda leen esos): es para el negocio y el gerente/admin.
+          if (motivo) {
+            await tx.pedidoCancelacionCliente.create({
+              data: {
+                pedidoId,
+                tiendaId: pedido.tiendaId,
+                usuarioId,
+                motivo: motivo.motivo,
+                detalle: motivo.detalle,
+                estadoAlCancelar: pedido.estado,
+              },
+            });
+          }
         },
       },
     );
+
+    // Ya confirmó la transacción: ahora sí avisar a quien tenga la propuesta abierta (el asesor, mostrador).
+    if (cierre.propuestaId !== null) {
+      const payload = {
+        pedidoId,
+        propuestaId: cierre.propuestaId,
+        decision: 'CANCELAR_PEDIDO',
+        estado: EstadoPropuesta.RECHAZADA,
+      };
+      this.realtime.emitToPedido(pedidoId, 'propuesta.respondida', payload);
+      this.realtime.emitToTienda(pedido.tiendaId, 'propuesta.respondida', payload);
+    }
+    return resultado;
   }
 
   /**

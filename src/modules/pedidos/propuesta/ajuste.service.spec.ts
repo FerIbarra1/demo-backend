@@ -35,7 +35,10 @@ function item(id: number, cantidad: number) {
     precioUnitarioBase: D(100),
     precioUnitarioMayoreo: D(80),
     subtotal: D(100).mul(cantidad),
-    producto: { imagenPrincipal: 'general.jpg', imagenesProducto: [{ url: 'azul.jpg', colorId: 3 }] },
+    producto: {
+      imagenPrincipal: 'general.jpg',
+      imagenesProducto: [{ url: 'azul.jpg', colorId: 3 }],
+    },
     precioCO: { colorId: 3 },
   };
 }
@@ -155,9 +158,9 @@ describe('AjusteService.calcular', () => {
 
   it('REPONER sobre una línea viva responde 400', async () => {
     const { svc } = crear();
-    await expect(
-      svc.calcular(1, [{ accion: 'REPONER', itemId: 1, cantidad: 3 }]),
-    ).rejects.toThrow(BadRequestException);
+    await expect(svc.calcular(1, [{ accion: 'REPONER', itemId: 1, cantidad: 3 }])).rejects.toThrow(
+      BadRequestException,
+    );
   });
 
   it('no consulta el catálogo si no se agrega nada', async () => {

@@ -29,6 +29,9 @@ export const ROLES_EMPLEADO = [
   RolUsuario.VENTAS,
   // Oct 2026: verifica transferencias de TODAS las tiendas. Es el único rol sin tienda.
   RolUsuario.TESORERIA,
+  RolUsuario.IMPRESION,
+  // Oct 2026: gerente de UNA tienda (la tienda es obligatoria, como en todos los roles menos Tesorería).
+  RolUsuario.GERENTE,
 ] as const;
 
 export class CrearUsuarioDto {

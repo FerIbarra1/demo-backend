@@ -4,10 +4,14 @@ import { CatalogHandler } from './handlers/catalog.handler';
 import { ClienteHandler } from './handlers/cliente.handler';
 import { PedidoPagoHandler } from './handlers/pedido-pago.handler';
 import { PedidoDescargaHandler } from './handlers/pedido-descarga.handler';
+import { FolioReservaHandler } from './handlers/folio-reserva.handler';
 import { NotificationsService } from '../notifications/notifications.service';
-import { EstadoPedido } from '@prisma/client';
+import { EstadoPedido, TipoTareaErp } from '@prisma/client';
+import { abrirTareaErp } from '../pedidos/core/tareas-erp.util';
 import type { UploadBatchDto } from './dto/upload-batch.dto';
 import type { PedidosAckDto } from './dto/pedidos-ack.dto';
+import type { FoliosAckDto } from './dto/folios-ack.dto';
+import { esFolioErp, guardarFolioDelPedido } from '../pedidos/core/folio-erp.util';
 import type { HeartbeatDto } from './dto/heartbeat.dto';
 
 /**
@@ -28,6 +32,7 @@ export class SyncAgentService {
     private pedidoPago: PedidoPagoHandler,
     private pedidoDescarga: PedidoDescargaHandler,
     private notifications: NotificationsService,
+    private folioReserva: FolioReservaHandler,
   ) {}
 
   // ============================================================
@@ -68,6 +73,12 @@ export class SyncAgentService {
     errores: number;
     checkpointAvanzado: boolean;
     deadLetters: number;
+    /**
+     * Oct 2026: los `eventId` que fallaron pero SE VAN A REINTENTAR (estado ERROR o en espera). El agente solo sabía
+     * cuántos fallaron, no cuáles: el bootstrap del catálogo daba por hecho un lote con errores y esos eventos no
+     * volvían a subir nunca. Ahora los guarda en su outbox y los reenvía con retroceso.
+     */
+    fallidos: string[];
   }> {
     // dto.tiendaId es el externalId (IDTIENDA de Firebird). Resolvemos el
     // id interno de la tienda nube para checkpoint/inbox.
@@ -77,6 +88,7 @@ export class SyncAgentService {
     let procesados = 0;
     let errores = 0;
     let deadLetters = 0;
+    const fallidos: string[] = [];
 
     for (const evento of dto.eventos) {
       const existente = await this.prisma.syncEventInbox.findUnique({
@@ -84,9 +96,17 @@ export class SyncAgentService {
         select: { estado: true, mensaje: true, nextAttemptAt: true, intentos: true },
       });
 
+      // Un evento que ya murió (DEAD_LETTER) es terminal: no se reprocesa solo y NO cuenta como error. Antes caía al
+      // `create` de abajo, chocaba con su propia fila (P2002) y daba `errores++` PARA SIEMPRE: el agente lo reenviaba
+      // eternamente. Se reprograma a mano con `POST sync/admin/events/:eventId/replay`.
+      if (existente?.estado === 'DEAD_LETTER') {
+        deadLetters++;
+        continue;
+      }
       // En backoff (ERROR/RETRY con nextAttemptAt futuro): no reprocesar aún.
       if (existente && existente.estado !== 'PROCESADO' && existente.nextAttemptAt > new Date()) {
         errores++;
+        fallidos.push(evento.eventId);
         continue;
       }
       if (existente?.estado === 'PROCESADO') {
@@ -108,6 +128,7 @@ export class SyncAgentService {
         });
         if (reclamado.count !== 1) {
           errores++;
+          fallidos.push(evento.eventId);
           continue;
         }
       } else {
@@ -127,6 +148,7 @@ export class SyncAgentService {
         } catch (err) {
           if ((err as { code?: string }).code === 'P2002') {
             errores++;
+            fallidos.push(evento.eventId);
             continue;
           }
           throw err;
@@ -177,6 +199,7 @@ export class SyncAgentService {
         deadLetters++;
       } else {
         errores++;
+        fallidos.push(evento.eventId);
       }
     }
 
@@ -194,7 +217,7 @@ export class SyncAgentService {
       });
     }
 
-    return { procesados, errores, checkpointAvanzado, deadLetters };
+    return { procesados, errores, checkpointAvanzado, deadLetters, fallidos };
   }
 
   async reprogramarEvento(eventId: string): Promise<{ eventId: string; estado: string }> {
@@ -264,6 +287,20 @@ export class SyncAgentService {
   }
 
   // ============================================================
+  // Folios (nube→local→nube): la nube pide, el agente reserva el consecutivo
+  // ============================================================
+
+  async pollFolios(tiendaIdExterno: number, limit: number, agentId: string) {
+    const tienda = await this.resolverTiendaPorExternalId(tiendaIdExterno);
+    return this.folioReserva.poll(tienda.id, limit, agentId);
+  }
+
+  async procesarFoliosAck(dto: FoliosAckDto) {
+    const tienda = await this.resolverTiendaPorExternalId(dto.tiendaId);
+    return this.folioReserva.ack(tienda.id, dto);
+  }
+
+  // ============================================================
   // Ack pedidos
   // ============================================================
 
@@ -283,7 +320,13 @@ export class SyncAgentService {
           // tienda, así que un pedido cancelado entre el poll y el ACK se
           // marcaba PROCESADO y disparaba el email "listo para pagar" con QR
           // de un pedido muerto.
-          select: { tiendaId: true, estado: true },
+          select: {
+            id: true,
+            tiendaId: true,
+            estado: true,
+            folioErp: true,
+            tienda: { select: { serie: true } },
+          },
         });
         if (!pedido || pedido.tiendaId !== tiendaIdNube) {
           throw new NotFoundException(
@@ -294,20 +337,48 @@ export class SyncAgentService {
         // existe en Firebird pero el pedido está muerto en la nube: no
         // disparamos "listo para pagar" ni marcamos la entrega como exitosa.
         if (pedido.estado === EstadoPedido.CANCELADO) {
-          await this.prisma.pedidoPendienteEnvio.updateMany({
-            where: { pedidoId: ack.pedidoId, estado: { not: 'PROCESADO' } },
-            data: {
-              estado: 'CANCELADO',
-              claimedBy: null,
-              leaseToken: null,
-              leaseUntil: null,
-              processedAt: new Date(),
-              ultimoErrorCode: 'PEDIDO_CANCELADO_EN_ACK',
-              ultimoError: 'Pedido cancelado en la nube antes del ACK del agente',
-            },
+          await this.prisma.$transaction(async (tx) => {
+            await tx.pedidoPendienteEnvio.updateMany({
+              where: { pedidoId: ack.pedidoId, estado: { not: 'PROCESADO' } },
+              data: {
+                estado: 'CANCELADO',
+                claimedBy: null,
+                leaseToken: null,
+                leaseUntil: null,
+                processedAt: new Date(),
+                ultimoErrorCode: 'PEDIDO_CANCELADO_EN_ACK',
+                ultimoError: 'Pedido cancelado en la nube antes del ACK del agente',
+                // Si el agente SÍ lo grabó, el folio existe en el ERP: se guarda para poder buscarlo allá.
+                ...(ack.exito && ack.externalIdPEDIDOS
+                  ? { externalIdPEDIDOS: ack.externalIdPEDIDOS, externalFolio: ack.externalFolio }
+                  : {}),
+              },
+            });
+            // Oct 2026: antes esto solo escribía un warning. Un pedido cancelado mientras el agente lo subía queda
+            // VIVO en el Sistema Comercial con un folio que nadie conoce: se abre la tarea para que el cajero lo
+            // cancele allá (la cancelación en la nube no pudo abrirla: en ese momento el pedido aún no tenía folio).
+            // El folio reservado/grabado también se guarda: es lo que permite buscar ese pedido en el ERP.
+            if (ack.exito && esFolioErp(ack.externalFolio)) {
+              await guardarFolioDelPedido(tx, pedido, ack.externalFolio, { elErpManda: true });
+            }
+            if (ack.exito && ack.externalIdPEDIDOS) {
+              await abrirTareaErp(tx, {
+                pedidoId: ack.pedidoId,
+                tiendaId: tiendaIdNube,
+                tipo: TipoTareaErp.CANCELAR_EN_ERP,
+                motivo:
+                  'Se canceló en la web mientras se enviaba al Sistema Comercial: quedó un folio vivo allá.',
+                actor: { id: null, rol: 'SISTEMA', nombre: 'Sistema' },
+                folio: ack.externalFolio ?? null,
+                erpIdPedido: ack.externalIdPEDIDOS,
+              });
+            }
           });
           this.logger.warn(
-            `ACK de pedido ${ack.pedidoId} ignorado: el pedido fue cancelado en la nube`,
+            `ACK de pedido ${ack.pedidoId} ignorado: el pedido fue cancelado en la nube` +
+              (ack.exito && ack.externalIdPEDIDOS
+                ? ` (quedó el folio ${ack.externalFolio ?? ack.externalIdPEDIDOS} en el ERP: tarea abierta)`
+                : ''),
           );
           continue;
         }
@@ -350,6 +421,7 @@ export class SyncAgentService {
 
           const externalIdPEDIDOS = ack.externalIdPEDIDOS;
           const localTiendaId = tienda.externalId;
+          let resultadoFolio: Awaited<ReturnType<typeof guardarFolioDelPedido>> | null = null;
           await this.prisma.$transaction(async (tx) => {
             await tx.pedidoPendienteEnvio.update({
               where: { pedidoId: ack.pedidoId },
@@ -384,7 +456,29 @@ export class SyncAgentService {
                 localTiendaId: tienda.externalId,
               },
             });
+            // Oct 2026 (parte B): lo que quedó escrito en el ERP es la verdad. Normalmente es el folio que la nube ya
+            // tenía (el agente lo recibió en el poll); si el pedido llegó a caja sin folio, es el que el agente tomó
+            // dentro de la misma transacción de `GRABAR_PEDIDOS` (el respaldo): aquí se guarda y se cierra la solicitud.
+            if (esFolioErp(ack.externalFolio)) {
+              resultadoFolio = await guardarFolioDelPedido(tx, pedido, ack.externalFolio, {
+                elErpManda: true,
+              });
+            }
           });
+          if (resultadoFolio === 'ASIGNADO') {
+            this.folioReserva.avisarFolioAsignado(
+              pedido.id,
+              pedido.tiendaId,
+              ack.externalFolio!,
+              pedido.tienda.serie,
+            );
+          } else if (resultadoFolio === 'FOLIO_EN_USO' || resultadoFolio === 'CONFLICTO') {
+            // El pedido SÍ quedó grabado en el ERP: no se tumba el ACK (el agente lo reintentaría para siempre). Pero
+            // la nube no puede mostrar ese folio sin chocar con otro pedido: queda a la vista en el log.
+            this.logger.error(
+              `Pedido ${ack.pedidoId}: el ERP le puso el folio ${ack.externalFolio} y la nube no pudo guardarlo (${resultadoFolio})`,
+            );
+          }
 
           // Email "listo para pagar" con QR del folio VFP. Se dispara aquí
           // (cuando el folio ya existe), no en confirmarSurtido. Fire-and-forget.
@@ -516,7 +610,7 @@ export class SyncAgentService {
         },
       });
     } catch (err) {
-      // No fallamos el evento sólo porque no podamos escribir el log.
+      // No fallamos el evento solo porque no podamos escribir el log.
       this.logger.warn(`No se pudo escribir SyncEventLog: ${(err as Error).message}`);
     }
   }

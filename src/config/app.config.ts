@@ -15,6 +15,12 @@ export default registerAs('app', () => ({
   // debe invalidar solo una familia de tokens. Sin fallback: si falta,
   // los QRs no se firman y la app aborta al arranque.
   kioskoQrSecret: process.env.KIOSKO_QR_SECRET,
+  // Cuántos proxies hay DELANTE del backend (nginx en la VPS = 1). Sin esto Express toma como IP del cliente la
+  // del proxy: el límite de peticiones por IP (`ThrottlerGuard`) juntaría a TODOS los clientes del negocio en un
+  // solo cubo de 100/min, y la IP que guardan la auditoría y los emparejamientos sería siempre la de nginx.
+  // 0 en desarrollo (sin proxy); NUNCA más de los que hay: con un número mayor, un cliente falsifica
+  // `X-Forwarded-For` para esquivar el límite.
+  trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS || '0', 10),
   // API key del agente externo (Firebird). Sin fallback: si no está definida,
   // ApiKeyGuard rechaza toda petición del agente.
   agentApiKey: process.env.AGENT_API_KEY,
@@ -60,10 +66,9 @@ export default registerAs('app', () => ({
   },
   // Oct 2026: pagos por transferencia (ver PLAN-PAGOS-TRANSFERENCIA.md).
   pagos: {
-    // Cuánto tiempo son válidas las instrucciones antes de marcarse vencidas. Un abono tardío
-    // se puede verificar igual: el plazo es un aviso para el cliente, no un candado.
-    transferenciaVenceHoras: parseInt(process.env.PAGO_TRANSFERENCIA_VENCE_HORAS || '48', 10),
-    // Zona horaria con la que se escriben las fechas en correos y textos copiables. Las tiendas
+    // (Oct 2026: ya no hay plazo de vigencia. Las instrucciones no vencen solas: Tesorería las marca
+    // vencidas cuando lo decide. Se quitó `PAGO_TRANSFERENCIA_VENCE_HORAS`.)
+    // Zona horaria con la que se escriben las fechas de la conciliación y sus cortes del día. Las tiendas
     // están en husos distintos y el modelo no guarda el de cada una, así que se fija una.
     zonaHoraria: process.env.PAGOS_ZONA_HORARIA || 'America/Mexico_City',
     // Cuántas horas puede esperar una transferencia VERIFICADA a que la tienda la registre en VFP
@@ -77,6 +82,20 @@ export default registerAs('app', () => ({
       // Tope por archivo. Las apps de banco exportan PDFs de más de 5 MB rara vez.
       maxBytes: parseInt(process.env.COMPROBANTE_MAX_BYTES || String(8 * 1024 * 1024), 10),
     },
+  },
+  // Oct 2026: impresión DTF (ver PLAN-DTF.md).
+  dtf: {
+    // Tope por archivo. Un PDF de 57 × 250 cm a 300 DPI pesa decenas o cientos de MB.
+    maxBytes: parseInt(process.env.DTF_MAX_BYTES || String(300 * 1024 * 1024), 10),
+    // Tiempo y memoria del proceso hijo que mide el archivo (si se pasa, queda "no concluyente").
+    preflightTimeoutMs: parseInt(process.env.DTF_PREFLIGHT_TIMEOUT_MS || '90000', 10),
+    preflightMemoriaMb: parseInt(process.env.DTF_PREFLIGHT_MEMORIA_MB || '2048', 10),
+    // Cuánto vive un borrador (carrito) antes de expirar.
+    borradorHoras: parseInt(process.env.DTF_BORRADOR_HORAS || '24', 10),
+    // Vigencia del QR de "sube desde tu celular".
+    subidaMovilMin: parseInt(process.env.DTF_SUBIDA_MOVIL_MIN || '15', 10),
+    // Bucket PRIVADO opcional; sin él, el prefijo `dtf/` del bucket de imágenes (con prueba de privacidad).
+    bucket: process.env.AWS_S3_DTF_BUCKET || '',
   },
   smtp: {
     host: process.env.SMTP_HOST || 'localhost',

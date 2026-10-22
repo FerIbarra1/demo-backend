@@ -8,6 +8,7 @@ import {
   MonitorMostradorPuestoDto,
 } from './dto/monitor-mostrador.dto';
 import { operadorActivo } from '../pedidos/core/estacion.util';
+import { turnoCorto } from '../pedidos/core/folio-erp.util';
 
 /**
  * F16 (sep 2026): monitor de mostrador (TV de la pared).
@@ -91,7 +92,7 @@ export class MostradorMonitorService {
         // La cola es solo REVISADO: un pedido ya llamado está en EN_ATENCION,
         // así que el estado por sí solo lo excluye.
         where: whereCola,
-        select: { id: true, numeroPedido: true },
+        select: { id: true, numeroPedido: true, folioErp: true },
         // F22: "primero llegado, primero atendido" — el orden de llamada es el de
         // `ORDEN_COLA`, el MISMO de la consola y de `llamarSiguiente`.
         orderBy: ORDEN_COLA,
@@ -103,6 +104,7 @@ export class MostradorMonitorService {
         select: {
           id: true,
           numeroPedido: true,
+          folioErp: true,
           llamadoMostradorId: true,
           // F22: a qué mostrador pasa el cliente.
           llamadoMostrador: { select: { numero: true } },
@@ -124,11 +126,13 @@ export class MostradorMonitorService {
     const cola: MonitorMostradorPedidoDto[] = colaRaw.map((p) => ({
       id: p.id,
       numeroPedido: p.numeroPedido,
+      turno: turnoCorto(p.folioErp),
       mostradorNumero: null,
     }));
     const atendiendo: MonitorMostradorPedidoDto[] = atendiendoRaw.map((p) => ({
       id: p.id,
       numeroPedido: p.numeroPedido,
+      turno: turnoCorto(p.folioErp),
       mostradorNumero: p.llamadoMostrador?.numero ?? null,
     }));
 

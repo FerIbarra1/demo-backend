@@ -24,8 +24,8 @@ import { createHmac, timingSafeEqual } from 'crypto';
  *    "cliente sale a fumar y vuelve" o "tablet se apaga a mitad del
  *    flujo". Un QR de un solo uso genera falsos negativos justo
  *    cuando el cliente está frente al mostrador.
- *  - validateForStore valida tiendaId para que un QR generado en
- *    tienda A no sirva en tienda B.
+ *  - El `tiendaId` va dentro del token y quien lo verifica (`resolverPedido`) lo compara con
+ *    el de la tablet: un QR de la tienda A no sirve en la B.
  */
 const VERSION = 1;
 
@@ -77,13 +77,6 @@ export function verificarLlegoQr(token: string, secret: string): VerificarLlegoR
     return { valido: false };
   }
   return { valido: true, pedidoId: payload.pedidoId, tiendaId: payload.tiendaId };
-}
-
-/** Valida que el token pertenezca a la tienda esperada. Defensa contra
- *  QR generado en tienda A usado en tienda B. */
-export function tokenEsDeTienda(token: string, secret: string, tiendaIdEsperado: number): boolean {
-  const r = verificarLlegoQr(token, secret);
-  return r.valido && r.tiendaId === tiendaIdEsperado;
 }
 
 // Helpers base64url — buffer y string. Node 16+ tiene Buffer; evitamos

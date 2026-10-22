@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1121.0",
+    "@napi-rs/canvas": "^1.0.11",
     "@nestjs/common": "^11.1.17",
     "@nestjs/config": "^3.1.1",
     "@nestjs/core": "^11",
@@ -59,11 +60,14 @@
     "nodemailer": "^6.9.0",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.4.299",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sharp": "^0.35.5",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {

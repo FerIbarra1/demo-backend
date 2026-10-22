@@ -51,8 +51,10 @@ import {
   MOTIVOS_RECHAZO,
   MotivoRechazo,
   hayPagoVivo,
+  esperaDelPago,
   mensajeParaCaja,
   mensajeParaCliente,
+  esDomicilio,
   transferenciaDisponible,
 } from './reglas';
 import { detectarMimeComprobante } from './validar-comprobante.util';
@@ -92,9 +94,7 @@ export class PagoTransferenciaService {
     private readonly storage: ComprobanteStorageService,
   ) {
     this.cfg = {
-      zonaHoraria: this.config.get<string>('app.pagos.zonaHoraria') ?? 'America/Mexico_City',
       frontendUrl: this.config.get<string>('app.mail.frontendUrl') ?? '',
-      venceHoras: this.config.get<number>('app.pagos.transferenciaVenceHoras') ?? 48,
     };
   }
 
@@ -162,7 +162,7 @@ export class PagoTransferenciaService {
    * Solo consulta las cuentas si todo lo demás ya dio que sí.
    */
   private async puedeEmitir(
-    pedido: Pick<PedidoParaPago, 'tiendaId'>,
+    pedido: Pick<PedidoParaPago, 'tiendaId' | 'modoEntrega'>,
     disp: { disponible: boolean },
     pago: { estado: Estado } | null,
   ): Promise<{ puede: boolean; motivo: string | null }> {
@@ -170,7 +170,9 @@ export class PagoTransferenciaService {
     if (!(await this.cuentas.hayCuentaVigente(pedido.tiendaId))) {
       return {
         puede: false,
-        motivo: 'El pago por transferencia todavía no está configurado. Paga en tienda.',
+        motivo: esDomicilio(pedido.modoEntrega)
+          ? 'El pago por transferencia todavía no está configurado. La tienda se pondrá en contacto contigo.'
+          : 'El pago por transferencia todavía no está configurado. Paga en tienda.',
       };
     }
     return { puede: true, motivo: null };
@@ -212,12 +214,10 @@ export class PagoTransferenciaService {
     return {
       id: pago.id,
       estado: pago.estado,
-      mensaje: mensajeParaCliente(pago.estado),
+      mensaje: mensajeParaCliente(pago.estado, { domicilio: esDomicilio(pedido.modoEntrega) }),
       montoEsperado: pago.montoEsperado.toString(),
       referencia: pago.referencia,
       concepto: pago.concepto,
-      venceAt: pago.venceAt,
-      vencido: enCurso && pago.venceAt.getTime() < Date.now(),
       // Las instrucciones se ven mientras haya algo que pagar.
       instrucciones: enCurso ? instruccionesDeUnPago(pago, pedido, this.cfg) : null,
       comprobantes: pago.comprobantes.map((c) => ({
@@ -229,7 +229,9 @@ export class PagoTransferenciaService {
       })),
       puedeSubirComprobante:
         enCurso && pedidoPagable && pendientes.length < MAX_COMPROBANTES_PENDIENTES,
-      puedeCambiarATienda: pago.estado === Estado.PENDIENTE && pedidoPagable,
+      // A domicilio no hay tienda donde pagar: la transferencia es el único camino.
+      puedeCambiarATienda:
+        pago.estado === Estado.PENDIENTE && pedidoPagable && !esDomicilio(pedido.modoEntrega),
     };
   }
 
@@ -268,18 +270,18 @@ export class PagoTransferenciaService {
             estado: pago.estado,
             montoEsperado: pago.montoEsperado.toString(),
             referencia: pago.referencia,
-            venceAt: pago.venceAt,
-            vencido:
-              (pago.estado === Estado.PENDIENTE || pago.estado === Estado.EN_REVISION) &&
-              pago.venceAt.getTime() < Date.now(),
             requiereRevision: !!pago.requiereRevision,
             verificadoAt: pago.verificadoAt,
-            folioVfp: pedido.pendienteEnvio?.externalFolio ?? null,
-            caja: mensajeParaCaja(pago.estado, { vencido: pago.venceAt.getTime() < Date.now() }),
+            folioVfp: pedido.folioErp ?? pedido.pendienteEnvio?.externalFolio ?? null,
+            caja: mensajeParaCaja(pago.estado),
+            // Cuánto lleva esperando (solo PENDIENTE). Sin plazo: caja decide con este dato.
+            espera: esperaDelPago(pago),
             // Mismas guardas que `cambiarATienda`: solo mientras no haya comprobante (dinero en
             // camino) y el pedido siga por pagarse. La pantalla no ofrece un botón que daría 409.
             puedeCambiarATienda:
-              pago.estado === Estado.PENDIENTE && pedido.estado === EstadoPedido.PENDIENTE_PAGO,
+              pago.estado === Estado.PENDIENTE &&
+              pedido.estado === EstadoPedido.PENDIENTE_PAGO &&
+              !esDomicilio(pedido.modoEntrega),
             // Oct 2026: la cajera sube el comprobante en nombre del cliente (foto con la tablet).
             // Misma guarda que `subirComprobante`: transferencia abierta, pedido por pagarse y sin
             // tres comprobantes ya esperando revisión. El servidor lo dice; la pantalla no lo deduce.
@@ -373,7 +375,6 @@ export class PagoTransferenciaService {
               },
               referencia: String(randomInt(1_000_000, 10_000_000)),
               concepto,
-              venceAt: new Date(Date.now() + this.cfg.venceHoras * 3_600_000),
               creadoPorId: user.userId || null,
               creadoPorRol: user.rol,
             },
@@ -444,6 +445,11 @@ export class PagoTransferenciaService {
    */
   async cambiarATienda(pedidoId: number, user: UserContext, ip?: string | null) {
     const pedido = await this.pedidoAccesible(pedidoId, user);
+    if (esDomicilio(pedido.modoEntrega)) {
+      throw new BadRequestException(
+        'Un pedido a domicilio solo se paga por transferencia: no hay forma de pagarlo en tienda.',
+      );
+    }
     const pago = await pagoActivoDe(this.prisma, pedidoId);
     if (!pago) {
       throw new BadRequestException('Este pedido no tiene una transferencia en curso.');

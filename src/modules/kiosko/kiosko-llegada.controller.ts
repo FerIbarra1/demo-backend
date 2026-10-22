@@ -11,6 +11,7 @@ import {
 import { ApiTags, ApiOperation, ApiHeader, ApiBearerAuth } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { KioskoLlegadaService } from './kiosko-llegada.service';
+import { ResolverLlegadaDto } from './dto/llegada.dto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -45,7 +46,7 @@ export class KioskoLlegadaController {
   @ApiHeader({ name: 'X-Tienda-Id', required: true })
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   consultar(
-    @Body() body: { qr?: string; folio?: string },
+    @Body() body: ResolverLlegadaDto,
     @Headers('x-kiosko-id') kioskoIdHeader?: string,
     @Headers('x-kiosko-token') deviceToken?: string,
     @Headers('x-tienda-id') tiendaIdHeader?: string,
@@ -59,8 +60,9 @@ export class KioskoLlegadaController {
       kioskoId,
       kioskoTiendaId: tiendaId,
       deviceToken,
-      qr: body?.qr,
-      folio: body?.folio,
+      qr: body.qr,
+      folio: body.folio,
+      telefono4: body.telefono4,
     });
   }
 
@@ -75,7 +77,7 @@ export class KioskoLlegadaController {
   @ApiHeader({ name: 'X-Tienda-Id', required: true })
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async confirmar(
-    @Body() body: { qr?: string; folio?: string },
+    @Body() body: ResolverLlegadaDto,
     @Headers('x-kiosko-id') kioskoIdHeader?: string,
     @Headers('x-kiosko-token') deviceToken?: string,
     @Headers('x-tienda-id') tiendaIdHeader?: string,
@@ -88,15 +90,21 @@ export class KioskoLlegadaController {
     // Obtenemos el nombre del kiosko para el snapshot `llegadaAnunciadaPor`.
     const kiosko = await this.prisma.kiosko.findUnique({
       where: { id: kioskoId },
-      select: { nombre: true },
+      select: { nombre: true, ubicacion: true },
     });
     return this.service.confirmar({
       kioskoId,
       kioskoTiendaId: tiendaId,
-      kioskoNombre: kiosko?.nombre ?? 'Kiosko',
+      // "Kiosko 2 · Entrada": el mostrador ve de qué tablet fue el aviso.
+      kioskoNombre: kiosko
+        ? kiosko.ubicacion
+          ? `${kiosko.nombre} · ${kiosko.ubicacion}`
+          : kiosko.nombre
+        : 'Kiosko',
       deviceToken,
-      qr: body?.qr,
-      folio: body?.folio,
+      qr: body.qr,
+      folio: body.folio,
+      telefono4: body.telefono4,
     });
   }
 }

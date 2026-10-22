@@ -197,7 +197,36 @@ describe('MostradorMonitorService — la TV pública solo recibe folio y número
     }
   });
 
-  it('cada folio sale como { id, numeroPedido, mostradorNumero } y nada más', async () => {
+  it('con folio del Sistema Comercial la TV recibe SOLO los últimos 4 dígitos (el folio completo no viaja)', async () => {
+    const { svc, findMany } = crearServicio([
+      {
+        id: 2,
+        numero: 2,
+        operador: { nombre: 'Ana', apellido: null, lastLogin: hace(1), ultimoHeartbeat: hace(1) },
+      },
+    ]);
+    findMany.mockImplementation(async (args: any) =>
+      args.where.estado === EstadoPedido.EN_ATENCION
+        ? [
+            {
+              id: 10,
+              numeroPedido: 'PD-10',
+              folioErp: '0000152573',
+              llamadoMostradorId: 2,
+              llamadoMostrador: { numero: 2 },
+            },
+          ]
+        : [{ id: 11, numeroPedido: 'PD-11', folioErp: '0000000611' }],
+    );
+    const r = await svc.obtenerMonitor(5);
+    expect(r.cola[0].turno).toBe('0611');
+    expect(r.mostradores[0].atendiendo[0].turno).toBe('2573');
+    const crudo = JSON.stringify(r);
+    expect(crudo).not.toContain('0000152573');
+    expect(crudo).not.toContain('folioErp');
+  });
+
+  it('cada folio sale como { id, numeroPedido, turno, mostradorNumero } y nada más', async () => {
     const { svc, findMany } = crearServicio([
       {
         id: 2,
@@ -220,10 +249,16 @@ describe('MostradorMonitorService — la TV pública solo recibe folio y número
 
     const r = await svc.obtenerMonitor(5);
 
-    expect(r.cola[0]).toEqual({ id: 11, numeroPedido: 'PD-11', mostradorNumero: null });
+    expect(r.cola[0]).toEqual({
+      id: 11,
+      numeroPedido: 'PD-11',
+      turno: null,
+      mostradorNumero: null,
+    });
     expect(r.mostradores[0].atendiendo[0]).toEqual({
       id: 10,
       numeroPedido: 'PD-10',
+      turno: null,
       mostradorNumero: 2,
     });
     expect(Object.keys(r).sort()).toEqual(

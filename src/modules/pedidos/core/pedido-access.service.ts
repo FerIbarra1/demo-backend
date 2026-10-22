@@ -1,6 +1,12 @@
-import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  ForbiddenException,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { RolUsuario, Prisma, EstadoPedido } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { interpretarFolio } from './folio-erp.util';
 
 /**
  * Shape mínimo del usuario que viaja en `request.user` (lo construye JwtAuthGuard + JwtStrategy).
@@ -19,7 +25,7 @@ export interface PedidoAccessOptions {
    */
   crossTiendaRoles?: RolUsuario[];
   /**
-   * Si true, el bodeguero sólo puede acceder si el pedido está asignado a él.
+   * Si true, el bodeguero solo puede acceder si el pedido está asignado a él.
    * Aplica solo cuando el rol es BODEGA.
    */
   requiereAsignacionBodega?: boolean;
@@ -42,8 +48,8 @@ export type PedidoParaVerificar = Prisma.PedidoGetPayload<{
  *
  * Reglas:
  * - ADMIN: pasa siempre.
- * - CLIENTE: sólo puede ver/operar pedidos donde `pedido.usuarioId === user.userId`.
- * - BODEGA / CAJERO / BODEGA_MONITOR / MOSTRADOR / VENTAS: sólo pueden
+ * - CLIENTE: solo puede ver/operar pedidos donde `pedido.usuarioId === user.userId`.
+ * - BODEGA / CAJERO / BODEGA_MONITOR / MOSTRADOR / VENTAS: solo pueden
  *   ver/operar pedidos de su tienda.
  *   Si `requiereAsignacionBodega`, BODEGA también debe tener
  *   `pedido.asignadoAId === user.userId`.
@@ -134,9 +140,16 @@ export class PedidoAccessService {
   }
 
   /**
-   * Busca un pedido por folio (VFP externalFolio o numeroPedido interno) y
-   * valida que el usuario tenga derecho a verlo. Lanza 404 si no existe y
+   * Busca un pedido por lo que el empleado teclea o escanea y valida que tenga derecho a verlo. Lanza 404 si no existe y
    * 403 si el pedido es de otra tienda.
+   *
+   * Oct 2026 (B2): acepta el FOLIO del Sistema Comercial en cualquiera de sus formas —`HMO-0000152573`, `0000152573` (lo
+   * que lleva el QR para el lector de VFP) o `152573` (como lo dice la gente)— además del número interno (`PD-…`) y el
+   * folio que guardó la bandeja de envío.
+   *
+   * **El folio solo identifica un pedido junto con su tienda**: el consecutivo es por tienda y el mismo número existe en
+   * cada una. Por eso se busca primero DENTRO de la tienda del empleado (sale del JWT, nunca de lo que escribió); un ADMIN,
+   * que no trae tienda, ve la ambigüedad si el folio existe en varias y no escribió la serie.
    */
   async buscarPorFolio(
     folio: string,
@@ -152,17 +165,50 @@ export class PedidoAccessService {
       throw new NotFoundException('Folio requerido');
     }
 
-    const pedido = await this.prisma.pedido.findFirst({
-      where: {
-        OR: [
-          { numeroPedido: { equals: f, mode: 'insensitive' } },
-          { pendienteEnvio: { externalFolio: { equals: f, mode: 'insensitive' } } },
-        ],
-      },
-      include: {
-        pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
-      },
-    });
+    const incluir = {
+      pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
+    } as const;
+
+    // 1) El folio del Sistema Comercial, acotado a la tienda del empleado (o a la serie tecleada).
+    const parseado = interpretarFolio(f);
+    let pedido = null;
+    // Un empleado sin tienda (que no es ADMIN) no busca por folio: sin tienda el número no identifica nada, y `validar`
+    // lo rechaza (403) más abajo, como siempre.
+    if (parseado && (user.rol === RolUsuario.ADMIN || user.tiendaId)) {
+      const dondeFolio: Prisma.PedidoWhereInput = { folioErp: parseado.folio };
+      if (user.tiendaId && user.rol !== RolUsuario.ADMIN) {
+        dondeFolio.tiendaId = user.tiendaId;
+      } else if (parseado.serie) {
+        dondeFolio.tienda = { serie: parseado.serie };
+      }
+      const candidatos = await this.prisma.pedido.findMany({
+        where: dondeFolio,
+        include: { ...incluir, tienda: { select: { serie: true } } },
+        take: 3,
+      });
+      if (candidatos.length > 1) {
+        const series = candidatos.map((c) => c.tienda?.serie).filter(Boolean);
+        throw new BadRequestException(
+          'Ese folio existe en varias tiendas' +
+            (series.length ? ` (${series.join(', ')})` : '') +
+            ': escribe también la serie, por ejemplo HMO-0000152573.',
+        );
+      }
+      pedido = candidatos[0] ?? null;
+    }
+
+    // 2) El número interno (PD-…) y el folio que guardó la bandeja de envío (como siempre).
+    if (!pedido) {
+      pedido = await this.prisma.pedido.findFirst({
+        where: {
+          OR: [
+            { numeroPedido: { equals: f, mode: 'insensitive' } },
+            { pendienteEnvio: { externalFolio: { equals: f, mode: 'insensitive' } } },
+          ],
+        },
+        include: incluir,
+      });
+    }
 
     if (!pedido) {
       throw new NotFoundException('Pedido no encontrado');

@@ -14,6 +14,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
 import { EstacionGuard, RequiereEstacion } from '../../common/guards/estacion.guard';
+import { ApiTiendaConsola, TiendaConsola, TiendaConsolaGuard } from '../../common/tienda-consola';
 
 /**
  * Consola del Mostrador (jul 2026).
@@ -34,7 +35,7 @@ import { EstacionGuard, RequiereEstacion } from '../../common/guards/estacion.gu
  * fricción operativa (el cliente llega y el primer mostrador libre lo atiende).
  */
 @ApiTags('Pedidos - Mostrador')
-@UseGuards(EstacionGuard)
+@UseGuards(EstacionGuard, TiendaConsolaGuard)
 @Controller('pedidos/mostrador')
 @Roles(RolUsuario.MOSTRADOR, RolUsuario.ADMIN)
 @ApiBearerAuth()
@@ -58,17 +59,14 @@ export class MostradorController {
       'F16: pedidos en REVISADO esperando revisión con el cliente. ' +
       'Kiosko siempre visible; web solo si el cliente avisó llegada.',
   })
-  @ApiQuery({ name: 'tiendaId', required: false, type: Number })
+  @ApiTiendaConsola()
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
   async listarCola(
-    @CurrentUser() user: any,
-    @Query('tiendaId') tiendaId?: string,
+    @TiendaConsola() tienda: number,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
   ) {
-    const tienda =
-      user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
     return this.mostradorQuery.obtenerCola(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
@@ -80,7 +78,7 @@ export class MostradorController {
   @ApiOperation({
     summary: 'Pedidos de la tienda del usuario en PAID o SHIPPED, listos para entregar',
   })
-  @ApiQuery({ name: 'tiendaId', required: false, type: Number })
+  @ApiTiendaConsola()
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
   @ApiQuery({
@@ -90,15 +88,11 @@ export class MostradorController {
     description: 'esperando (default): avisos de llegada primero. pago: solo FIFO por fechaPago.',
   })
   async listarListos(
-    @CurrentUser() user: any,
-    @Query('tiendaId') tiendaId?: string,
+    @TiendaConsola() tienda: number,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
     @Query('orden') orden?: 'esperando' | 'pago',
   ) {
-    // ADMIN puede ver todas las tiendas; el resto, sólo la suya.
-    const tienda =
-      user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
     return this.mostradorQuery.obtenerPedidosListos(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
@@ -123,7 +117,7 @@ export class MostradorController {
       'aviso descartado). Con antigüedad y marca de vencido. El operador los identifica ' +
       'y marca la llegada con POST :id/marcar-llegada, o cancela los vencidos.',
   })
-  @ApiQuery({ name: 'tiendaId', required: false, type: Number })
+  @ApiTiendaConsola()
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
   @ApiQuery({
@@ -133,14 +127,11 @@ export class MostradorController {
     description: 'vencidos: solo los que ya pasaron el plazo de espera.',
   })
   async listarSinAviso(
-    @CurrentUser() user: any,
-    @Query('tiendaId') tiendaId?: string,
+    @TiendaConsola() tienda: number,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
     @Query('filtro') filtro?: string,
   ) {
-    const tienda =
-      user.rol === RolUsuario.ADMIN && tiendaId ? parseInt(tiendaId, 10) : user.tiendaId;
     return this.mostradorQuery.obtenerSinAviso(
       tienda,
       pagina ? parseInt(pagina, 10) : 1,
@@ -182,7 +173,12 @@ export class MostradorController {
       'Oct 2026: busca en TODOS los estados por folio interno, folio de VFP, ' +
       'nombre o correo. Paginado.',
   })
-  async buscar(@Query() query: BuscarPedidoDto, @CurrentUser() user: any) {
+  @ApiTiendaConsola()
+  async buscar(
+    @Query() query: BuscarPedidoDto,
+    @CurrentUser() user: any,
+    @TiendaConsola() tienda: number,
+  ) {
     if (!query.q || query.q.trim().length < 2) {
       return {
         data: [],
@@ -192,7 +188,7 @@ export class MostradorController {
     return this.mostradorQuery.buscarPedidos(
       query.q.trim(),
       user,
-      user.tiendaId,
+      tienda,
       query.pagina ?? 1,
       query.limite ?? 20,
     );
@@ -251,8 +247,10 @@ export class MostradorController {
       'Oct 2026: manda a llamar al primer pedido de la cola de revisión ' +
       '(FIFO). Espejo del `llamar-siguiente` del cajero.',
   })
-  async llamarSiguiente(@CurrentUser() user: any) {
-    return this.mostradorService.llamarSiguiente(user);
+  @ApiTiendaConsola()
+  async llamarSiguiente(@CurrentUser() user: any, @TiendaConsola() tienda: number) {
+    // Elige de la cola de UNA tienda: la del empleado (token) o la que el ADMIN está operando.
+    return this.mostradorService.llamarSiguiente(user, tienda);
   }
 
   @Post(':id/no-se-presento')

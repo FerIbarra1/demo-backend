@@ -23,6 +23,8 @@
     "checkpointBatch": 50,
     "queueRetentionDays": 7,
     "expirationHours": 24,
+    "$conciliacion": "Cada cuántos ms el agente COMPARA los pedidos de la nube contra el Sistema Comercial (conciliación activa). 0 la apaga.",
+    "conciliacionIntervalMs": 600000,
     "logLevel": "info"
   },
   "service": {
@@ -30,7 +32,7 @@
     "description": "Sincronizacion bidireccional Firebird &lt;-&gt; PlayeryTees Cloud"
   },
   "pedidos": {
-    "$comment": "Valores al bajar pedidos a Firebird. Ajusta por instalacion.",
+    "$comment": "Valores al bajar pedidos a Firebird. Ajusta por instalacion. OJO: vendedorId/usuarioId se escriben en CADA pedido web; en la BD real 1/1 son personas (JUAN PACHECO / FRANCISCO) y los reportes de VFP les atribuyen todo lo web. Usa un vendedor y un usuario propios de la web.",
     "vendedorId": 1,
     "usuarioId": 1,
     "lista": "1"

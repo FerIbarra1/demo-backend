@@ -16,6 +16,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { Redis } from 'ioredis';
 import { RolUsuario } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { leerTiendaElegida } from '../../common/tienda-consola';
 
 /**
  * Gateway de Socket.IO. Namespace por defecto (raíz).
@@ -27,6 +28,9 @@ import { PrismaService } from '../../prisma/prisma.service';
  *     tienda-{tiendaId}                   si tiene tienda (no admin sin tienda)
  *     admin:all                           si rol === ADMIN
  *     tesoreria                           si rol === TESORERIA o ADMIN
+ * - El ADMIN no tiene tienda: para recibir los eventos de la que está operando manda
+ *   `tienda.mirar` ({ tiendaId }) y el server lo une a `tienda-{id}` (UNA a la vez; al cambiar sale de
+ *   la anterior). `tienda.dejar-de-mirar` lo saca. PLAN-ADMIN-MULTITIENDA F3.
  * - El cliente puede hacer `socket.emit('joinPedido', pedidoId)` y el server lo
  *   une a `pedido-{id}` (validando que el usuario tenga derecho: dueño, asignado,
  *   o admin). Útil para actualizaciones de un pedido concreto (surtido, mensajes).
@@ -37,6 +41,8 @@ interface SocketData {
   rol: RolUsuario;
   tiendaId?: number;
   nombre: string;
+  /** Solo ADMIN: la tienda de cuyo room está mirando AHORA (`tienda.mirar`). Una a la vez. */
+  tiendaMirada?: number;
 }
 
 interface JwtPayload {
@@ -167,6 +173,54 @@ export class RealtimeGateway
   }
 
   /**
+   * PLAN-ADMIN-MULTITIENDA F3: el ADMIN pide MIRAR la tienda que opera. Es la puerta a los eventos
+   * operativos de esa tienda, así que se valida: solo un ADMIN (re-comprobado en la BD, no en el token: un
+   * token viejo de alguien degradado no vale), con un id bien formado y de una tienda que exista. Una a la
+   * vez: al cambiar sale del room anterior, para no recibir eventos de dos tiendas mezclados. Responde por
+   * ack `{ ok, tiendaId }` (el cliente deja de sondear solo cuando lo recibe).
+   */
+  @SubscribeMessage('tienda.mirar')
+  async handleMirarTienda(
+    @MessageBody() body: { tiendaId?: unknown } | undefined,
+    @ConnectedSocket() client: Socket,
+  ): Promise<{ ok: boolean; tiendaId?: number; error?: string }> {
+    const data = client.data as SocketData | undefined;
+    if (!data || data.rol !== RolUsuario.ADMIN || !(await this.sigueSiendoAdmin(data.userId))) {
+      return { ok: false, error: 'Solo un administrador puede mirar una tienda.' };
+    }
+    const tiendaId = leerTiendaElegida(body?.tiendaId);
+    if (!tiendaId) return { ok: false, error: 'Tienda inválida.' };
+    if (!(await this.prisma.tienda.count({ where: { id: tiendaId } }))) {
+      return { ok: false, error: 'La tienda no existe.' };
+    }
+    if (data.tiendaMirada === tiendaId) return { ok: true, tiendaId };
+
+    if (data.tiendaMirada) await client.leave(`tienda-${data.tiendaMirada}`);
+    await client.join(`tienda-${tiendaId}`);
+    data.tiendaMirada = tiendaId;
+    this.logger.debug(`WS ${client.id}: admin ${data.userId} mira tienda-${tiendaId}`);
+    return { ok: true, tiendaId };
+  }
+
+  @SubscribeMessage('tienda.dejar-de-mirar')
+  async handleDejarDeMirarTienda(@ConnectedSocket() client: Socket): Promise<{ ok: boolean }> {
+    const data = client.data as SocketData | undefined;
+    if (data?.tiendaMirada) {
+      await client.leave(`tienda-${data.tiendaMirada}`);
+      data.tiendaMirada = undefined;
+    }
+    return { ok: true };
+  }
+
+  private async sigueSiendoAdmin(userId: number): Promise<boolean> {
+    const u = await this.prisma.usuario.findUnique({
+      where: { id: userId },
+      select: { rol: true, activo: true, deletedAt: true },
+    });
+    return !!u && u.rol === RolUsuario.ADMIN && u.activo && u.deletedAt === null;
+  }
+
+  /**
    * Reusado por `joinPedido`. Valida que el caller tenga
    * derecho sobre el pedido: dueño, operador de la tienda, o admin global.
    */
@@ -185,7 +239,7 @@ export class RealtimeGateway
 
     const esDueno = pedido.usuarioId === data.userId;
 
-    // CLIENTE: sólo su propio pedido. Antes bastaba con que la tienda
+    // CLIENTE: solo su propio pedido. Antes bastaba con que la tienda
     // coincidiera, y como un CLIENTE también lleva `tiendaId` en el JWT
     // (`jwt.strategy.ts`), cualquier cliente podía unirse al room de un pedido
     // ajeno de su misma tienda y recibir en vivo `mensaje.creado`,

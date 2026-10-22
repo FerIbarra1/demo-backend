@@ -56,6 +56,7 @@ function crearTx(items: ItemFalso[]) {
   const estado = items.map((i) => ({ ...i }));
 
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findMany: jest.fn(async () => estado),
       update: jest.fn(async ({ where, data }: any) => {

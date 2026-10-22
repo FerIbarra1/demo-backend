@@ -33,6 +33,9 @@ export class MostradoresOperadorController {
   @Get('disponibles')
   @ApiOperation({ summary: 'Listar todos los mostradores de la tienda del operador' })
   disponibles(@CurrentUser() user: any) {
+    // El ADMIN no trae tienda y no ocupa mostradores (D3): sin esto llegaba `undefined` a Prisma y su
+    // consola de mostrador daba 500 al abrir el selector. Lo mismo que ya hace `miMostrador`.
+    if (!user.tiendaId) return [];
     return this.service.listarPorTienda(user.tiendaId);
   }
 

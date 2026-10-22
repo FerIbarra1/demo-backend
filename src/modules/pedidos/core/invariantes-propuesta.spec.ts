@@ -87,6 +87,7 @@ function crearPropuestaServiceParaEnvio(items: any[], opts: { pedidoEncontrado?:
     pedido: {
       findUnique: jest.fn(async () => pedido),
     },
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findMany: jest.fn(async () => items),
     },
@@ -214,7 +215,7 @@ describe('Fase 2 — enviarPropuesta recibe el CÁLCULO del servidor, no líneas
   it('BODEGA no envía propuestas: la suya la arma el sistema al cerrar el surtido', async () => {
     const { enviar } = crearPropuestaServiceParaEnvio([], { pedidoEncontrado: enAsesoria });
     await expect(enviar(1, { calculo: calculo() }, usuarioBodega)).rejects.toThrow(
-      /Sólo el asesor de ventas/i,
+      /Solo el asesor de ventas/i,
     );
   });
 
@@ -289,6 +290,7 @@ describe('T3 — H2 red: aprobarPropuestaBodega vuelve a EN_REVISION si hay PEND
           return null;
         }),
       },
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: itemPedidoMock,
       pedidoPropuesta: pedidoPropuestaMock,
       // La red de seguridad corre las cancelaciones dentro de `$transaction`.
@@ -300,6 +302,7 @@ describe('T3 — H2 red: aprobarPropuestaBodega vuelve a EN_REVISION si hay PEND
       // sumando en `subtotal`/`total`), y ese recálculo escribe en el pedido.
       $transaction: jest.fn(async (fn: (tx: any) => unknown) => {
         const tx = {
+          pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
           itemPedido: itemPedidoMock,
           pedidoPropuesta: pedidoPropuestaMock,
           pedido: { update: jest.fn(async () => ({})) },
@@ -354,6 +357,7 @@ describe('T4 — H3: ventas no avanza con 0 items activos', () => {
     // Partimos de 2 items, la propuesta dice "no-disponible" para ambos
     // y no agrega nada → 0 items activos.
     const prisma = {
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         findUnique: jest.fn(async ({ where }: any) => ({
           id: where.id,
@@ -445,6 +449,7 @@ describe('T5/T6 — H4: quedanPendientes refleja items no-COMPLETO residuales', 
     ];
 
     const prisma = {
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         findUnique: jest.fn(async ({ where }: any) => {
           const i = itemsActuales.find((x) => x.id === where.id);
@@ -518,6 +523,7 @@ describe('T7/T8 — H5: marcarItem rechaza cantidades inválidas y cancelados', 
           tiendaId: 5,
         })),
       },
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         findUnique: jest.fn(async ({ where }: any) =>
           where.id === itemData.id ? { ...itemData } : null,
@@ -611,6 +617,7 @@ describe('T9 — H6: mostrador `no-disponible` limpia estadoSurtido', () => {
     const updates: Array<{ where: any; data: any }> = [];
 
     const tx = {
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         update: jest.fn(async ({ where, data }: any) => {
           updates.push({ where, data });
@@ -657,6 +664,7 @@ describe('T10 — H7: aplicarCambiosFisicos (helper unificado)', () => {
   it('NO_DISPONIBLE cancela y limpia estado y cantidad', async () => {
     const updates: any[] = [];
     const tx = {
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         update: jest.fn(async ({ where, data }: any) => {
           updates.push({ where, data });
@@ -699,6 +707,7 @@ describe('T10 — H7: aplicarCambiosFisicos (helper unificado)', () => {
   it('PARCIAL ajusta cantidad y subtotal a cantidadSurtida, deja estadoSurtido:COMPLETO', async () => {
     const updates: any[] = [];
     const tx = {
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         update: jest.fn(async ({ where, data }: any) => {
           updates.push({ where, data });
@@ -744,6 +753,7 @@ describe('T10 — H7: aplicarCambiosFisicos (helper unificado)', () => {
   it('PARCIAL con cantidadSurtida=0 cancela (no deja activo con cantidad 0)', async () => {
     const updates: any[] = [];
     const tx = {
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         update: jest.fn(async ({ where, data }: any) => {
           updates.push({ where, data });
@@ -789,6 +799,7 @@ describe('T10 — H7: aplicarCambiosFisicos (helper unificado)', () => {
     // produce cambios.
     const updates: any[] = [];
     const tx = {
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: {
         update: jest.fn(async ({ where, data }: any) => {
           updates.push({ where, data });
@@ -867,10 +878,12 @@ describe('red de seguridad: una línea que se subió y bodega no alcanzó a veri
             : null,
         ),
       },
+      pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
       itemPedido: itemPedidoMock,
       pedidoPropuesta: pedidoPropuestaMock,
       $transaction: jest.fn(async (fn: (tx: any) => unknown) =>
         fn({
+          pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
           itemPedido: itemPedidoMock,
           pedidoPropuesta: pedidoPropuestaMock,
           pedido: { update: jest.fn(async () => ({})) },

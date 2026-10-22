@@ -6,12 +6,17 @@ import {
   ConflictException,
   ForbiddenException,
   UnauthorizedException,
+  HttpException,
+  HttpStatus,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 import { KioskoService } from './kiosko.service';
+import { LimiteIntentosLlegada, telefonoCoincide } from './kiosko-llegada-intentos';
+import { etiquetaDelPedido, interpretarFolio } from '../pedidos/core/folio-erp.util';
 import { RealtimeService } from '../realtime/realtime.service';
-import { firmarLlegoQr, verificarLlegoQr, tokenEsDeTienda } from '../pedidos/core/qr-llegada.util';
+import { firmarLlegoQr, verificarLlegoQr } from '../pedidos/core/qr-llegada.util';
 import { motivoNoAvisable, evaluarAviso } from '../pedidos/core/llegada-aviso.util';
 import { clientePresenteEnTienda, whereAusente } from '../pedidos/core/presencia.util';
 import { estadoPedidoLabel } from '../mail/estado-labels';
@@ -50,6 +55,16 @@ export interface ReaccionLlegada {
 }
 
 /**
+ * Lo que necesitan las pantallas del kiosko de un pedido: la tienda (serie del folio), las líneas (el conteo de
+ * artículos) y el teléfono del usuario (segundo factor del folio tecleado, ver `resolverPorFolioTecleado`).
+ */
+const INCLUDE_LLEGADA = {
+  tienda: { select: { nombre: true, serie: true } },
+  items: { select: { id: true } },
+  usuario: { select: { telefono: true } },
+} satisfies Prisma.PedidoInclude;
+
+/**
  * PR7 (kiosko-profesional): flujo "avisar llegada a tienda".
  *
  * El cliente puede haber pedido desde web/app y llegar a recoger sin
@@ -69,8 +84,10 @@ export interface ReaccionLlegada {
  *    llegada es destruir el caso de uso ("llegó sin celular"). La
  *    seguridad está en: kioskoId + deviceToken validados; lookup
  *    acotado a la tienda del kiosko; rate limit por IP; idempotencia
- *    por pedido; segundo factor (últimos 4 del teléfono) recomendado
- *    en producción pero fuera de este MVP.
+ *    por pedido; y (B3, oct 2026) un segundo factor para todo folio
+ *    TECLEADO: los últimos 4 dígitos del teléfono del pedido, con un tope
+ *    de intentos por folio y por kiosko (`LimiteIntentosLlegada`). El QR
+ *    firmado no lo necesita: la firma es la prueba.
  *  - NO se agrega `un estado al enum. La llegada es ortogonal al
  *    ciclo de vida del pedido (puede ocurrir en EN_REVISION,
  *    PENDIENTE_PAGO, PAID, SHIPPED). En su lugar, columnas.
@@ -90,6 +107,9 @@ export class KioskoLlegadaService {
     private readonly kioskoService: KioskoService,
     private readonly realtime: RealtimeService,
     private readonly config: ConfigService,
+    // `@Optional()`: no es un provider (es estado de proceso, no una dependencia); Nest inyecta `undefined` y
+    // aplica el valor por defecto. Los specs lo pasan con un reloj falso.
+    @Optional() private readonly intentos: LimiteIntentosLlegada = new LimiteIntentosLlegada(),
   ) {}
 
   private getSecret(): string {
@@ -110,6 +130,8 @@ export class KioskoLlegadaService {
     deviceToken: string;
     qr?: string;
     folio?: string;
+    /** Últimos 4 dígitos del teléfono: obligatorios cuando se manda `folio` (ver `resolverPedido`). */
+    telefono4?: string;
   }): Promise<{
     pedidoId: number;
     folioVisible: string;
@@ -141,6 +163,7 @@ export class KioskoLlegadaService {
     deviceToken: string;
     qr?: string;
     folio?: string;
+    telefono4?: string;
   }): Promise<{
     ok: true;
     pedidoId: number;
@@ -200,7 +223,7 @@ export class KioskoLlegadaService {
   async confirmarDesdeMostrador(pedidoId: number, usuario: UserContext) {
     const completo = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      include: { tienda: { select: { nombre: true } } },
+      include: { tienda: { select: { nombre: true, serie: true } } },
     });
     if (!completo) throw new NotFoundException('Pedido no encontrado');
 
@@ -239,7 +262,7 @@ export class KioskoLlegadaService {
           pedidoId,
           estadoAnterior: completo.estado,
           estadoNuevo: completo.estado,
-          observacion: `Llegada marcada por ${usuario.nombre} desde mostrador (pedido en ${completo.estado})`,
+          observacion: `Llegada marcada por ${usuario.nombre} desde mostrador`,
           usuarioId: usuario.userId,
           usuarioNombre: usuario.nombre,
         },
@@ -262,7 +285,7 @@ export class KioskoLlegadaService {
         this.realtime.emitToTienda(completo.tiendaId, 'pedido.llegada-anunciada', {
           pedidoId,
           numeroPedido: completo.numeroPedido,
-          folioVisible: completo.numeroPedido,
+          folioVisible: etiquetaDelPedido(completo, completo.tienda?.serie),
           clienteNombre: completo.clienteNombre,
           estado: completo.estado,
           canal: CanalLlegada.MOSTRADOR,
@@ -280,7 +303,7 @@ export class KioskoLlegadaService {
     return {
       ok: true as const,
       pedidoId,
-      folioVisible: completo.numeroPedido,
+      folioVisible: etiquetaDelPedido(completo, completo.tienda?.serie),
       reanudado: resultado.reanudado,
       esperandoDesdeMin: resultado.esperandoDesdeMin,
       /**
@@ -344,6 +367,7 @@ export class KioskoLlegadaService {
       id: number;
       tiendaId: number;
       numeroPedido: string;
+      folioErp?: string | null;
       clienteNombre: string;
       estado: EstadoPedido;
       canalOrigen: string;
@@ -352,7 +376,7 @@ export class KioskoLlegadaService {
       llegadaDescartadaAt: Date | null;
       llegadaDescartes: number;
       presenteDesdeAt: Date | null;
-      tienda?: { nombre: string };
+      tienda?: { nombre: string; serie?: string | null };
     },
     opts: {
       canal: CanalLlegada;
@@ -416,7 +440,7 @@ export class KioskoLlegadaService {
     this.realtime.emitToTienda(pedido.tiendaId, 'pedido.llegada-anunciada', {
       pedidoId: pedido.id,
       numeroPedido: pedido.numeroPedido,
-      folioVisible: pedido.numeroPedido,
+      folioVisible: etiquetaDelPedido(pedido, pedido.tienda?.serie),
       clienteNombre: pedido.clienteNombre,
       estado: pedido.estado,
       kioskoId: opts.kioskoId,
@@ -484,7 +508,7 @@ export class KioskoLlegadaService {
   async confirmarDesdeCliente(pedidoId: number) {
     const pedido = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      include: { tienda: { select: { nombre: true } } },
+      include: { tienda: { select: { nombre: true, serie: true } } },
     });
     if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
@@ -497,7 +521,7 @@ export class KioskoLlegadaService {
     return {
       ok: true as const,
       pedidoId: pedido.id,
-      folioVisible: pedido.numeroPedido,
+      folioVisible: etiquetaDelPedido(pedido, pedido.tienda?.serie),
       mensaje: !resultado.reanudado
         ? 'Ya avisamos al equipo. Te atenderemos pronto.'
         : this.mensajeParaEstado(pedido.estado),
@@ -509,8 +533,17 @@ export class KioskoLlegadaService {
   /**
    * Valida que el QR/folio resuelve a un pedido. Helper privado.
    * Aplica la lógica de "pertenece a la tienda del kiosko".
+   *
+   * - QR firmado: la firma es la prueba, no pide nada más.
+   * - Folio tecleado: exige el segundo factor (B3), ver `resolverPorFolioTecleado`.
    */
-  private async resolverPedido(input: { kioskoTiendaId: number; qr?: string; folio?: string }) {
+  private async resolverPedido(input: {
+    kioskoId: number;
+    kioskoTiendaId: number;
+    qr?: string;
+    folio?: string;
+    telefono4?: string;
+  }) {
     if (input.qr) {
       const r = verificarLlegoQr(input.qr, this.getSecret());
       if (!r.valido || !r.pedidoId) {
@@ -530,10 +563,7 @@ export class KioskoLlegadaService {
         // `items` es necesario: `toConsultarDto` cuenta los artículos para
         // el resumen de "¿es este tu pedido?". Sin el include, el conteo
         // caía al fallback y la pantalla mostraba "? artículos".
-        include: {
-          tienda: { select: { nombre: true } },
-          items: { select: { id: true } },
-        },
+        include: INCLUDE_LLEGADA,
       });
       if (!pedido) {
         throw new NotFoundException({
@@ -545,48 +575,111 @@ export class KioskoLlegadaService {
     }
 
     if (input.folio) {
-      const folio = input.folio.trim();
-      if (folio.length < 4) {
-        throw new BadRequestException('Folio demasiado corto');
-      }
-      // Buscar primero por numeroPedido (PD-2026-000123 es @unique).
-      let pedido = await this.prisma.pedido.findFirst({
-        where: {
-          numeroPedido: folio,
-          tiendaId: input.kioskoTiendaId,
-        },
-        include: {
-          tienda: { select: { nombre: true } },
-          items: { select: { id: true } },
-        },
-      });
-      if (!pedido) {
-        // Fallback: externalFolio (folio de Firebird, asignado tras
-        // el ACK del agente). El índice parcial se creó en esta misma
-        // migración.
-        const pendiente = await this.prisma.pedidoPendienteEnvio.findFirst({
-          where: { externalFolio: folio, pedido: { tiendaId: input.kioskoTiendaId } },
-          include: {
-            pedido: {
-              include: {
-                tienda: { select: { nombre: true } },
-                items: { select: { id: true } },
-              },
-            },
-          },
-        });
-        pedido = pendiente?.pedido ?? null;
-      }
-      if (!pedido) {
-        throw new NotFoundException({
-          codigo: 'PEDIDO_NO_ENCONTRADO',
-          message: 'No encontramos ese folio. Revísalo en tu recibo o correo.',
-        });
-      }
-      return pedido;
+      return this.resolverPorFolioTecleado({ ...input, folio: input.folio });
     }
 
     throw new BadRequestException('Se requiere qr o folio');
+  }
+
+  /**
+   * Oct 2026 (B3): un folio TECLEADO identifica el pedido SOLO junto con los últimos 4 dígitos del teléfono.
+   *
+   * Por qué: el folio del Sistema Comercial es consecutivo y público (sale en el ticket y, sus últimos 4 dígitos,
+   * en la TV de pared). Con solo el folio, cualquiera frente a la tablet podía avisar la llegada de un pedido
+   * ajeno y ver su nombre, artículos y total. B2 lo dejó dicho: "sigue sin segundo factor".
+   *
+   * Reglas:
+   *  - Vale el folio completo con serie (`HMO-0000152573`), los 10 dígitos, o sin ceros (`152573`), y el
+   *    `PD-…` interno. Antes (B2) un número corto NO se rellenaba porque era el único freno a que el turno de la
+   *    TV resolviera OTRO pedido; ahora, aunque lo resuelva, sin el teléfono no pasa.
+   *  - NINGÚN dato sale antes de verificar, y "el folio no existe", "el teléfono no coincide" y "el pedido no
+   *    tiene teléfono" dan la MISMA respuesta: si no, el mensaje sería un oráculo de qué folios existen.
+   *  - Tope de fallos por folio y por kiosko (`LimiteIntentosLlegada`): pasado el tope, 429 y a mostrador.
+   */
+  private async resolverPorFolioTecleado(input: {
+    kioskoId: number;
+    kioskoTiendaId: number;
+    folio: string;
+    telefono4?: string;
+  }) {
+    const folio = input.folio.trim();
+    if (folio.length < 4) {
+      throw new BadRequestException('Folio demasiado corto');
+    }
+    if (!input.telefono4 || !/^\d{4}$/.test(input.telefono4)) {
+      throw new BadRequestException({
+        codigo: 'FALTA_TELEFONO',
+        message: 'Escribe los últimos 4 dígitos del teléfono con el que hiciste el pedido.',
+      });
+    }
+
+    const f = interpretarFolio(folio);
+    // La clave del contador es el folio NORMALIZADO que teclearon, no el pedido que resolvió: "no existe" y
+    // "teléfono distinto" deben contar igual. La serie no entra: solo acota, y variarla no debe reiniciar el tope.
+    const clave = f ? f.folio : folio.toUpperCase();
+
+    if (this.intentos.bloqueado(input.kioskoId, clave)) {
+      this.logger.warn(
+        `Kiosko ${input.kioskoId}: aviso por folio bloqueado por exceso de intentos fallidos`,
+      );
+      throw new HttpException(
+        {
+          codigo: 'DEMASIADOS_INTENTOS',
+          message: 'Demasiados intentos. Pasa a mostrador y te ayudamos.',
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    const pedido = await this.buscarPorFolio(folio, f, input.kioskoTiendaId);
+    if (
+      pedido &&
+      telefonoCoincide(input.telefono4, pedido.clienteTelefono, pedido.usuario?.telefono)
+    ) {
+      this.intentos.registrarAcierto(input.kioskoId, clave);
+      return pedido;
+    }
+
+    this.intentos.registrarFallo(input.kioskoId, clave);
+    throw new NotFoundException({
+      codigo: 'PEDIDO_NO_VERIFICADO',
+      message:
+        'No pudimos confirmar ese pedido. Revisa el folio y los últimos 4 dígitos del teléfono con el que pediste; ' +
+        'si no lo logras, pasa a mostrador y te ayudamos.',
+    });
+  }
+
+  /** Busca por número interno, por folio del ERP y, por último, por el folio que guardó la bandeja de envío. */
+  private async buscarPorFolio(
+    folio: string,
+    f: ReturnType<typeof interpretarFolio>,
+    tiendaId: number,
+  ) {
+    // Buscar primero por numeroPedido (PD-2026-000123 es @unique).
+    let pedido = await this.prisma.pedido.findFirst({
+      where: { numeroPedido: folio, tiendaId },
+      include: INCLUDE_LLEGADA,
+    });
+    if (!pedido && f) {
+      // El FOLIO del Sistema Comercial. SIEMPRE dentro de la tienda del kiosko: el mismo número existe en cada una.
+      pedido = await this.prisma.pedido.findFirst({
+        where: {
+          folioErp: f.folio,
+          tiendaId,
+          ...(f.serie ? { tienda: { serie: f.serie } } : {}),
+        },
+        include: INCLUDE_LLEGADA,
+      });
+    }
+    if (!pedido) {
+      // Fallback: externalFolio (folio de Firebird, asignado tras el ACK del agente).
+      const pendiente = await this.prisma.pedidoPendienteEnvio.findFirst({
+        where: { externalFolio: folio, pedido: { tiendaId } },
+        include: { pedido: { include: INCLUDE_LLEGADA } },
+      });
+      pedido = pendiente?.pedido ?? null;
+    }
+    return pedido;
   }
 
   private async validarKiosko(
@@ -613,7 +706,7 @@ export class KioskoLlegadaService {
     const total = Number(pedido.total ?? 0);
     return {
       pedidoId: pedido.id,
-      folioVisible: pedido.numeroPedido,
+      folioVisible: etiquetaDelPedido(pedido, pedido.tienda?.serie),
       clienteNombreParcial: nombreParcial(pedido.clienteNombre),
       itemsResumen: `${pedido.items?.length ?? '?'} artículos`,
       total,
@@ -629,7 +722,7 @@ export class KioskoLlegadaService {
     return {
       ok: true as const,
       pedidoId: pedido.id,
-      folioVisible: pedido.numeroPedido,
+      folioVisible: etiquetaDelPedido(pedido, pedido.tienda?.serie),
       clienteNombreParcial: nombreParcial(pedido.clienteNombre),
       estado: pedido.estado,
       estadoLabel: this.labelParaEstado(pedido.estado),

@@ -47,6 +47,7 @@ function makeService(overrides: Record<string, any> = {}) {
     pedidoPago as any,
     pedidoDescarga as any,
     notifications as any,
+    { poll: jest.fn(), ack: jest.fn(), avisarFolioAsignado: jest.fn() } as any,
   );
   return { service, prisma, catalog };
 }
@@ -72,6 +73,7 @@ describe('SyncAgentService upload idempotency', () => {
       errores: 0,
       checkpointAvanzado: true,
       deadLetters: 0,
+      fallidos: [],
     });
     expect(catalog.procesar).not.toHaveBeenCalled();
     expect(prisma.syncCheckpoint.upsert).toHaveBeenCalled();
@@ -103,6 +105,7 @@ describe('SyncAgentService upload idempotency', () => {
       errores: 0,
       checkpointAvanzado: true,
       deadLetters: 1,
+      fallidos: [],
     });
     expect(catalog.procesar).toHaveBeenCalledTimes(1);
     expect(prisma.syncEventInbox.update).toHaveBeenCalledWith({
@@ -113,6 +116,56 @@ describe('SyncAgentService upload idempotency', () => {
         ultimoErrorCode: 'HANDLER_ERROR',
       }),
     });
+  });
+});
+
+describe('SyncAgentService — qué eventos fallaron (oct 2026)', () => {
+  it('un evento que ya murió (DEAD_LETTER) es terminal: no se reprocesa, no cuenta como error y NO se vuelve a pedir', async () => {
+    const { service, prisma, catalog } = makeService();
+    prisma.syncEventInbox.findUnique.mockResolvedValue({
+      estado: 'DEAD_LETTER',
+      mensaje: 'x',
+      nextAttemptAt: new Date(0),
+      intentos: 5,
+    });
+    const r = await service.procesarUpload({
+      tiendaId: 5,
+      hastaBANDEJAId: 10,
+      eventos: [makeEvent()],
+    });
+
+    // Antes caía al `create`, chocaba con su propia fila (P2002) y daba `errores++` para siempre: el agente lo reenviaba
+    // eternamente y su checkpoint nunca avanzaba.
+    expect(r).toMatchObject({ errores: 0, deadLetters: 1, checkpointAvanzado: true, fallidos: [] });
+    expect(catalog.procesar).not.toHaveBeenCalled();
+    expect(prisma.syncEventInbox.create).not.toHaveBeenCalled();
+  });
+
+  it('dice CUÁLES fallaron y se van a reintentar (el agente los guarda en su outbox): el que falla y el que está en espera', async () => {
+    const { service, prisma, catalog } = makeService();
+    prisma.syncEventInbox.findUnique
+      .mockResolvedValueOnce(null) // el 1.º: nuevo, y su handler falla
+      .mockResolvedValueOnce({
+        estado: 'ERROR',
+        mensaje: 'x',
+        nextAttemptAt: new Date(Date.now() + 60_000),
+        intentos: 2,
+      }) // el 2.º: en espera
+      .mockResolvedValueOnce(null); // el 3.º: nuevo y bien
+    catalog.procesar
+      .mockResolvedValueOnce({ ok: false, mensaje: 'Unique constraint' })
+      .mockResolvedValueOnce({ ok: true });
+    const r = await service.procesarUpload({
+      tiendaId: 5,
+      hastaBANDEJAId: 10,
+      eventos: [
+        makeEvent({ eventId: 'A' }),
+        makeEvent({ eventId: 'B' }),
+        makeEvent({ eventId: 'C' }),
+      ],
+    });
+    expect(r.fallidos).toEqual(['A', 'B']);
+    expect(r).toMatchObject({ procesados: 1, errores: 2, checkpointAvanzado: false });
   });
 });
 

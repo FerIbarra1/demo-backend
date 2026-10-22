@@ -8,7 +8,7 @@ import { precioDeLista } from '../precios/precio-lista.util';
  * Servicio de favoritos.
  *
  * Reglas:
- *   - Sólo CLIENTE puede tener favoritos.
+ *   - Solo CLIENTE puede tener favoritos.
  *   - El producto debe estar activo.
  *   - Las operaciones son idempotentes: añadir 2 veces el mismo producto no
  *     duplica; quitar un producto que no está como favorito no falla.

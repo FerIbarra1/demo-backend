@@ -17,9 +17,11 @@ const prisma = new PrismaClient();
 const suffix = String(Date.now()).slice(-7);
 const realtime = { emitToTienda: jest.fn(), emitToPedido: jest.fn(), emitToUser: jest.fn() };
 let tiendaId: number;
+let otraTiendaId: number;
 let clienteId: number;
 let rosa: number;
 let beto: number;
+let adminId: number;
 const pedidoIds: number[] = [];
 const usuarioIds: number[] = [];
 
@@ -44,13 +46,19 @@ async function bodeguero(nombre: string) {
 
 async function pedidoDe(
   bodegueroId: number,
-  extra: { estado?: EstadoPedido; turnoDesde?: Date | null; acumuladoMs?: number } = {},
+  extra: {
+    estado?: EstadoPedido;
+    turnoDesde?: Date | null;
+    acumuladoMs?: number;
+    /** Por defecto la tienda de las pruebas; el ADMIN puede traer pedidos de otra. */
+    tienda?: number;
+  } = {},
 ) {
   const p = await prisma.pedido.create({
     data: {
       numeroPedido: `PD-B${suffix}-${pedidoIds.length}`,
       usuarioId: clienteId,
-      tiendaId,
+      tiendaId: extra.tienda ?? tiendaId,
       estado: extra.estado ?? EstadoPedido.EN_REVISION,
       modoEntrega: ModoEntrega.RECOGER_TIENDA,
       clienteNombre: 'C',
@@ -87,6 +95,10 @@ beforeAll(async () => {
     data: { nombre: `Presencia bodega ${suffix}`, direccion: 'x', ciudad: 'x', estado: 'x' },
   });
   tiendaId = t.id;
+  const otra = await prisma.tienda.create({
+    data: { nombre: `Presencia bodega otra ${suffix}`, direccion: 'x', ciudad: 'x', estado: 'x' },
+  });
+  otraTiendaId = otra.id;
   const c = await prisma.usuario.create({
     data: {
       email: `cli-b-${suffix}@test.local`,
@@ -99,12 +111,24 @@ beforeAll(async () => {
   usuarioIds.push(c.id);
   rosa = await bodeguero('rosa');
   beto = await bodeguero('beto');
+  // F3.5: el ADMIN no trae tienda en su cuenta; cubre un puesto en la que opera.
+  const a = await prisma.usuario.create({
+    data: {
+      email: `admin-b-${suffix}@test.local`,
+      password: 'x',
+      nombre: 'Dueño',
+      rol: RolUsuario.ADMIN,
+      lastLogin: new Date(),
+    },
+  });
+  adminId = a.id;
+  usuarioIds.push(a.id);
 });
 
 afterAll(async () => {
   await prisma.refreshToken.deleteMany({ where: { usuarioId: { in: usuarioIds } } });
   await prisma.pedido.deleteMany({ where: { id: { in: pedidoIds } } });
-  await prisma.tienda.deleteMany({ where: { id: tiendaId } });
+  await prisma.tienda.deleteMany({ where: { id: { in: [tiendaId, otraTiendaId] } } });
   await prisma.usuario.deleteMany({ where: { id: { in: usuarioIds } } });
   await prisma.$disconnect();
 });
@@ -117,7 +141,7 @@ beforeEach(async () => {
     data: { asignadoAId: null, asignadoAt: null },
   });
   await prisma.usuario.updateMany({
-    where: { id: { in: [rosa, beto] } },
+    where: { id: { in: [rosa, beto, adminId] } },
     data: { ultimoHeartbeat: null },
   });
 });
@@ -269,6 +293,116 @@ describe('Presencia de bodega — el barrido de inactividad', () => {
 
   it('un latido caducado y sin pedidos ya no cuenta como presente', async () => {
     await prisma.usuario.update({ where: { id: rosa }, data: { ultimoHeartbeat: hace(16) } });
+    expect(await equipoEnTv()).toEqual([]);
+  });
+});
+
+/**
+ * F3.5 (oct 2026, "cubrir puesto"): el ADMIN puede tomar pedidos de bodega. No tiene tienda en su cuenta y
+ * puede traer pedidos de varias, así que todo lo anterior —salir, el barrido, la TV— tiene que valer para él
+ * sin suponer una tienda propia: sus pedidos no pueden quedar asignados a quien ya no está.
+ */
+describe('Presencia de bodega — el ADMIN que cubre un puesto', () => {
+  it('salir regresa sus pedidos de CADA tienda a la cola y avisa a la tienda de cada pedido', async () => {
+    await svc().entro(adminId, null);
+    const aqui = await pedidoDe(adminId);
+    const alla = await pedidoDe(adminId, { tienda: otraTiendaId });
+    jest.clearAllMocks();
+
+    const r = await svc().salio(adminId);
+
+    expect(r.pedidosRegresados).toBe(2);
+    expect(await heartbeatDe(adminId)).toBeNull();
+    for (const p of [aqui, alla]) {
+      const despues = await prisma.pedido.findUnique({
+        where: { id: p.id },
+        include: { historial: true },
+      });
+      expect(despues!.asignadoAId).toBeNull();
+      expect(despues!.estado).toBe(EstadoPedido.EN_REVISION);
+      expect(despues!.historial.at(-1)!.observacion).toMatch(/salió de bodega/);
+    }
+    // Un ADMIN no tiene tienda propia a la que avisar: el aviso va a la de cada pedido, no a ninguna ni a una sola.
+    expect(realtime.emitToTienda).toHaveBeenCalledWith(
+      tiendaId,
+      'pedido.liberado',
+      expect.objectContaining({ id: aqui.id }),
+    );
+    expect(realtime.emitToTienda).toHaveBeenCalledWith(
+      otraTiendaId,
+      'pedido.liberado',
+      expect.objectContaining({ id: alla.id }),
+    );
+    // Y no hay ficha de bodeguero que quitar de ninguna TV (no tiene tienda propia).
+    expect(realtime.emitToTienda).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'bodeguero.salio',
+      expect.anything(),
+    );
+  });
+
+  it('`soloPedidos` (cambiar de tienda) los regresa SIN sacarlo de línea ni avisar que se fue', async () => {
+    await svc().entro(adminId, null);
+    const p = await pedidoDe(adminId);
+    jest.clearAllMocks();
+
+    const r = await svc().salio(adminId, { soloPedidos: true });
+
+    expect(r.pedidosRegresados).toBe(1);
+    expect((await prisma.pedido.findUnique({ where: { id: p.id } }))!.asignadoAId).toBeNull();
+    // Cambiar de tienda no es irse: su latido sigue y sigue con sesión.
+    expect(await heartbeatDe(adminId)).not.toBeNull();
+    expect(realtime.emitToTienda).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'bodeguero.salio',
+      expect.anything(),
+    );
+  });
+
+  it('el barrido lo saca como a un bodeguero: con 15 min sin latido sus pedidos regresan a la cola', async () => {
+    await prisma.usuario.update({ where: { id: adminId }, data: { ultimoHeartbeat: hace(20) } });
+    const p = await pedidoDe(adminId);
+
+    const n = await svc().salirInactivos();
+
+    expect(n).toBeGreaterThanOrEqual(1);
+    expect((await prisma.pedido.findUnique({ where: { id: p.id } }))!.asignadoAId).toBeNull();
+    expect(await heartbeatDe(adminId)).toBeNull();
+  });
+
+  it('el barrido NO toca al ADMIN que sigue mandando latidos', async () => {
+    await prisma.usuario.update({ where: { id: adminId }, data: { ultimoHeartbeat: hace(4) } });
+    const p = await pedidoDe(adminId);
+
+    await svc().salirInactivos();
+
+    expect((await prisma.pedido.findUnique({ where: { id: p.id } }))!.asignadoAId).toBe(adminId);
+  });
+
+  it('en la TV de SU tienda sale como un bodeguero más, con sus pedidos de ESA tienda y nada de la otra', async () => {
+    await prisma.usuario.update({ where: { id: adminId }, data: { ultimoHeartbeat: new Date() } });
+    const aqui = await pedidoDe(adminId);
+    const alla = await pedidoDe(adminId, { tienda: otraTiendaId });
+
+    const tvAqui = await monitor().obtenerMonitor(tiendaId);
+    const tvAlla = await monitor().obtenerMonitor(otraTiendaId);
+
+    const fichaAqui = tvAqui.equipo.find((b) => b.id === adminId)!;
+    expect(fichaAqui.pedidosActuales.map((p) => p.id)).toEqual([aqui.id]);
+    const fichaAlla = tvAlla.equipo.find((b) => b.id === adminId)!;
+    expect(fichaAlla.pedidosActuales.map((p) => p.id)).toEqual([alla.id]);
+  });
+
+  it('sin pedidos en una tienda NO sale en su TV, aunque esté en línea: no es parte de su equipo', async () => {
+    await prisma.usuario.update({ where: { id: adminId }, data: { ultimoHeartbeat: new Date() } });
+    await pedidoDe(adminId, { tienda: otraTiendaId });
+
+    expect(await equipoEnTv()).toEqual([]);
+  });
+
+  it('un pedido suyo que ya no ocupa slot de bodega (esperando al cliente) no lo mete a la TV', async () => {
+    await prisma.usuario.update({ where: { id: adminId }, data: { ultimoHeartbeat: new Date() } });
+    await pedidoDe(adminId, { estado: EstadoPedido.PENDIENTE_PAGO });
     expect(await equipoEnTv()).toEqual([]);
   });
 });

@@ -60,7 +60,7 @@ describe('Guards globales vs. rutas de API key', () => {
     it('NO exime una ruta normal: delega en passport', async () => {
       const guard = new JwtAuthGuard(reflectorCon({}));
       // Sin estrategia 'jwt' registrada, `super.canActivate` rechaza. Lo que
-      // importa es que NO devuelva `true` por accidente: el bypass sólo debe
+      // importa es que NO devuelva `true` por accidente: el bypass solo debe
       // aplicar a rutas marcadas.
       await expect(guard.canActivate(contextoCon())).rejects.toThrow(
         /Unknown authentication strategy/,

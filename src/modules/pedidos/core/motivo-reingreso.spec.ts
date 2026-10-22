@@ -36,9 +36,7 @@ describe('derivarMotivoReingreso', () => {
     // `liberarPedido` NO escribe estado: deja una auto-transición en el
     // historial. Ese es el discriminador.
     expect(
-      derivarMotivoReingreso(
-        pedido({ historial: [{ estadoAnterior: EstadoPedido.EN_REVISION }] }),
-      ),
+      derivarMotivoReingreso(pedido({ historial: [{ estadoAnterior: EstadoPedido.EN_REVISION }] })),
     ).toBe('LIBERADO');
   });
 
@@ -84,9 +82,7 @@ describe('derivarMotivoReingreso', () => {
     // invirtiera, un pedido devuelto por el asesor se leería como "otro
     // bodeguero lo soltó" y el bodeguero no sabría que ventas ya lo revisó.
     expect(
-      derivarMotivoReingreso(
-        pedido({ historial: [{ estadoAnterior: EstadoPedido.EN_ASESORIA }] }),
-      ),
+      derivarMotivoReingreso(pedido({ historial: [{ estadoAnterior: EstadoPedido.EN_ASESORIA }] })),
     ).not.toBe('LIBERADO');
   });
 

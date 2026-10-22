@@ -51,13 +51,18 @@ function crearServicio(estadoInicial: EstadoPedido, modoEntrega: ModoEntrega) {
     },
     // Oct 2026: la cancelación consulta si el pedido tenía un pago por transferencia (aquí: ninguno).
     pedidoPagoTransferencia: { findFirst: jest.fn().mockResolvedValue(null) },
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     historialPedido: {
       create: jest.fn().mockResolvedValue({}),
       // F22: el correo "listo en tienda" es del PRIMER paso a REVISADO; la máquina
       // cuenta cuántas veces ya estuvo ahí.
       count: jest.fn().mockResolvedValue(0),
     },
+    // Oct 2026 (parte B): al salir del surtido la máquina deja la solicitud del folio del ERP.
+    pedidoFolioSolicitud: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
     pedidoPendienteEnvio: {
+      // Oct 2026: al cancelar, la máquina mira la fila de envío: este flujo nunca llegó al ERP (sin fila).
+      findUnique: jest.fn().mockResolvedValue(null),
       create: jest.fn(async (args: any) => {
         encolados.push(args.data.pedidoId);
         return {};

@@ -8,7 +8,8 @@ import {
 } from '@nestjs/common';
 import { createHash, randomInt, randomBytes, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
-import { KioskoPairingEstado, EstadoKiosko } from '@prisma/client';
+import { KioskoPairingEstado, EstadoKiosko, RolUsuario } from '@prisma/client';
+import type { ActorKiosko } from './kiosko.service';
 
 /**
  * Emparejamiento de tablets con kioskos.
@@ -29,7 +30,7 @@ import { KioskoPairingEstado, EstadoKiosko } from '@prisma/client';
  *  - Un código de 6 dígitos es adivinable (10^6) y además es audible/visible:
  *    cualquiera en la tienda puede leerlo de la pantalla.
  *  - Lo que AUTORIZA el reclamo es `deviceSecret`: un secreto de 32 bytes que
- *    la tablet genera y NUNCA sale de su memoria. El código sólo sirve para que
+ *    la tablet genera y NUNCA sale de su memoria. El código solo sirve para que
  *    el admin correlacione la solicitud con la tablet que tiene enfrente.
  *  - Sin el `deviceSecret`, conocer el `pairingId` (o el código) no alcanza
  *    para reclamar el token.
@@ -69,7 +70,7 @@ export class KioskoPairingService {
   /**
    * Paso 1: la tablet pide un emparejamiento.
    *
-   * Devuelve el código EN CLARO una sola vez (sólo se persiste su hash). El
+   * Devuelve el código EN CLARO una sola vez (solo se persiste su hash). El
    * `deviceSecretHash` lo calcula la tablet y lo manda: el secreto en claro
    * nunca viaja en este request ni se guarda.
    */
@@ -166,14 +167,65 @@ export class KioskoPairingService {
    * Paso 3 (admin): autoriza la vinculación a un kiosko concreto.
    *
    * UPDATE condicional PENDIENTE → APROBADO: si dos admins autorizan a la vez,
-   * sólo uno gana y el otro recibe 409 (no se emiten dos autorizaciones).
+   * solo uno gana y el otro recibe 409 (no se emiten dos autorizaciones).
    */
-  async aprobar(pairingId: string, kioskoId: number, adminUserId: number) {
+  async aprobar(
+    pairingId: string,
+    kioskoId: number,
+    actor: ActorKiosko,
+    opts: { confirmarOtraTienda?: boolean } = {},
+  ) {
+    const adminUserId = actor.userId;
     const kiosko = await this.prisma.kiosko.findUnique({
       where: { id: kioskoId },
-      select: { id: true, nombre: true, estado: true, ultimoHeartbeat: true, tiendaId: true },
+      select: {
+        id: true,
+        nombre: true,
+        estado: true,
+        ultimoHeartbeat: true,
+        tiendaId: true,
+        tienda: { select: { nombre: true } },
+      },
     });
-    if (!kiosko) throw new NotFoundException('Kiosko no encontrado');
+    // El gerente solo vincula tablets a kioskos de SU tienda. Otro gerente ve un 404, como en el resto del módulo.
+    if (!kiosko || (actor.rol === RolUsuario.GERENTE && kiosko.tiendaId !== actor.tiendaId)) {
+      throw new NotFoundException('Kiosko no encontrado');
+    }
+
+    // Oct 2026: una tablet pertenece a UNA tienda y, una vez vinculada, no cambia. La tablet manda como PISTA la
+    // tienda que cree ser (la de su vinculación anterior); si el admin elige un kiosko de OTRA, casi seguro se
+    // equivocó de fila en el selector — y vincular de más una tablet a la tienda equivocada es justo lo que no debe
+    // pasar. No se bloquea (la pista no es una credencial: una tablet nueva puede traer una URL vieja), pero exige
+    // confirmarlo expresamente.
+    const solicitud = await this.prisma.kioskoPairing.findUnique({
+      where: { id: pairingId },
+      select: { tiendaIdHint: true },
+    });
+    // Una tablet que dice ser de OTRA tienda no se la lleva un gerente (ni confirmando): moverla de tienda es del
+    // ADMIN. Una tablet nueva (sin pista) sí la puede vincular cualquier gerente a un kiosko de su tienda.
+    if (
+      actor.rol === RolUsuario.GERENTE &&
+      solicitud?.tiendaIdHint &&
+      solicitud.tiendaIdHint !== actor.tiendaId
+    ) {
+      throw new ForbiddenException('Esa tablet pertenece a otra tienda. Pide al administrador que la mueva.');
+    }
+    if (
+      solicitud?.tiendaIdHint &&
+      solicitud.tiendaIdHint !== kiosko.tiendaId &&
+      !opts.confirmarOtraTienda
+    ) {
+      const pista = await this.prisma.tienda.findUnique({
+        where: { id: solicitud.tiendaIdHint },
+        select: { nombre: true },
+      });
+      throw new ConflictException({
+        codigo: 'TIENDA_DISTINTA',
+        message:
+          `Esta tablet dice ser de "${pista?.nombre ?? `tienda ${solicitud.tiendaIdHint}`}" y elegiste un ` +
+          `kiosko de "${kiosko.tienda.nombre}". Confírmalo solo si moviste la tablet de tienda.`,
+      });
+    }
 
     const resultado = await this.prisma.kioskoPairing.updateMany({
       where: {
@@ -196,7 +248,8 @@ export class KioskoPairingService {
     }
 
     this.logger.log(
-      `Emparejamiento ${pairingId} aprobado → kiosko ${kioskoId} por admin ${adminUserId}`,
+      `Emparejamiento ${pairingId} aprobado → kiosko ${kioskoId} por admin ${adminUserId}` +
+        (opts.confirmarOtraTienda ? ' (confirmó que la tablet cambia de tienda)' : ''),
     );
 
     // Aviso para el panel: si el kiosko destino está EN LÍNEA, autorizar esta
@@ -208,9 +261,17 @@ export class KioskoPairingService {
     return { ok: true, kioskoEnLinea, kiosko };
   }
 
-  async cancelar(pairingId: string, adminUserId: number) {
+  async cancelar(pairingId: string, actor: ActorKiosko) {
+    const adminUserId = actor.userId;
+    // El gerente solo cancela lo que podría haber autorizado: solicitudes sin pista o de su tienda.
     const resultado = await this.prisma.kioskoPairing.updateMany({
-      where: { id: pairingId, estado: KioskoPairingEstado.PENDIENTE },
+      where: {
+        id: pairingId,
+        estado: KioskoPairingEstado.PENDIENTE,
+        ...(actor.rol === RolUsuario.GERENTE
+          ? { OR: [{ tiendaIdHint: null }, { tiendaIdHint: actor.tiendaId ?? -1 }] }
+          : {}),
+      },
       data: { estado: KioskoPairingEstado.CANCELADO },
     });
     if (resultado.count !== 1) {
@@ -272,17 +333,17 @@ export class KioskoPairingService {
       throw new NotFoundException('Solicitud no encontrada');
     }
     if (pairing.kiosko.estado !== EstadoKiosko.ACTIVO) {
-      // El kiosko está apagado: no se emite credencial. El admin debe
-      // reactivarlo primero (así el orden de las acciones es explícito).
+      // El kiosko está apagado: no se emite credencial. Quien administra debe reactivarlo primero (así el orden de
+      // las acciones es explícito).
       throw new ForbiddenException(
-        'El kiosko está inactivo. Reactívalo antes de vincular la tablet.',
+        'El kiosko está desactivado. Reactívalo antes de vincular la tablet.',
       );
     }
 
     const deviceTokenPlain = randomBytes(32).toString('base64url');
 
     // Consumo atómico + emisión del token en una sola transacción: si dos
-    // requests llegan a la vez, sólo uno pasa el UPDATE condicional y emite.
+    // requests llegan a la vez, solo uno pasa el UPDATE condicional y emite.
     const resultado = await this.prisma.$transaction(async (tx) => {
       const consumo = await tx.kioskoPairing.updateMany({
         where: { id: pairing.id, estado: KioskoPairingEstado.APROBADO },
@@ -290,11 +351,15 @@ export class KioskoPairingService {
       });
       if (consumo.count !== 1) return false;
 
+      const ahora = new Date();
       await tx.kiosko.update({
         where: { id: pairing.kiosko!.id },
         data: {
           deviceTokenHash: this.sha256(deviceTokenPlain),
-          deviceTokenCreadoAt: new Date(),
+          deviceTokenCreadoAt: ahora,
+          // Primera vez que una tablet se vincula a este kiosko: distingue "pendiente de instalar" de "operó y la
+          // desvincularon" en el panel.
+          ...(pairing.kiosko!.primerConexionAt ? {} : { primerConexionAt: ahora }),
         },
       });
       return true;

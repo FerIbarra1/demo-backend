@@ -1,4 +1,5 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { ActividadWorkers } from '../../common/actividad-workers';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RealtimeService } from './realtime.service';
 
@@ -28,13 +29,19 @@ export class RealtimeOutboxWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeService,
+    // N3: la pantalla de salud ve cuándo corrió por última vez. Opcional: sin él funciona igual.
+    @Optional() private readonly actividad?: ActividadWorkers,
   ) {}
 
   onModuleInit() {
+    this.actividad?.declarar('realtime-outbox', RealtimeOutboxWorker.TICK_MS);
     this.timer = setInterval(() => {
-      void this.tick().catch((err) => {
-        this.logger.error(`Realtime outbox tick falló: ${err.message}`);
-      });
+      void this.tick()
+        .then(() => this.actividad?.corrio('realtime-outbox'))
+        .catch((err) => {
+          this.logger.error(`Realtime outbox tick falló: ${err.message}`);
+          this.actividad?.fallo('realtime-outbox', err.message);
+        });
     }, RealtimeOutboxWorker.TICK_MS);
   }
 

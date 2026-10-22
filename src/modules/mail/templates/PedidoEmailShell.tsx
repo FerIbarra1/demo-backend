@@ -2,7 +2,7 @@ import * as React from 'react';
 import { Heading, Hr, Section, Text } from '@react-email/components';
 import { EmailLayout } from './Layout';
 import { ItemList, ItemTotal } from './ItemList';
-import { PedidoEmailData, folioVisible } from '../mail.templates';
+import { PedidoEmailData, folioVisible, rotuloDelNumero } from '../mail.templates';
 
 export interface PedidoEmailShellProps {
   preview: string;
@@ -120,8 +120,14 @@ export const PedidoEmailShell = ({
           el título de cada correo ya dice qué pasó, y repetirlo aquí hacía que el mismo dato
           saliera dos o tres veces. */}
       <Text style={labelValue}>
-        <strong>Folio:</strong> {folioVisible(pedido)}
+        <strong>{rotuloDelNumero(pedido)}:</strong> {folioVisible(pedido)}
       </Text>
+      {/* Solo el primer correo con folio: une el número que el cliente ya conoce (el de su confirmación) con el nuevo. */}
+      {pedido.referenciaWeb ? (
+        <Text style={labelValue}>
+          <strong>Pedido en línea:</strong> {pedido.referenciaWeb} (el número de tu correo de confirmación)
+        </Text>
+      ) : null}
       <Text style={labelValue}>
         <strong>Fecha del pedido:</strong> {fmtDate(pedido.fechaPedido)}
       </Text>

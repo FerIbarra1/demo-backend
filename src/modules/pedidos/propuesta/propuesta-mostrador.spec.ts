@@ -834,9 +834,9 @@ describe('rechazarPropuestaVentas — el cliente pide otro ajuste sobre la propu
     // Sin texto no hay mensaje que mandar: el asesor abriría la conversación a
     // ciegas. El DTO también lo exige; el service es frontera de confianza
     // propia (lo llaman los tests y el camino del operador).
-    await expect(
-      svc.responderPropuesta(1, 99, { decision: 'RECHAZAR' }, cliente),
-    ).rejects.toThrow(BadRequestException);
+    await expect(svc.responderPropuesta(1, 99, { decision: 'RECHAZAR' }, cliente)).rejects.toThrow(
+      BadRequestException,
+    );
     expect(mensajeCreate).not.toHaveBeenCalled();
   });
 

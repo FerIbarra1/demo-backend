@@ -10,6 +10,8 @@ import { StorageService } from '../../imagenes/storage.service';
 import { NotificationsService } from '../../notifications/notifications.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoAccessService } from './pedido-access.service';
+import { reflejarCancelacionEnErp } from './tareas-erp.util';
+import { asegurarSolicitudDeFolio, necesitaFolio } from './folio-erp.util';
 import { asignadoANombre } from './pedido-mapper';
 import { pausarReloj, reanudarReloj } from './atencion.util';
 import { ESTADOS_BOLSA_APARTADA } from './presencia.util';
@@ -21,15 +23,18 @@ import {
   resolverPagoAlCancelarse,
 } from '../../pagos/transferencia/hooks';
 import { CambiarEstadoDto } from '../admin/dto/cambiar-estado.dto';
+import { contarDtfPendientes } from '../../dtf/core/dtf-estado.util';
+import { dtfDelPedido } from '../../dtf/dtf-vista';
+import { resumenDtfPorPedido } from '../../dtf/dtf-resumen';
 import { UserContext } from '../../../types/pedido.types';
 import { EstadoPedido, TipoNotificacion, Prisma, RolUsuario } from '@prisma/client';
 
 /**
  * Máquina de estados B2B. Cada estado declara a qué otros puede transicionar.
- * El cliente sólo puede cancelar antes de PAID.
+ * El cliente solo puede cancelar antes de PAID.
  *
  * Flujo de pago (jun 2026): la tienda cobra en un sistema externo (Visual FoxPro +
- * Firebird). El backend sólo registra cuándo se cobró vía webhook autenticado
+ * Firebird). El backend solo registra cuándo se cobró vía webhook autenticado
  * (`POST /admin/pedidos/:id/marcar-pagado`).
  *
  * ─────────────────────────────────────────────────────────────────────────
@@ -58,11 +63,14 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
     // F16: EN_REVISION → REVISADO es la transición normal de bodega para
     // pedidos que se recogen en tienda (KIOSKO / RECOGER_TIENDA).
     EstadoPedido.REVISADO,
-    // EN_REVISION → PENDIENTE_PAGO: se CONSERVA, pero sólo para DOMICILIO. Un
+    // EN_REVISION → PENDIENTE_PAGO: se CONSERVA, pero solo para DOMICILIO. Un
     // pedido a domicilio no pasa por mostrador (el cliente no está en tienda).
     // También lo dispara SurtidoService.confirmarSurtido cuando la bodega
     // cierra el surtido SIN faltantes.
     EstadoPedido.PENDIENTE_PAGO,
+    // Oct 2026 (impresión DTF): bodega cerró y aún hay DTF por imprimir. Lo decide
+    // `ejecutarCambio` (ver "El gate de DTF"), no cada caller.
+    EstadoPedido.EN_DTF,
     EstadoPedido.CANCELADO,
   ],
   // F13: el cliente decide sobre una propuesta. El destino depende del origen
@@ -74,6 +82,7 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
     EstadoPedido.PENDIENTE_PAGO,
     EstadoPedido.EN_REVISION,
     EstadoPedido.EN_ASESORIA,
+    EstadoPedido.EN_DTF,
     EstadoPedido.CANCELADO,
   ],
   // F13: el pedido está en manos del asesor de ventas de la tienda. Sale de
@@ -86,12 +95,23 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
     EstadoPedido.ESPERANDO_APROBACION,
     EstadoPedido.EN_REVISION,
     EstadoPedido.REVISADO,
+    EstadoPedido.EN_DTF,
+    EstadoPedido.CANCELADO,
+  ],
+  // Oct 2026 (impresión DTF, PLAN-DTF.md D3): el pedido espera a que su DTF esté impreso. Nace
+  // aquí el pedido solo-DTF; el mixto llega cuando bodega cierra y aún hay trabajos pendientes.
+  //   → REVISADO        todo impreso: el área de entrega (misma salida que bodega).
+  //   → PENDIENTE_PAGO  solo DOMICILIO: no pasa por mostrador; encolado a Firebird obligatorio.
+  //   → CANCELADO       el cliente/mostrador cancela, o se rechazó/canceló todo lo que lo mantenía vivo.
+  [EstadoPedido.EN_DTF]: [
+    EstadoPedido.REVISADO,
+    EstadoPedido.PENDIENTE_PAGO,
     EstadoPedido.CANCELADO,
   ],
   // F16/F17: EL ÁREA DE ENTREGA. El pedido está apartado en la mesa esperando
   // al cliente. Las cinco salidas son:
   //   → EN_ATENCION   llamar (el operador lo manda a llamar por la TV).
-  //   → PENDIENTE_PAGO enviar a pagar (AQUÍ se encola a Firebird: el ERP sólo
+  //   → PENDIENTE_PAGO enviar a pagar (AQUÍ se encola a Firebird: el ERP solo
   //                   ve pedidos que el cliente ya confirmó).
   //   → EN_REVISION   ajustar (el cliente pidió cambios; bodega re-surte).
   //                   Requiere opts.asignacion explícito por el guard de
@@ -106,12 +126,14 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
     EstadoPedido.PENDIENTE_PAGO,
     EstadoPedido.EN_REVISION,
     EstadoPedido.ESPERANDO_APROBACION,
+    // Oct 2026: hay que REIMPRIMIR un DTF (defecto hallado en la plancha).
+    EstadoPedido.EN_DTF,
     EstadoPedido.CANCELADO,
   ],
   // F17: el operador llamó al cliente y lo está atendiendo (el recuento con
   // ��l enfrente). Salidas:
   //   → REVISADO      deshacer la llamada (el cliente no llegó o se equivocó
-  //                   el folio). Antes esto sólo limpiaba `llamadoAt`.
+  //                   el folio). Antes esto solo limpiaba `llamadoAt`.
   //   → EN_REVISION   ajustar durante el recuento.
   //   → PENDIENTE_PAGO enviar a pagar (el camino feliz).
   //   → CANCELADO.
@@ -119,10 +141,12 @@ const TRANSICIONES: Record<EstadoPedido, EstadoPedido[]> = {
     EstadoPedido.REVISADO,
     EstadoPedido.EN_REVISION,
     EstadoPedido.PENDIENTE_PAGO,
+    // Oct 2026: reimprimir un DTF con el cliente enfrente.
+    EstadoPedido.EN_DTF,
     EstadoPedido.CANCELADO,
   ],
   [EstadoPedido.PENDIENTE_PAGO]: [EstadoPedido.PAGADO, EstadoPedido.CANCELADO],
-  // PAID → SHIPPED sólo aplica a pedidos a domicilio (con shippingDireccion).
+  // PAID → SHIPPED solo aplica a pedidos a domicilio (con shippingDireccion).
   // Kiosko y web recoger en tienda saltan directo a COMPLETED vía el módulo
   // Mostrador. La validación de shippingDireccion ocurre en `marcarEnviado`.
   [EstadoPedido.PAGADO]: [EstadoPedido.ENVIADO, EstadoPedido.ENTREGADO, EstadoPedido.CANCELADO],
@@ -202,6 +226,17 @@ export interface CambiarEstadoOpts {
    * dejar rastro.
    */
   permitirMismoEstado?: boolean;
+  /**
+   * Oct 2026: la transición solo vale si el pedido SIGUE en uno de estos estados, comprobado DENTRO de la transacción.
+   *
+   * Para el caller que decidió con una lectura previa (el cliente que cancela: `decidirCancelacionDelCliente` mira el
+   * estado y el pago) y no puede dejar que un cambio de segundos después la invalide. Caso real: el cliente toca
+   * «Cancelar» justo cuando el operador lo llama, el pedido pasa a `EN_ATENCION` y, como `EN_ATENCION → CANCELADO`
+   * existe para el operador, la cancelación del cliente entraba a mitad del recuento — justo lo que la regla cerró.
+   *
+   * No sustituye a `TRANSICIONES`: es una guarda adicional del caller. Si no coincide, 409 (una carrera, no un dato inválido).
+   */
+  desdeEstados?: readonly EstadoPedido[];
   /**
    * F22 (oct 2026): no mandar el correo que esta transición normalmente dispara.
    *
@@ -418,7 +453,15 @@ export class PedidoStateService {
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
       const estadoAnterior = pedido.estado;
-      const estadoNuevo = dto.nuevoEstado;
+      if (opts.desdeEstados && !opts.desdeEstados.includes(estadoAnterior)) {
+        throw new ConflictException(
+          'El pedido cambió mientras se procesaba. Actualiza la pantalla e inténtalo de nuevo.',
+        );
+      }
+      let estadoNuevo = dto.nuevoEstado;
+      // Se puede redirigir a EN_DTF (ver "El gate de DTF"): en ese caso NO se encola a Firebird.
+      let encolarFirebird = opts.encolarFirebird;
+      let observacionDtf = '';
 
       // Oct 2026: `permitirMismoEstado` deja pasar el caso "el destino es el
       // estado que el pedido ya tiene". No es una transición: no se escribe
@@ -427,6 +470,46 @@ export class PedidoStateService {
       // que el operador acaba de resolver). Ver `CambiarEstadoOpts`.
       const esMismoEstado = estadoAnterior === estadoNuevo;
       const saltarTransicion = esMismoEstado && opts.permitirMismoEstado === true;
+
+      // ───────────────────────────────────────────────────────────────────────────────
+      // El gate de DTF (oct 2026, PLAN-DTF.md D3 y D13): UN solo punto decide si el pedido ya es
+      // presentable. Un pedido con impresión DTF pendiente NO puede estar en la plancha (REVISADO), en
+      // atención ni en caja: no hay nada que mostrarle al cliente ni que cobrarle completo.
+      //
+      //   · Viene de bodega/propuestas (EN_REVISION, ESPERANDO_APROBACION, EN_ASESORIA) y su destino
+      //     sería REVISADO o PENDIENTE_PAGO → se REDIRIGE a EN_DTF. Así los 3 cierres de bodega, la
+      //     llegada del cliente y "traer a entrega" quedan cubiertos sin que cada uno lo recuerde.
+      //     Un caller que pedía PENDIENTE_PAGO (domicilio) traía `encolarFirebird`: aquí se anula,
+      //     porque `PENDIENTE_PAGO ⟺ fila en la cola` y el pedido NO queda en PENDIENTE_PAGO.
+      //   · Cualquier otro camino hacia esos estados con DTF pendiente es un error de quien llama:
+      //     se rechaza en voz alta en vez de dejar un pedido a medias en caja.
+      //
+      // `EN_DTF → REVISADO/PENDIENTE_PAGO` pasa porque el servicio de DTF cierra el último trabajo
+      // ANTES de pedir la transición (pendientes = 0).
+      if (
+        !saltarTransicion &&
+        (estadoNuevo === EstadoPedido.REVISADO ||
+          estadoNuevo === EstadoPedido.PENDIENTE_PAGO ||
+          estadoNuevo === EstadoPedido.EN_ATENCION)
+      ) {
+        const pendientesDtf = await contarDtfPendientes(tx, pedidoId);
+        if (pendientesDtf > 0) {
+          const vieneDeBodega =
+            estadoAnterior === EstadoPedido.EN_REVISION ||
+            estadoAnterior === EstadoPedido.ESPERANDO_APROBACION ||
+            estadoAnterior === EstadoPedido.EN_ASESORIA;
+          if (vieneDeBodega && estadoNuevo !== EstadoPedido.EN_ATENCION) {
+            estadoNuevo = EstadoPedido.EN_DTF;
+            encolarFirebird = false;
+            observacionDtf = ` · espera su impresión DTF (${pendientesDtf} trabajo${pendientesDtf === 1 ? '' : 's'} por imprimir)`;
+          } else {
+            throw new BadRequestException(
+              `Este pedido todavía tiene ${pendientesDtf} trabajo(s) de impresión DTF pendiente(s): ` +
+                'no puede pasar a la plancha, a atención ni a caja hasta que estén impresos.',
+            );
+          }
+        }
+      }
 
       if (!saltarTransicion) {
         const permitidas = TRANSICIONES[estadoAnterior];
@@ -459,7 +542,7 @@ export class PedidoStateService {
       // Se comprueba aquí y no en cada caller para que ninguna transición
       // nueva pueda olvidarlo. Si el pedido YA tiene fila (p. ej. la creó una
       // transición anterior) no hace falta volver a encolar.
-      if (estadoNuevo === EstadoPedido.PENDIENTE_PAGO && !opts.encolarFirebird) {
+      if (estadoNuevo === EstadoPedido.PENDIENTE_PAGO && !encolarFirebird) {
         const yaEncolado = await tx.pedidoPendienteEnvio.findFirst({
           where: { pedidoId },
           select: { id: true },
@@ -572,8 +655,17 @@ export class PedidoStateService {
       // F13: un pedido en PENDIENTE_PAGO sin fila en la cola de Firebird es
       // invisible para el agente y se queda atascado para siempre. Se encola
       // aquí, dentro de la tx, para que estado y cola sean atómicos.
-      if (opts.encolarFirebird) {
+      if (encolarFirebird) {
         await this.encolarEnvioAFirebird(tx, pedidoId);
+      }
+
+      // Oct 2026 (parte B): el pedido que sale del surtido pide su FOLIO REAL al Sistema Comercial. UN solo punto
+      // para los tres cierres de bodega (surtido normal, propuesta de bodega aprobada, contrapropuesta de ventas) y
+      // para cualquier otro camino que lo deje "después del surtido" sin folio (ver `necesitaFolio`). Solo deja la
+      // solicitud en la cola: el agente la contesta en su siguiente ciclo, y el cierre del surtido NO espera.
+      // Idempotente por pedido; dentro de la tx para que estado y solicitud sean atómicos.
+      if (necesitaFolio(estadoNuevo)) {
+        await asegurarSolicitudDeFolio(tx, pedido);
       }
 
       // Oct 2026 (pagos por transferencia): un pedido que se cancela no puede dejar un pago
@@ -588,6 +680,25 @@ export class PedidoStateService {
               nombre: usuario.nombre,
             })
           : null;
+
+      // Oct 2026: un pedido que se cancela en la nube y YA está en el Sistema Comercial sigue vivo allá. Se abre una
+      // tarea para que el cajero lo cancele también (y si aún no llegaba al ERP, su fila de envío se retira). Mismo
+      // criterio que el pago de arriba: DENTRO de la transacción, y vale para TODA cancelación (cliente, mostrador,
+      // propuestas, destrabar) porque todas pasan por aquí. Lo que cancela el agente (`SWCANCEL`) no genera tarea.
+      if (!saltarTransicion && estadoNuevo === EstadoPedido.CANCELADO) {
+        await reflejarCancelacionEnErp(
+          tx,
+          pedidoId,
+          { id: usuario.userId || null, rol: usuario.rol, nombre: usuario.nombre },
+          dto.observacion || `Cancelado por ${usuario.nombre}`,
+          // Cancelar un pedido ya COBRADO (solo lo hace el ADMIN, por destrabar) no es "cancelarlo" en el ERP: hay que
+          // anular la venta y devolver el dinero. Otra tarea, con otro texto.
+          {
+            yaCobrado:
+              estadoAnterior === EstadoPedido.PAGADO || estadoAnterior === EstadoPedido.ENVIADO,
+          },
+        );
+      }
 
       // Oct 2026: el cliente que eligió transferencia al hacer su pedido recibe sus datos al
       // llegar a PENDIENTE_PAGO (ver `emitirTransferenciaAlPasarAPago`). También DENTRO de la
@@ -618,7 +729,8 @@ export class PedidoStateService {
             pedidoId,
             estadoAnterior,
             estadoNuevo,
-            observacion: dto.observacion || `Cambio de estado por ${usuario.nombre}`,
+            observacion:
+              (dto.observacion || `Cambio de estado por ${usuario.nombre}`) + observacionDtf,
             usuarioId: usuario.userId,
             usuarioNombre: usuario.nombre,
           },
@@ -870,7 +982,7 @@ export class PedidoStateService {
             },
             // F8 oct 2026: el hex del color se expone para que la UI del
             // bodeguero muestre el chip de color en cada item del surtido.
-            // Antes sólo viajaba colorId; el cliente sólo veía el nombre.
+            // Antes solo viajaba colorId; el cliente solo veía el nombre.
             precioCO: {
               select: {
                 colorId: true,
@@ -930,6 +1042,16 @@ export class PedidoStateService {
       ? `${llamadoPor.nombre}${llamadoPor.apellido ? ' ' + llamadoPor.apellido : ''}`
       : null;
     (pedido as any).mostradorNumero = (pedido as any).llamadoMostrador?.numero ?? null;
+    // Oct 2026 (impresión DTF): los trabajos de impresión del pedido, con las banderas de acción.
+    (pedido as any).dtf = await dtfDelPedido(
+      this.prisma,
+      pedidoId,
+      usuario?.rol === 'CLIENTE' ? 'cliente' : 'impresion',
+      usuario?.userId,
+    );
+    // El mismo resumen que traen las filas de mostrador y caja ("N de M listos", líneas, texto de captura de caja).
+    (pedido as any).dtfResumen =
+      (await resumenDtfPorPedido(this.prisma, [pedidoId])).get(pedidoId) ?? null;
     // F14: aplanar el nombre del autor de cada mensaje (mismo shape que
     // `MessagesService.listar` y que el payload de `mensaje.creado`).
     (pedido as any).mensajes = (pedido as any).mensajes.map((m: any) => ({

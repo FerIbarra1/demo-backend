@@ -48,6 +48,15 @@ const SUPPORTED_CHARSETS: readonly SupportedCharacterSet[] = [
   'WIN1256', 'WIN1257', 'WIN1258',
 ];
 
+/**
+ * `SELECT` devuelve un arreglo de filas; `EXECUTE PROCEDURE` devuelve UN objeto con los parámetros de salida
+ * (node-firebird no lo envuelve). Los procedimientos de grabado son ejecutables, así que se aceptan las dos formas.
+ */
+export function primeraFila<T>(resultado: unknown): T | null {
+  if (Array.isArray(resultado)) return (resultado[0] as T) ?? null;
+  return (resultado as T) ?? null;
+}
+
 export interface TxClient {
   query<T = any>(sql: string, params?: any[]): Promise<T[]>;
   callScalar<T = any>(sql: string, params?: any[]): Promise<T | null>;
@@ -135,7 +144,7 @@ export class FirebirdClient {
    */
   async callScalar<T = any>(sql: string, params: any[] = []): Promise<T | null> {
     const rows = await this.query<T>(sql, params);
-    return rows[0] ?? null;
+    return primeraFila<T>(rows);
   }
 
   /**
@@ -149,7 +158,12 @@ export class FirebirdClient {
    * el `Transaction` de Firebird (mismas reglas que el viejo
    * `tx.query(sql, params, cb)`).
    */
-  async transaction<T>(work: (tx: TxClient) => Promise<T>): Promise<T> {
+  // `opts.waitTimeoutSec`: por defecto el driver espera SIN LÍMITE a que otra transacción suelte una fila. Quien necesita
+  // acotarlo (la reserva del folio comparte `CONSECUTIVOS` con VFP) pasa un tope: al vencer lanza y la nube reintenta.
+  async transaction<T>(
+    work: (tx: TxClient) => Promise<T>,
+    opts: { waitTimeoutSec?: number } = {},
+  ): Promise<T> {
     return await this.withConnection(async (db) => {
       // withTransaction maneja commit/rollback automático basado en si
       // el callback resuelve o rechaza. Si rechaza, rollback; si no,
@@ -163,11 +177,11 @@ export class FirebirdClient {
             params: any[] = [],
           ): Promise<U | null> => {
             const rows = await tx.queryAsync(sql, params);
-            return (rows[0] as U) ?? null;
+            return primeraFila<U>(rows);
           },
         };
         return await work(txClient);
-      });
+      }, opts.waitTimeoutSec ? { waitTimeout: opts.waitTimeoutSec } : undefined);
     });
   }
 }

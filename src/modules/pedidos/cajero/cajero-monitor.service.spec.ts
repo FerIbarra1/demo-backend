@@ -63,6 +63,28 @@ describe('CajeroMonitorService — sin candado de canal (F16)', () => {
     );
   });
 
+  it('con folio del Sistema Comercial la TV recibe SOLO los últimos 4 dígitos (el folio completo no viaja)', async () => {
+    const { svc, pedidoFindMany } = crearServicio();
+    pedidoFindMany.mockResolvedValueOnce([
+      {
+        id: 1,
+        numeroPedido: 'PD-2026-000001',
+        folioErp: '0000152573',
+        fechaPedido: new Date(Date.now() - 12 * 60_000),
+        colaCajaDesdeAt: null,
+        esperaValidacionDesdeAt: null,
+        pagosTransferencia: [],
+      },
+    ]);
+    const snap = await svc.obtenerMonitorCajero(5);
+    expect(snap.colaSinAsignar[0]).toEqual({
+      id: 1,
+      numeroPedido: 'PD-2026-000001',
+      turno: '2573',
+    });
+    expect(JSON.stringify(snap)).not.toContain('0000152573');
+  });
+
   it('la TV es pública: cada turno sale con folio y NADA más (§9.4)', async () => {
     const { svc, pedidoFindMany } = crearServicio();
     // Un pedido en la cola, para que el mapeo corra.
@@ -79,7 +101,7 @@ describe('CajeroMonitorService — sin candado de canal (F16)', () => {
     const snap = await svc.obtenerMonitorCajero(5);
     // Antes salían también `minutosEnCola`, `cajeroAsignadoAt` y `cajeroAsignadoNombre`: la pantalla
     // no los pinta, pero viajaban al navegador de la pared. Y tampoco hay urgencia (D13).
-    expect(snap.colaSinAsignar[0]).toEqual({ id: 1, numeroPedido: 'PD-2026-000001' });
+    expect(snap.colaSinAsignar[0]).toEqual({ id: 1, numeroPedido: 'PD-2026-000001', turno: null });
   });
 
   it('la ventanilla no expone el id del usuario del cajero, pero sí su nombre (la tarjeta lo muestra)', async () => {
@@ -103,7 +125,9 @@ describe('CajeroMonitorService — sin candado de canal (F16)', () => {
     expect(snap.ventanillas).toHaveLength(1);
     expect(snap.ventanillas[0]).not.toHaveProperty('cajeroId');
     expect(snap.ventanillas[0].cajeroNombre).toBe('Ana Ruiz');
-    expect(snap.ventanillas[0].detallePedidos).toEqual([{ id: 7, numeroPedido: 'PD-7' }]);
+    expect(snap.ventanillas[0].detallePedidos).toEqual([
+      { id: 7, numeroPedido: 'PD-7', turno: null },
+    ]);
   });
 
   it('lanza 400 si el usuario no tiene tienda', async () => {

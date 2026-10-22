@@ -20,11 +20,7 @@ import { EstadoPedido } from '@prisma/client';
  *
  * Vive aquí (y no en el DTO) porque lo comparten el service y el DTO.
  */
-export type MotivoReingreso =
-  | 'LIBERADO'
-  | 'AJUSTE_MOSTRADOR'
-  | 'PROPUESTA_VENTAS'
-  | 'ASESORIA';
+export type MotivoReingreso = 'LIBERADO' | 'AJUSTE_MOSTRADOR' | 'PROPUESTA_VENTAS' | 'ASESORIA';
 
 /** Lo mínimo que la derivación necesita de un pedido. */
 export interface PedidoParaMotivo {
@@ -54,9 +50,7 @@ export interface PedidoParaMotivo {
  * Devuelve `null` cuando no se puede saber de dónde vino (un pedido que nunca
  * salió de bodega). El caller decide qué copy usar en ese caso.
  */
-export function motivoDeReingreso(
-  estadoAnterior: EstadoPedido | null,
-): MotivoReingreso | null {
+export function motivoDeReingreso(estadoAnterior: EstadoPedido | null): MotivoReingreso | null {
   switch (estadoAnterior) {
     case EstadoPedido.REVISADO:
       return 'AJUSTE_MOSTRADOR';
@@ -107,4 +101,3 @@ export function derivarMotivoReingreso(pedido: PedidoParaMotivo): MotivoReingres
    */
   return motivoDeReingreso(pedido.historial[0]?.estadoAnterior ?? null);
 }
-

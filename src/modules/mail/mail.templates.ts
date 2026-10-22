@@ -24,6 +24,7 @@ import {
   type LineaCorreo,
   type VarianteTransferencia,
 } from './templates/TransferenciaPago';
+import { esFolioErp, formatearFolio } from '../pedidos/core/folio-erp.util';
 
 export type { LineaCorreo, VarianteTransferencia };
 
@@ -65,6 +66,15 @@ export interface PedidoEmailData {
   recogioNombre?: string | null;
   // Folio VFP (externalFolio). El folio visible es este; numeroPedido es interno.
   externalFolio?: string | null;
+  // Oct 2026 (B2): el folio del Sistema Comercial (10 dígitos), que existe desde que bodega cierra el surtido, y la serie
+  // de la tienda (HMO, MXL…) con la que se muestra: "HMO-0000152573". Mandan sobre `externalFolio`.
+  folioErp?: string | null;
+  serieTienda?: string | null;
+  /**
+   * El `PD-…` del correo de confirmación, SOLO en el primer correo que ya lleva el folio del Sistema Comercial: es el
+   * puente entre los dos números ("Pedido en línea: PD-2026-000018"). Ver `referencia-web.ts`. Casi siempre `null`.
+   */
+  referenciaWeb?: string | null;
   // Data URL del QR del folio VFP (solo en el email "listo para pagar").
   qrDataUrl?: string | null;
 }
@@ -79,9 +89,24 @@ export interface PedidoEmailData {
  *
  * Nunca se inventa un "Pedido #id": el id interno no significa nada para el
  * cliente y mostraba un tercer número distinto a los otros dos.
+ *
+ * Oct 2026 (B2): manda el folio del Sistema Comercial con la serie de su tienda
+ * (`HMO-0000152573`), el mismo que lleva el ticket y ve el personal en pantalla.
  */
 export function folioVisible(pedido: PedidoEmailData): string {
-  return pedido.externalFolio ?? pedido.numeroPedido;
+  if (pedido.folioErp) return formatearFolio(pedido.serieTienda, pedido.folioErp);
+  // Solo un folio de verdad (10 dígitos): el "PD-2026-00" que dejaba el agente anterior no es un folio y el cliente
+  // lo leería como el número de su pedido.
+  return esFolioErp(pedido.externalFolio) ? pedido.externalFolio : pedido.numeroPedido;
+}
+
+/**
+ * Cómo se llama el número que muestra el correo: "Folio" solo si es el folio del Sistema Comercial; antes de que exista,
+ * lo que se muestra es el número del pedido (`PD-2026-000018`) y llamarlo "Folio" lo hacía pasar por otra cosa: el cliente
+ * lo leía como "mi folio" y después el folio de verdad era otro número. Mismo criterio que la pantalla del pedido.
+ */
+export function rotuloDelNumero(pedido: PedidoEmailData): 'Folio' | 'Pedido' {
+  return pedido.folioErp || esFolioErp(pedido.externalFolio) ? 'Folio' : 'Pedido';
 }
 
 export interface MailContext {
@@ -181,8 +206,8 @@ export const mailTemplates = {
 };
 
 export const mailSubjects = {
-  BIENVENIDA: '¡Bienvenido a PTM! Tu cuenta está lista',
-  RESET_PASSWORD: 'Recupera tu contraseña de PTM',
+  BIENVENIDA: '¡Bienvenido a Punto Textil Mayoreo! Tu cuenta está lista',
+  RESET_PASSWORD: 'Recupera tu contraseña de Punto Textil Mayoreo',
   PEDIDO_RECIBIDO: (n: string) => `Recibimos tu pedido ${n}`,
   // F16: el pedido está apartado en tienda esperando revisión del cliente.
   LISTO_EN_TIENDA: (n: string) => `Tu pedido ${n} ya está listo en tienda`,
@@ -208,7 +233,5 @@ export const mailSubjects = {
   TRANSFERENCIA_COMPROBANTE_RECIBIDO: (n: string) => `Recibimos tu comprobante del pedido ${n}`,
   TRANSFERENCIA_VERIFICADA: (n: string) => `Recibimos tu transferencia del pedido ${n}`,
   TRANSFERENCIA_RECHAZADA: (n: string) => `No pudimos validar tu comprobante del pedido ${n}`,
-  TRANSFERENCIA_POR_VENCER: (n: string) =>
-    `Tus datos de transferencia del pedido ${n} están por vencer`,
   TRANSFERENCIA_REEMBOLSADA: (n: string) => `Te devolvimos tu transferencia del pedido ${n}`,
 };

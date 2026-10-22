@@ -1,4 +1,5 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { ActividadWorkers } from '../../common/actividad-workers';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RealtimeService } from '../realtime/realtime.service';
 import { calcularSaludKiosko } from './kiosko-salud';
@@ -11,7 +12,7 @@ import { calcularSaludKiosko } from './kiosko-salud';
  *
  * Diseño deliberado:
  *  - UNA alerta AGREGADA por barrido ("3 kioskos sin conexión"), no un aviso
- *    por tablet. Con muchas tiendas, un toast por kiosko es ruido que hace que
+ *    por tablet. Al admin le llega la de todas las tiendas; al gerente de cada tienda, la de las suyas. Con muchas tiendas, un toast por kiosko es ruido que hace que
  *    el admin ignore las alertas.
  *  - Solo alerta kioskos con credencial y estado ACTIVO: un kiosko apagado a
  *    propósito no es una falla, y uno sin credencial ya se ve como "requiere
@@ -38,13 +39,19 @@ export class KioskoAlertasWorker implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeService,
+    // N3: la pantalla de salud ve cuándo corrió por última vez. Opcional: sin él funciona igual.
+    @Optional() private readonly actividad?: ActividadWorkers,
   ) {}
 
   onModuleInit() {
+    this.actividad?.declarar('kiosko-alertas', KioskoAlertasWorker.TICK_MS);
     this.timer = setInterval(() => {
-      void this.tick().catch((err) => {
-        this.logger.error(`Kiosko alertas tick falló: ${err.message}`);
-      });
+      void this.tick()
+        .then(() => this.actividad?.corrio('kiosko-alertas'))
+        .catch((err) => {
+          this.logger.error(`Kiosko alertas tick falló: ${err.message}`);
+          this.actividad?.fallo('kiosko-alertas', err.message);
+        });
     }, KioskoAlertasWorker.TICK_MS);
   }
 
@@ -66,6 +73,7 @@ export class KioskoAlertasWorker implements OnModuleInit, OnModuleDestroy {
         primerConexionAt: true,
         desactivadoAt: true,
         deviceTokenHash: true,
+        tiendaId: true,
         tienda: { select: { nombre: true } },
       },
     });
@@ -95,6 +103,21 @@ export class KioskoAlertasWorker implements OnModuleInit, OnModuleDestroy {
         ultimoHeartbeat: k.ultimoHeartbeat,
       })),
     });
+
+    // El gerente de cada tienda se entera de las SUYAS (una alerta por tienda, mismo evento que el admin).
+    const porTienda = new Map<number, typeof nuevos>();
+    for (const k of nuevos) porTienda.set(k.tiendaId, [...(porTienda.get(k.tiendaId) ?? []), k]);
+    for (const [tiendaId, lista] of porTienda) {
+      this.realtime.emitToTienda(tiendaId, 'kiosko.caido', {
+        cantidad: lista.length,
+        kioskos: lista.map((k) => ({
+          id: k.id,
+          nombre: k.nombre,
+          tienda: k.tienda.nombre,
+          ultimoHeartbeat: k.ultimoHeartbeat,
+        })),
+      });
+    }
 
     this.logger.warn(
       `${nuevos.length} kiosko(s) sin conexión: ${nuevos.map((k) => `${k.nombre} (${k.tienda.nombre})`).join(', ')}`,

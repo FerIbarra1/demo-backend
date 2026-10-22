@@ -10,6 +10,8 @@ import { CatalogHandler } from './handlers/catalog.handler';
 import { ClienteHandler } from './handlers/cliente.handler';
 import { PedidoPagoHandler } from './handlers/pedido-pago.handler';
 import { PedidoDescargaHandler } from './handlers/pedido-descarga.handler';
+import { FolioReservaHandler } from './handlers/folio-reserva.handler';
+import { ConciliacionService } from './conciliacion.service';
 
 /**
  * SyncModule (F9 ago 2026).
@@ -24,8 +26,8 @@ import { PedidoDescargaHandler } from './handlers/pedido-descarga.handler';
  * golpeados por el throttler global (100 req/60s) del API público.
  *
  * Composición:
- *   - sync-agent.controller.ts: 5 endpoints REST (heartbeat, poll-pedidos,
- *     upload, pedidos-ack, pedidos-error).
+ *   - sync-agent.controller.ts: endpoints REST del agente (heartbeat, poll-pedidos,
+ *     upload, pedidos-ack, pedidos-error, poll-folios, folios-ack, conciliacion).
  *   - sync-agent.service.ts: orquesta el procesamiento de cada evento,
  *     actualiza checkpoint, escribe SyncEventLog.
  *   - external-ref.service.ts: mapeo polimórfico nube↔Firebird.
@@ -44,7 +46,9 @@ import { PedidoDescargaHandler } from './handlers/pedido-descarga.handler';
     ClienteHandler,
     PedidoPagoHandler,
     PedidoDescargaHandler,
+    FolioReservaHandler,
+    ConciliacionService,
   ],
-  exports: [SyncAgentService, ExternalRefService],
+  exports: [SyncAgentService, ExternalRefService, ConciliacionService],
 })
 export class SyncModule {}

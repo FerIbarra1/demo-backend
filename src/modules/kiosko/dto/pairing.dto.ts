@@ -1,4 +1,4 @@
-import { IsInt, IsOptional, IsString, Length, Matches } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, Length, Matches } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
@@ -29,7 +29,7 @@ export class SolicitarPairingDto {
   kioskoIdHint?: number;
 }
 
-/** La tablet reclama el token. Exige el secreto en claro, no sólo el id. */
+/** La tablet reclama el token. Exige el secreto en claro, no solo el id. */
 export class ReclamarPairingDto {
   @ApiProperty({ description: 'Secreto de 32 bytes en base64url que la tablet guarda en memoria' })
   @IsString()
@@ -43,6 +43,15 @@ export class AprobarPairingDto {
   @Type(() => Number)
   @IsInt()
   kioskoId: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirma vincular la tablet a un kiosko de una tienda distinta de la que ella cree ser ' +
+      '(sin esto el servidor responde 409 TIENDA_DISTINTA).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  confirmarOtraTienda?: boolean;
 }
 
 /** El admin busca la solicitud por el código que le leyó el encargado. */

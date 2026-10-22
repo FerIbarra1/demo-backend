@@ -132,10 +132,9 @@ describe('construirCsv', () => {
   });
 
   it('escapa comas, comillas y saltos de línea dentro de una celda', () => {
-    const [, datos] = construirCsv(
-      [fila({ cliente: 'Pérez, "El Güero"\nJr.' })],
-      zona,
-    ).slice(1).split('\r\n');
+    const [, datos] = construirCsv([fila({ cliente: 'Pérez, "El Güero"\nJr.' })], zona)
+      .slice(1)
+      .split('\r\n');
     expect(datos).toContain('"Pérez, ""El Güero""\nJr."');
   });
 

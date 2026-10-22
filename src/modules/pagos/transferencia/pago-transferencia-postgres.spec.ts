@@ -276,11 +276,32 @@ describe('Emitir instrucciones', () => {
     await prisma.cuentaBancaria.update({ where: { id: cuentaId }, data: { banco: 'BBVA' } });
   });
 
-  it('los pedidos a DOMICILIO quedan fuera (400) y no se crea nada', async () => {
+  // Oct 2026 (decisión del dueño, 19-oct): a DOMICILIO solo se paga por transferencia. Antes se rechazaba (400).
+  it('un pedido a DOMICILIO SÍ puede pagar por transferencia, y no ofrece "pagar en tienda"', async () => {
     const { pagos } = servicios();
     const p = await crearPedido({ modo: ModoEntrega.DOMICILIO });
-    await expect(pagos.emitirInstrucciones(p.id, cliente())).rejects.toThrow(/domicilio/i);
-    expect(await prisma.pedidoPagoTransferencia.count({ where: { pedidoId: p.id } })).toBe(0);
+    const r = await pagos.emitirInstrucciones(p.id, cliente());
+    expect(r.pago?.estado).toBe('PENDIENTE');
+
+    const vista = await pagos.obtenerParaCliente(p.id, cliente());
+    expect(vista.puedePagarPorTransferencia).toBe(true);
+    expect(vista.pago?.puedeCambiarATienda).toBe(false);
+    // Los textos no mandan a una tienda a la que no va.
+    expect(JSON.stringify(vista)).not.toMatch(/en tienda|recoger/i);
+
+    const tienda = await pagos.resumenParaTienda(p.id, mostrador());
+    expect(tienda.pago?.puedeCambiarATienda).toBe(false);
+  });
+
+  it('a DOMICILIO la transferencia no se puede "cambiar a tienda": no hay forma de pagar allá', async () => {
+    const { pagos } = servicios();
+    const p = await crearPedido({ modo: ModoEntrega.DOMICILIO });
+    await pagos.emitirInstrucciones(p.id, cliente());
+    await expect(pagos.cambiarATienda(p.id, cajero())).rejects.toThrow(/solo se paga por transferencia/i);
+    // El pago sigue vivo.
+    expect(
+      await prisma.pedidoPagoTransferencia.count({ where: { pedidoId: p.id, estado: 'PENDIENTE' } }),
+    ).toBe(1);
   });
 
   it('solo con el pedido PENDIENTE_PAGO (antes el total puede cambiar)', async () => {
@@ -437,11 +458,12 @@ describe('Tesorería: verificar (escenarios 17, y reglas de dinero)', () => {
     const e = await pagos.emitirInstrucciones(p.id, cliente());
     const id = e.pago!.id;
 
-    // Instrucciones abiertas: Tesorería puede verificar el abono si lo ve en el banco, pero no hay
-    // comprobante que rechazar.
+    // Instrucciones abiertas: Tesorería puede verificar el abono si lo ve en el banco, o marcarlas
+    // vencidas (sin plazo, siempre), pero no hay comprobante que rechazar.
     expect((await tes.detalle(id)).acciones).toEqual({
       ...ninguna,
       puedeAprobar: true,
+      puedeVencer: true,
       puedeReenviar: true,
     });
 
@@ -453,6 +475,7 @@ describe('Tesorería: verificar (escenarios 17, y reglas de dinero)', () => {
     expect((await tes.detalle(id)).acciones).toEqual({
       ...ninguna,
       puedeResolverRevision: true,
+      puedeVencer: true,
       puedeReenviar: true,
     });
 
@@ -759,42 +782,55 @@ describe('Bloqueo de la cancelación del cliente', () => {
 // Fase 2: vencimiento MANUAL, abono tardío, atraso y conciliación
 // ====================================================================
 
-/** Hace que las instrucciones de un pago ya hayan pasado su vigencia. */
-const vencerReloj = (pagoId: number, horasAtras = 1) =>
+/** Hace que unas instrucciones lleven `dias` días esperando (el pago se emitió hace tanto). */
+const envejecer = (pagoId: number, dias: number) =>
   prisma.pedidoPagoTransferencia.update({
     where: { id: pagoId },
-    data: { venceAt: new Date(Date.now() - horasAtras * 3_600_000) },
+    data: { createdAt: new Date(Date.now() - dias * 86_400_000) },
   });
 
-describe('Vencimiento manual', () => {
-  it('unas instrucciones VIGENTES no se pueden cerrar (409) y no se tocan', async () => {
+const MOTIVO = 'El cliente avisó que ya no va a transferir';
+
+describe('Vencimiento manual (sin plazo)', () => {
+  it('unas instrucciones recién emitidas ya se pueden marcar vencidas: no hay fecha límite', async () => {
     const { pagos, tes } = servicios();
     const p = await crearPedido();
     const e = await pagos.emitirInstrucciones(p.id, cliente());
-    await expect(tes.vencer(e.pago!.id, tesorero())).rejects.toThrow(/vigentes/);
-    expect((await ver(p.id)).estado).toBe(E.PENDIENTE);
-    expect((await tes.detalle(e.pago!.id)).acciones.puedeVencer).toBe(false);
+    expect((await tes.detalle(e.pago!.id)).acciones.puedeVencer).toBe(true);
+    const d = await tes.vencer(e.pago!.id, MOTIVO, tesorero());
+    expect(d.estado).toBe(E.VENCIDO);
   });
 
-  it('vencidas y sin comprobante: se cierran, quedan en bitácora y caja ya puede cobrar', async () => {
+  it('caja ve cuánto lleva esperando y el bloqueo no menciona ningún vencimiento', async () => {
     const { pagos, tes } = servicios();
     const p = await crearPedido();
     const e = await pagos.emitirInstrucciones(p.id, cliente());
-    await vencerReloj(e.pago!.id);
+    await envejecer(e.pago!.id, 3);
 
-    // Mientras no se cierre, caja sigue con el bloqueo, y el texto le dice qué hacer.
     const antes = await pagos.resumenParaTienda(p.id, mostrador());
     expect(antes.pago?.caja.accion).toBe('NO_COBRAR');
-    expect(antes.pago?.caja.mensaje).toMatch(/venció.*Tesorería.*cierre/i);
-    expect((await tes.detalle(e.pago!.id)).acciones.puedeVencer).toBe(true);
+    expect(antes.pago?.caja.mensaje).not.toMatch(/venci/i);
+    expect(antes.pago?.espera).toMatchObject({ dias: 3, texto: 'Lleva 3 días esperando' });
+    const d = await tes.detalle(e.pago!.id);
+    expect(d.espera?.texto).toBe('Lleva 3 días esperando');
+    // La vista del cliente no trae ni plazo ni "lleva N días": no es para él.
+    const vista = await pagos.obtenerParaCliente(p.id, cliente());
+    expect(JSON.stringify(vista)).not.toMatch(/venceAt|vencido|esperando/);
+  });
 
-    const d = await tes.vencer(e.pago!.id, tesorero());
+  it('marcar vencida: queda en bitácora CON el motivo, y caja ya puede cobrar', async () => {
+    const { pagos, tes } = servicios();
+    const p = await crearPedido();
+    const e = await pagos.emitirInstrucciones(p.id, cliente());
+    await envejecer(e.pago!.id, 5);
+
+    const d = await tes.vencer(e.pago!.id, MOTIVO, tesorero());
     expect(d.estado).toBe(E.VENCIDO);
-    expect(
-      await prisma.pagoTransferenciaEvento.count({
-        where: { pagoId: e.pago!.id, tipo: 'VENCIDO' },
-      }),
-    ).toBe(1);
+    const ev = await prisma.pagoTransferenciaEvento.findMany({
+      where: { pagoId: e.pago!.id, tipo: 'VENCIDO' },
+    });
+    expect(ev).toHaveLength(1);
+    expect(ev[0].detalle).toMatchObject({ motivo: MOTIVO, diasEsperando: 5, manual: true });
     expect(realtime.emitToTesoreria).toHaveBeenCalledWith(
       'pago.estado',
       expect.objectContaining({ estado: E.VENCIDO }),
@@ -803,29 +839,33 @@ describe('Vencimiento manual', () => {
     // Ya no hay pago vivo: caja cobra y el cliente (o el mostrador) puede pedir datos nuevos.
     const despues = await pagos.resumenParaTienda(p.id, mostrador());
     expect(despues.pago?.caja.accion).toBeNull();
+    expect(despues.pago?.espera).toBeNull();
     expect(despues.puedeEnviarDatos).toBe(true);
     expect((await pagos.obtenerParaCliente(p.id, cliente())).puedePedirDatos).toBe(true);
     expect((await pagos.obtenerParaCliente(p.id, cliente())).transferenciaEnCurso).toBe(false);
   });
 
-  it('con un comprobante en revisión NO se cierra aunque haya vencido: puede haber dinero en camino', async () => {
+  it('con un comprobante en revisión NO se cierra, por viejo que sea: puede haber dinero en camino', async () => {
     const { pagos, tes } = servicios();
     const p = await crearPedido();
     const e = await pagos.emitirInstrucciones(p.id, cliente());
     await pagos.subirComprobante(p.id, cliente(), { buffer: PNG } as never, {});
-    await vencerReloj(e.pago!.id);
-    await expect(tes.vencer(e.pago!.id, tesorero())).rejects.toThrow(/dinero en camino/);
+    await envejecer(e.pago!.id, 30);
+    await expect(tes.vencer(e.pago!.id, MOTIVO, tesorero())).rejects.toThrow(/dinero en camino/);
     expect((await ver(p.id)).estado).toBe(E.EN_REVISION);
-    expect((await tes.detalle(e.pago!.id)).acciones.puedeVencer).toBe(false);
+    const d = await tes.detalle(e.pago!.id);
+    expect(d.acciones.puedeVencer).toBe(false);
+    expect(d.espera).toBeNull();
   });
 
   it('cerrar dos veces seguidas: la segunda es 409, no escribe otra bitácora', async () => {
     const { pagos, tes } = servicios();
     const p = await crearPedido();
     const e = await pagos.emitirInstrucciones(p.id, cliente());
-    await vencerReloj(e.pago!.id);
-    await tes.vencer(e.pago!.id, tesorero());
-    await expect(tes.vencer(e.pago!.id, tesorero())).rejects.toBeInstanceOf(ConflictException);
+    await tes.vencer(e.pago!.id, MOTIVO, tesorero());
+    await expect(tes.vencer(e.pago!.id, MOTIVO, tesorero())).rejects.toBeInstanceOf(
+      ConflictException,
+    );
     expect(
       await prisma.pagoTransferenciaEvento.count({
         where: { pagoId: e.pago!.id, tipo: 'VENCIDO' },
@@ -837,10 +877,9 @@ describe('Vencimiento manual', () => {
     const { pagos, tes } = servicios();
     const p = await crearPedido();
     const e = await pagos.emitirInstrucciones(p.id, cliente());
-    await vencerReloj(e.pago!.id);
     const r = await Promise.allSettled([
-      tes.vencer(e.pago!.id, tesorero()),
-      tes.vencer(e.pago!.id, tesorero()),
+      tes.vencer(e.pago!.id, MOTIVO, tesorero()),
+      tes.vencer(e.pago!.id, MOTIVO, tesorero()),
     ]);
     expect(r.filter((x) => x.status === 'fulfilled')).toHaveLength(1);
     expect(
@@ -850,48 +889,23 @@ describe('Vencimiento manual', () => {
     ).toBe(1);
   });
 
-  it('"Esperando" y "Vencidas" se reparten las instrucciones abiertas por su vigencia', async () => {
+  it('"Esperando" lista TODAS las instrucciones abiertas, la más vieja primero, con cuánto llevan', async () => {
     const { pagos, tes } = servicios();
-    const vigente = await crearPedido();
-    const vencida = await crearPedido();
-    const ev = await pagos.emitirInstrucciones(vigente.id, cliente());
-    const ex = await pagos.emitirInstrucciones(vencida.id, cliente());
-    await vencerReloj(ex.pago!.id);
+    const reciente = await crearPedido();
+    const vieja = await crearPedido();
+    const er = await pagos.emitirInstrucciones(reciente.id, cliente());
+    const ev = await pagos.emitirInstrucciones(vieja.id, cliente());
+    await envejecer(ev.pago!.id, 9);
 
-    const ids = async (grupo: 'esperando' | 'vencidas') =>
-      (await tes.listar({ grupo, tiendaId, limite: 100 } as never)).data.map((f) => f.id);
-    expect(await ids('esperando')).toContain(ev.pago!.id);
-    expect(await ids('esperando')).not.toContain(ex.pago!.id);
-    expect(await ids('vencidas')).toContain(ex.pago!.id);
-    expect(await ids('vencidas')).not.toContain(ev.pago!.id);
-    const resumen = await tes.resumen();
-    expect(resumen.vencidas).toBeGreaterThanOrEqual(1);
-  });
-
-  it('"cerrar vencidas" cierra las que aplican, omite las que cambiaron y es idempotente', async () => {
-    const { pagos, tes } = servicios();
-    const a = await crearPedido();
-    const b = await crearPedido();
-    const c = await crearPedido();
-    const ea = await pagos.emitirInstrucciones(a.id, cliente());
-    const eb = await pagos.emitirInstrucciones(b.id, cliente());
-    const ec = await pagos.emitirInstrucciones(c.id, cliente());
-    await Promise.all([ea, eb, ec].map((e) => vencerReloj(e.pago!.id)));
-    // c recibe un comprobante entre que se vence y se cierra: ya no es candidata.
-    await pagos.subirComprobante(c.id, cliente(), { buffer: PNG } as never, {});
-
-    const r1 = await tes.cerrarVencidas(tesorero());
-    expect(r1.cerradas).toBeGreaterThanOrEqual(2);
-    expect((await ver(a.id)).estado).toBe(E.VENCIDO);
-    expect((await ver(b.id)).estado).toBe(E.VENCIDO);
-    expect((await ver(c.id)).estado).toBe(E.EN_REVISION);
-    // Una segunda pasada no encuentra nada de esas tres.
-    await tes.cerrarVencidas(tesorero());
-    expect(
-      await prisma.pagoTransferenciaEvento.count({
-        where: { pagoId: { in: [ea.pago!.id, eb.pago!.id] }, tipo: 'VENCIDO' },
-      }),
-    ).toBe(2);
+    const lista = (await tes.listar({ grupo: 'esperando', tiendaId, limite: 100 } as never)).data;
+    const ids = lista.map((f) => f.id);
+    expect(ids).toContain(er.pago!.id);
+    expect(ids).toContain(ev.pago!.id);
+    expect(ids.indexOf(ev.pago!.id)).toBeLessThan(ids.indexOf(er.pago!.id));
+    expect(lista.find((f) => f.id === ev.pago!.id)?.espera?.texto).toBe('Lleva 9 días esperando');
+    // Ya no existe "Vencidas": ni el grupo ni el contador.
+    expect(await tes.resumen()).not.toHaveProperty('vencidas');
+    expect(JSON.stringify(lista)).not.toMatch(/venceAt/);
   });
 });
 
@@ -900,8 +914,7 @@ describe('Abono tardío (pago VENCIDO)', () => {
     const { pagos, tes } = servicios();
     const p = await crearPedido();
     const e = await pagos.emitirInstrucciones(p.id, cliente());
-    await vencerReloj(e.pago!.id);
-    await tes.vencer(e.pago!.id, tesorero());
+    await tes.vencer(e.pago!.id, MOTIVO, tesorero());
 
     const d = await tes.detalle(e.pago!.id);
     expect(d.acciones).toMatchObject({
@@ -909,7 +922,7 @@ describe('Abono tardío (pago VENCIDO)', () => {
       aprobarRequiereNota: true,
       puedeVencer: false,
     });
-    expect(d.advertencias.join(' ')).toMatch(/vencieron/);
+    expect(d.advertencias.join(' ')).toMatch(/marcaron vencidas/);
 
     await expect(tes.aprobar(e.pago!.id, aprobarDto() as never, tesorero())).rejects.toThrow(
       /abono tardío/,
@@ -932,8 +945,7 @@ describe('Abono tardío (pago VENCIDO)', () => {
     const { pagos, tes } = servicios();
     const p = await crearPedido();
     const viejo = await pagos.emitirInstrucciones(p.id, cliente());
-    await vencerReloj(viejo.pago!.id);
-    await tes.vencer(viejo.pago!.id, tesorero());
+    await tes.vencer(viejo.pago!.id, MOTIVO, tesorero());
     const nuevo = await pagos.emitirInstrucciones(p.id, cliente());
     expect(nuevo.pago!.id).not.toBe(viejo.pago!.id);
 
@@ -1100,18 +1112,25 @@ describe('Transferencia elegida al pedir: se emite sola al pasar a pago', () => 
     expect((await pagos.resumenParaTienda(p.id, mostrador())).pago?.caja.accion).toBe('NO_COBRAR');
   });
 
-  it('con pago en caja, sin método, o a domicilio NO emite nada (y no estorba mandar a pagar)', async () => {
+  it('con pago en caja o sin método NO emite nada (y no estorba mandar a pagar)', async () => {
     const enCaja = await crearPedido();
     await conMetodo(enCaja.id, 'EN_TIENDA');
     const sinMetodo = await crearPedido();
-    const domicilio = await crearPedido({ modo: ModoEntrega.DOMICILIO });
-    await conMetodo(domicilio.id, 'TRANSFERENCIA');
-    for (const x of [enCaja, sinMetodo, domicilio]) expect(await emitir(x.id)).toBeNull();
+    for (const x of [enCaja, sinMetodo]) expect(await emitir(x.id)).toBeNull();
     expect(
       await prisma.pedidoPagoTransferencia.count({
-        where: { pedidoId: { in: [enCaja.id, sinMetodo.id, domicilio.id] } },
+        where: { pedidoId: { in: [enCaja.id, sinMetodo.id] } },
       }),
     ).toBe(0);
+  });
+
+  it('a DOMICILIO con transferencia elegida, al pasar a pago se emite SOLA (el cliente no está en tienda para pedirla)', async () => {
+    const domicilio = await crearPedido({ modo: ModoEntrega.DOMICILIO });
+    await conMetodo(domicilio.id, 'TRANSFERENCIA');
+    expect(await emitir(domicilio.id)).not.toBeNull();
+    expect(
+      await prisma.pedidoPagoTransferencia.count({ where: { pedidoId: domicilio.id, estado: 'PENDIENTE' } }),
+    ).toBe(1);
   });
 });
 

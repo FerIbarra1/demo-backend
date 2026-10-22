@@ -440,11 +440,14 @@ export class CatalogHandler {
       TELEFONO?: string;
       EMAIL?: string;
       ACTIVO?: string;
+      SERIE?: string;
     };
     const externalId = evento.localId;
     if (!externalId) return { ok: false, mensaje: 'TIENDAS sin IDTIENDA' };
 
     const nombre = (d.NOMBRE ?? '').trim();
+    // Oct 2026 (parte B): TIENDAS.SERIE (HMO, MXL…) es el prefijo visual del folio. Sin ella no se pisa la que ya había.
+    const serie = (d.SERIE ?? '').trim().toUpperCase().slice(0, 10) || null;
     const activa = (d.ACTIVO ?? 'S').trim().toUpperCase().startsWith('S');
 
     if (evento.operacion === 'D') {
@@ -464,6 +467,7 @@ export class CatalogHandler {
         ...(d.CIUDAD ? { ciudad: d.CIUDAD.trim() } : {}),
         ...(d.TELEFONO ? { telefono: d.TELEFONO.trim() } : {}),
         ...(d.EMAIL ? { email: d.EMAIL.trim() } : {}),
+        ...(serie ? { serie } : {}),
         activa,
       },
       create: {
@@ -474,6 +478,7 @@ export class CatalogHandler {
         estado: '',
         telefono: (d.TELEFONO ?? '').trim() || null,
         email: (d.EMAIL ?? '').trim() || null,
+        serie,
         activa,
       },
     });

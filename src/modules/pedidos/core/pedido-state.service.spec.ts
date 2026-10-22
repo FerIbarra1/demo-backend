@@ -1,3 +1,4 @@
+import { ConflictException } from '@nestjs/common';
 import { EstadoPedido } from '@prisma/client';
 import { PedidoStateService } from './pedido-state.service';
 
@@ -14,7 +15,7 @@ import { PedidoStateService } from './pedido-state.service';
 /** Prisma mockeado que registra la transición intentada. */
 function crearServicio(
   estadoActual: EstadoPedido,
-  opts: { asignadoAId?: number | null; vecesEnRevisado?: number } = {},
+  opts: { asignadoAId?: number | null; vecesEnRevisado?: number; folioErp?: string | null } = {},
 ) {
   const updateMany = jest.fn().mockResolvedValue({ count: 1 });
 
@@ -25,6 +26,7 @@ function crearServicio(
         tiendaId: 5,
         estado: estadoActual,
         numeroPedido: 'PT-0001',
+        folioErp: opts.folioErp ?? null,
         asignadoAId: opts.asignadoAId ?? null,
         asignadoAt: null,
         tiempoAtencionBodegaMs: 0,
@@ -35,13 +37,18 @@ function crearServicio(
     },
     // Oct 2026: la cancelación consulta si el pedido tenía un pago por transferencia (aquí: ninguno).
     pedidoPagoTransferencia: { findFirst: jest.fn().mockResolvedValue(null) },
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     historialPedido: {
       create: jest.fn().mockResolvedValue({}),
       // F22: el correo "listo en tienda" es del PRIMER paso a REVISADO; la máquina
       // cuenta cuántas veces ya estuvo ahí.
       count: jest.fn().mockResolvedValue(opts.vecesEnRevisado ?? 0),
     },
+    // Oct 2026 (parte B): al salir del surtido la máquina deja la solicitud del folio del ERP.
+    pedidoFolioSolicitud: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
     pedidoPendienteEnvio: {
+      // Oct 2026: al cancelar, la máquina mira la fila de envío (sin fila = nunca llegó al ERP: no hay nada que reflejar).
+      findUnique: jest.fn().mockResolvedValue(null),
       create: jest.fn().mockResolvedValue({}),
       // El guard de PENDIENTE_PAGO consulta si el pedido YA tiene fila en la
       // cola del ERP. En estos tests no hay ninguna, así que el caller debe
@@ -77,7 +84,7 @@ const usuario = { userId: 3, nombre: 'Operador', rol: 'MOSTRADOR' } as never;
  *
  * Añade `encolarFirebird` cuando el destino es PENDIENTE_PAGO, porque la máquina
  * lo exige (un pedido en ese estado sin fila en la cola del ERP es invisible
- * al agente para siempre). El guard tiene su propio test más abajo; aquí sólo
+ * al agente para siempre). El guard tiene su propio test más abajo; aquí solo
  * se pregunta qué aristas permite `TRANSICIONES`.
  */
 async function intenta(
@@ -315,6 +322,59 @@ describe('oct 2026 — avisar al bodeguero cuando cancelan el pedido que está s
 });
 
 /**
+ * Oct 2026 — `desdeEstados`: la transición solo vale si el pedido SIGUE donde el caller lo vio.
+ *
+ * El caso real: el cliente decide cancelar leyendo REVISADO y, en esos segundos, el operador lo llama (EN_ATENCION).
+ * `EN_ATENCION → CANCELADO` existe para el operador, así que sin la guarda la cancelación del cliente entraba a
+ * mitad del recuento — justo lo que la regla «En atención se cierra para el cliente» cerró.
+ */
+describe('oct 2026 — desdeEstados: la guarda de quien decidió con una lectura previa', () => {
+  const cancelar = (actual: EstadoPedido, desdeEstados: readonly EstadoPedido[]) => {
+    const t = crearServicio(actual);
+    return {
+      ...t,
+      resultado: t.svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.CANCELADO } as never, usuario, {
+        asignacion: 'limpiar',
+        desdeEstados,
+      } as never),
+    };
+  };
+
+  it('si el pedido cambió de estado entre tanto: 409 y no escribe NADA', async () => {
+    const { resultado, updateMany, tx } = cancelar(EstadoPedido.EN_ATENCION, [
+      EstadoPedido.REVISADO,
+    ]);
+
+    await expect(resultado).rejects.toThrow(/cambió mientras se procesaba/i);
+    await expect(resultado).rejects.toBeInstanceOf(ConflictException);
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(tx.historialPedido.create).not.toHaveBeenCalled();
+  });
+
+  it('si sigue donde lo vio, cancela como siempre', async () => {
+    const { resultado, updateMany } = cancelar(EstadoPedido.REVISADO, [EstadoPedido.REVISADO]);
+    await resultado;
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('acepta varios estados de origen', async () => {
+    const { resultado } = cancelar(EstadoPedido.EN_ASESORIA, [
+      EstadoPedido.ESPERANDO_APROBACION,
+      EstadoPedido.EN_ASESORIA,
+    ]);
+    await expect(resultado).resolves.toBeDefined();
+  });
+
+  it('sin la opción, el comportamiento de siempre (la transición válida pasa)', async () => {
+    const { svc, updateMany } = crearServicio(EstadoPedido.EN_ATENCION);
+    await svc.cambiarEstado(1, { nuevoEstado: EstadoPedido.CANCELADO } as never, usuario, {
+      asignacion: 'limpiar',
+    } as never);
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
  * F22 (oct 2026): el correo "tu pedido ya está listo en tienda" es del PRIMER paso a
  * `REVISADO`.
  *
@@ -504,5 +564,64 @@ describe('F22 — la llamada se limpia completa al salir de EN_ATENCION', () => 
     expect(d.llamadoAt).toBeNull();
     expect(d.llamadoPorId).toBeNull();
     expect(d.llamadoMostradorId).toBeNull();
+  });
+});
+
+/**
+ * Oct 2026 (parte B): el pedido que sale del surtido pide su folio REAL al Sistema Comercial. Un solo punto en la
+ * máquina para los tres cierres de bodega; solo deja la solicitud en la cola (el agente la contesta después) y es
+ * idempotente: la tabla tiene UNA fila por pedido, así que un ajuste que regresa el pedido a bodega no pide otro.
+ */
+describe('parte B — la salida del surtido pide el folio del ERP', () => {
+  const pideFolio = async (
+    desde: EstadoPedido,
+    hacia: EstadoPedido,
+    opts: { folioErp?: string | null; encolar?: boolean } = {},
+  ) => {
+    const { svc, tx } = crearServicio(desde, { folioErp: opts.folioErp });
+    await svc.cambiarEstado(1, { nuevoEstado: hacia } as never, usuario, {
+      encolarFirebird: opts.encolar ?? hacia === EstadoPedido.PENDIENTE_PAGO,
+      asignacion: 'limpiar',
+    } as never);
+    return tx.pedidoFolioSolicitud.createMany as jest.Mock;
+  };
+
+  it.each([
+    [EstadoPedido.EN_REVISION, EstadoPedido.REVISADO],
+    [EstadoPedido.EN_REVISION, EstadoPedido.ESPERANDO_APROBACION],
+    [EstadoPedido.EN_REVISION, EstadoPedido.PENDIENTE_PAGO],
+  ])('%s → %s deja la solicitud del pedido (con su tienda)', async (desde, hacia) => {
+    const createMany = await pideFolio(desde, hacia);
+    expect(createMany).toHaveBeenCalledTimes(1);
+    expect(createMany).toHaveBeenCalledWith({
+      data: [{ pedidoId: 1, tiendaId: 5 }],
+      // Idempotente: si ya existe, no hace nada (y sobre todo no aborta la transacción como lo haría un INSERT fallido).
+      skipDuplicates: true,
+    });
+  });
+
+  it('red de seguridad: cualquier otro camino que lo deje después del surtido también la deja', async () => {
+    // Un atajo (p. ej. mostrador manda a pagar un pedido que nunca pidió folio, o el agente estaba caído al cerrar).
+    const createMany = await pideFolio(EstadoPedido.REVISADO, EstadoPedido.PENDIENTE_PAGO);
+    expect(createMany).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [EstadoPedido.EN_REVISION, EstadoPedido.CANCELADO],
+    [EstadoPedido.SOLICITADO, EstadoPedido.EN_REVISION],
+    [EstadoPedido.REVISADO, EstadoPedido.EN_REVISION],
+  ])(
+    '%s → %s NO la deja: todavía no sale del surtido (o ya no lo necesita)',
+    async (desde, hacia) => {
+      const createMany = await pideFolio(desde, hacia);
+      expect(createMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('un pedido que YA tiene folio no vuelve a pedirlo', async () => {
+    const createMany = await pideFolio(EstadoPedido.EN_REVISION, EstadoPedido.REVISADO, {
+      folioErp: '0000152573',
+    });
+    expect(createMany).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
@@ -42,11 +42,24 @@ async function bootstrap() {
     );
   }
 
+  // Detrás de nginx (VPS), la IP real del cliente viene en `X-Forwarded-For`. Ver `trustProxyHops` en app.config.
+  const trustProxyHops = configService.get<number>('app.trustProxyHops') ?? 0;
+  if (trustProxyHops > 0) {
+    app.set('trust proxy', trustProxyHops);
+  } else if (process.env.NODE_ENV === 'production') {
+    // No se aborta (puede haber un despliegue sin proxy), pero se grita: con nginx delante y esto en 0, todos los
+    // clientes comparten un límite de peticiones y las tablets de las tiendas topan con 429 en horas pico.
+    new Logger('Bootstrap').warn(
+      'TRUST_PROXY_HOPS=0 en producción: si hay un proxy (nginx) delante, el límite por IP verá una sola IP. ' +
+        'Pon TRUST_PROXY_HOPS=1 detrás de nginx.',
+    );
+  }
+
   // Configuración de seguridad.
   // El fallback local de imágenes (/files/) se sirve desde OTRO origen (el
   // frontend corre en otro puerto), así que la política por defecto de helmet
   // (Cross-Origin-Resource-Policy: same-origin + CSP img-src 'self') lo bloquea
-  // y las imágenes subidas en dev nunca se ven. Se relaja sólo para /files/:
+  // y las imágenes subidas en dev nunca se ven. Se relaja solo para /files/:
   // son assets estáticos públicos, no respuestas de API.
   app.use(
     helmet({
@@ -94,7 +107,7 @@ async function bootstrap() {
     }),
   );
 
-  // Swagger Documentation — sólo en desarrollo. En producción no se expone
+  // Swagger Documentation — solo en desarrollo. En producción no se expone
   // para no filtrar el contrato de la API (endpoints, DTOs, esquemas).
   if (process.env.NODE_ENV !== 'production') {
     const config = new DocumentBuilder()

@@ -40,7 +40,7 @@ describe('SyncAgentController contract', () => {
         checkpointAvanzado: true,
       }),
     };
-    const controller = new SyncAgentController(service as any);
+    const controller = new SyncAgentController(service as any, {} as any);
 
     await expect(controller.upload(upload as any, '5')).resolves.toEqual({
       procesados: 1,
@@ -52,7 +52,7 @@ describe('SyncAgentController contract', () => {
 
   it('rejects upload when body and header stores differ', async () => {
     const service = { procesarUpload: jest.fn() };
-    const controller = new SyncAgentController(service as any);
+    const controller = new SyncAgentController(service as any, {} as any);
 
     await expect(controller.upload(upload as any, '6')).rejects.toBeInstanceOf(BadRequestException);
     expect(service.procesarUpload).not.toHaveBeenCalled();
@@ -60,7 +60,7 @@ describe('SyncAgentController contract', () => {
 
   it('requires agent identity for polling', async () => {
     const service = { pollPedidos: jest.fn() };
-    const controller = new SyncAgentController(service as any);
+    const controller = new SyncAgentController(service as any, {} as any);
 
     await expect(controller.pollPedidos('5', '', '20')).rejects.toBeInstanceOf(BadRequestException);
     expect(service.pollPedidos).not.toHaveBeenCalled();
@@ -70,7 +70,7 @@ describe('SyncAgentController contract', () => {
     const service = {
       procesarPedidosAck: jest.fn().mockResolvedValue({ actualizados: 1, errores: 0 }),
     };
-    const controller = new SyncAgentController(service as any);
+    const controller = new SyncAgentController(service as any, {} as any);
 
     await expect(controller.pedidosAck(ack as any, '5')).resolves.toEqual({
       actualizados: 1,

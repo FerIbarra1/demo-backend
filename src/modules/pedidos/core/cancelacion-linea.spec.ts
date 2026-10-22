@@ -92,6 +92,7 @@ function item(over: Partial<Record<string, unknown>> = {}) {
 function crearTx(items: any[]) {
   const updates: Array<{ id: number; data: any }> = [];
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: jest.fn(async ({ where }: any) => {
         const i = items.find((x) => x.id === where.id);

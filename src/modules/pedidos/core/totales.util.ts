@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { aplicarPromoVolumen } from './promo-volumen.util';
+import { sumarDtfDelPedido } from '../../dtf/core/dtf-estado.util';
 
 /**
  * F16 (sep 2026): recálculo de los totales de un pedido.
@@ -39,10 +40,14 @@ export async function recalcularTotalesPedido(
     select: { subtotal: true },
   });
 
-  const subtotal = items.reduce(
-    (acc, i) => acc.plus(new Prisma.Decimal(i.subtotal)),
-    new Prisma.Decimal(0),
-  );
+  // Oct 2026 (impresión DTF, PLAN-DTF.md §5.2): el total del pedido incluye sus trabajos DTF vivos. Es el
+  // ÚNICO punto donde se suma, por la misma razón que la promo de volumen vive aquí: los caminos que
+  // mutan el pedido ya pasan por esta función, así que ninguno puede olvidarlo. Un DTF rechazado o
+  // cancelado deja de sumar (`ESTADOS_DTF_QUE_SE_COBRAN`); la promo de 12 piezas NO cuenta DTF (no es item).
+  const subtotalDtf = await sumarDtfDelPedido(tx, pedido.id);
+  const subtotal = items
+    .reduce((acc, i) => acc.plus(new Prisma.Decimal(i.subtotal)), new Prisma.Decimal(0))
+    .plus(subtotalDtf);
   const total = subtotal
     .minus(new Prisma.Decimal(pedido.descuento))
     .plus(new Prisma.Decimal(pedido.impuestos));

@@ -339,6 +339,9 @@ export class ReposicionService {
             select: {
               id: true,
               numeroPedido: true,
+              // Oct 2026 (B2): con estas dos el servidor decora el pedido con su `folio` (la bolsa lleva ese ticket).
+              tiendaId: true,
+              folioErp: true,
               clienteNombre: true,
               fechaPedido: true,
               // La tarjeta dice POR QUÉ hay que devolver las prendas: el pedido se

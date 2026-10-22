@@ -41,7 +41,7 @@ export class CatalogoService {
 
     const skip = (pagina - 1) * limite;
 
-    // B2B: no hay stock en tiempo real. El "soloDisponibles" sólo filtra
+    // B2B: no hay stock en tiempo real. El "soloDisponibles" solo filtra
     // productos visibles y activos.
     const where: any = {
       tiendaId,

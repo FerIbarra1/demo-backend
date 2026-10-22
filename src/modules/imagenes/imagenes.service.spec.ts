@@ -69,9 +69,7 @@ function crearStorageFako() {
 function crearFile(): Express.Multer.File {
   // Buffer con magic-byte JPEG. `detectarMimeImagen` exige >=12 bytes;
   // JPEG se identifica por los primeros 3 (FF D8 FF) y no requiere más.
-  const buf = Buffer.from([
-    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01,
-  ]);
+  const buf = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
   return {
     fieldname: 'file',
     originalname: 'x.jpg',
@@ -90,18 +88,14 @@ describe('ImagenesService.subirImagen — exige color', () => {
     });
     const svc = new ImagenesService(prisma, crearStorageFako());
 
-    await expect(svc.subirImagen(1, 99, crearFile())).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    await expect(svc.subirImagen(1, 99, crearFile())).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('lanza NotFound si el producto no existe o está inactivo', async () => {
     const prisma = crearPrismaFako({ producto: null, pertenece: true });
     const svc = new ImagenesService(prisma, crearStorageFako());
 
-    await expect(svc.subirImagen(1, 2, crearFile())).rejects.toThrow(
-      /Producto no encontrado/i,
-    );
+    await expect(svc.subirImagen(1, 2, crearFile())).rejects.toThrow(/Producto no encontrado/i);
   });
 
   it('lanza BadRequest si ya hay 4 imágenes para el color', async () => {
@@ -112,9 +106,7 @@ describe('ImagenesService.subirImagen — exige color', () => {
     });
     const svc = new ImagenesService(prisma, crearStorageFako());
 
-    await expect(svc.subirImagen(1, 2, crearFile())).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    await expect(svc.subirImagen(1, 2, crearFile())).rejects.toBeInstanceOf(BadRequestException);
   });
 
   it('sube la imagen cuando el color pertenece y hay tope', async () => {

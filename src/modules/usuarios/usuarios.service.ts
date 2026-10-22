@@ -103,7 +103,7 @@ export class UsuariosService {
   async crear(dto: CrearUsuarioDto) {
     if (dto.rol === RolUsuario.CLIENTE) {
       throw new BadRequestException(
-        'Los clientes no se crean desde el panel. Se registran en la web o vienen de Firebird.',
+        'Los clientes no se crean desde el panel. Se registran en la web o vienen del Sistema Comercial.',
       );
     }
     const existente = await this.prisma.usuario.findUnique({
@@ -111,7 +111,7 @@ export class UsuariosService {
       select: { id: true },
     });
     if (existente) {
-      throw new ConflictException('El email ya está registrado');
+      throw new ConflictException('Ese correo ya está registrado');
     }
     // TESORERIA es multi-tienda: no pertenece a ninguna. Todos los demás roles necesitan tienda
     // (sin ella `PedidoAccessService` los rechaza en todo).
@@ -149,7 +149,7 @@ export class UsuariosService {
     }
     if (usuario.rol === RolUsuario.CLIENTE) {
       throw new ForbiddenException(
-        'Los clientes no se editan desde el panel. Sus datos vienen de Firebird o de su registro web.',
+        'Los clientes no se editan desde el panel. Sus datos vienen del Sistema Comercial o de su registro web.',
       );
     }
     if (dto.rol === RolUsuario.CLIENTE) {

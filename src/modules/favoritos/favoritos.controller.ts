@@ -18,7 +18,7 @@ export class FavoritosController {
    * El detalle de precios/variantes se filtra por la tienda activa del
    * cliente (header X-Tienda-Id, que el frontend envía en cada request).
    * No hay riesgo IDOR: los favoritos están scoped al usuarioId autenticado;
-   * el tiendaId sólo filtra precios, no expone datos de otros clientes.
+   * el tiendaId solo filtra precios, no expone datos de otros clientes.
    */
   @Get()
   @ApiOperation({ summary: 'Mis favoritos' })

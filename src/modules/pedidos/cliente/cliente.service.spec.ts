@@ -78,6 +78,7 @@ function crearServicio(opts: {
     },
   };
 
+  (prisma as any).$transaction = async (fn: (tx: unknown) => unknown) => fn(prisma); // crearPedido adjunta el DTF en la misma transacción (impresión DTF, oct 2026)
   const svc = new ClienteService(
     prisma as never,
     // `enviar` es fire-and-forget (`.catch(...)`), así que debe devolver una

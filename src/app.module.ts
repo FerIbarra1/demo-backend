@@ -21,6 +21,11 @@ import { ImagenesModule } from './modules/imagenes/imagenes.module';
 import { ConfiguracionModule } from './modules/configuracion/configuracion.module';
 import { UsuariosModule } from './modules/usuarios/usuarios.module';
 import { PagosModule } from './modules/pagos/pagos.module';
+import { DtfModule } from './modules/dtf/dtf.module';
+import { AdminTorreModule } from './modules/admin-torre/admin-torre.module';
+import { DestrabarModule } from './modules/destrabar/destrabar.module';
+import { ActividadWorkersModule } from './common/actividad-workers';
+import { SeriesModule } from './common/folio/series.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
@@ -33,6 +38,9 @@ import { Reflector } from '@nestjs/core';
       load: [appConfig],
     }),
     PrismaModule,
+    // N3: la última corrida de cada worker (global; los workers lo piden como @Optional).
+    ActividadWorkersModule,
+    SeriesModule,
     // Fase 0 (sep 2026): resolución de la lista de precios del cliente.
     // @Global() — la usan catálogo, cliente y propuesta. Va antes de los
     // módulos de dominio que la consumen.
@@ -56,6 +64,10 @@ import { Reflector } from '@nestjs/core';
     UsuariosModule,
     // Oct 2026: pagos por transferencia (cuentas, instrucciones, comprobantes, Tesorería).
     PagosModule,
+    DtfModule,
+    // N1 (oct 2026): torre de control del ADMIN (una tarjeta por tienda).
+    AdminTorreModule,
+    DestrabarModule,
     // F11 (ago 2026): gestión de ventanillas físicas del módulo de cajeros.
     // Se importa desde PedidosModule para que CajeroService pueda usar
     // VentanillasService — no se registra aquí para evitar duplicados.

@@ -78,7 +78,6 @@ async function crearPedido(
         cuentaSnapshot: { banco: 'B', titular: 'T', clabe: '012180001234567897' },
         referencia: String(7_000_000 + ++refs + Number(suffix.slice(-3)) * 1000).slice(0, 7),
         concepto: 'PRUEBA',
-        venceAt: new Date(Date.now() + 3_600_000),
         // La BD exige que todo pago verificado diga cuánto, cuándo y quién.
         ...(o.transferencia.verificadaHaceMin !== undefined
           ? {
@@ -230,6 +229,34 @@ describe('Fila de caja — transferencias', () => {
       p.id,
     ]);
     expect((await caja.llamarSiguiente(cajero as never)).pedidoId).toBe(p.id);
+  });
+
+  // Oct 2026 (hallazgo H1 del plan de pagos): a domicilio SOLO se paga por transferencia. Verificada dentro del
+  // dinero, la tienda tiene que registrarla en el Sistema Comercial; si ninguna consola la mostrara, el pedido nunca
+  // llegaría a PAGADO ni a ENVIADO.
+  it('«Por registrar» trae el domicilio con la transferencia VERIFICADA, marcado para solo registrar; la fila y la TV no', async () => {
+    const { caja, monitor } = servicios();
+    const domicilio = await crearPedido({
+      modo: ModoEntrega.DOMICILIO,
+      transferencia: { estado: E.VERIFICADO, verificadaHaceMin: 5 },
+    });
+    const enProceso = await crearPedido({ modo: ModoEntrega.DOMICILIO, transferencia: { estado: E.PENDIENTE } });
+    const normal = await crearPedido({ transferencia: { estado: E.VERIFICADO, verificadaHaceMin: 5 } });
+
+    const porRegistrar = await caja.obtenerColaVentanilla(tiendaId, 1, 20, 'TODOS', 'verificado');
+    const ids = porRegistrar.data.map((p) => p.id);
+    expect(ids).toContain(domicilio.id);
+    expect(ids).toContain(normal.id);
+    // Una transferencia que aún no se verifica NO es «por registrar» (no hay dinero que registrar).
+    expect(ids).not.toContain(enProceso.id);
+    const fila = porRegistrar.data.find((p) => p.id === domicilio.id);
+    expect(fila?.soloRegistrar).toBe(true);
+    expect(porRegistrar.data.find((p) => p.id === normal.id)?.soloRegistrar).toBe(false);
+
+    // La fila normal de ventanilla y la TV siguen sin ver el domicilio: no hay a quién llamar.
+    const cola = await caja.obtenerColaVentanilla(tiendaId);
+    expect(cola.data.map((p) => p.id)).not.toContain(domicilio.id);
+    expect((await monitor.obtenerMonitorCajero(tiendaId)).colaSinAsignar.map((p) => p.id)).not.toContain(domicilio.id);
   });
 
   it('un pedido a DOMICILIO nunca aparece en la TV, pague como pague', async () => {

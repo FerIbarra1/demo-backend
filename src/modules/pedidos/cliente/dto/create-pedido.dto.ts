@@ -6,7 +6,6 @@ import {
   IsEnum,
   ValidateNested,
   Min,
-  ArrayMinSize,
   IsEmail,
   MaxLength,
   Matches,
@@ -27,13 +26,39 @@ class ItemPedidoInputDto {
   cantidad: number;
 }
 
+/** Oct 2026 (impresión DTF): un trabajo DTF ya creado como borrador (con su archivo) que se agrega al pedido. */
+class DtfPedidoInputDto {
+  @ApiProperty({ description: 'ID del borrador DTF (POST /dtf/borradores)' })
+  @IsNumber()
+  trabajoId: number;
+
+  @ApiPropertyOptional({
+    description: 'true: el archivo se entregará en tienda (USB/correo) y lo adjunta el personal.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  sinArchivo?: boolean;
+}
+
 export class CreatePedidoDto {
-  @ApiProperty({ type: [ItemPedidoInputDto] })
+  // Oct 2026: las prendas ya no son obligatorias (un pedido puede ser solo DTF). El servicio exige que
+  // haya al menos una prenda o un trabajo DTF.
+  @ApiPropertyOptional({ type: [ItemPedidoInputDto] })
+  @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ItemPedidoInputDto)
-  @ArrayMinSize(1)
-  items: ItemPedidoInputDto[];
+  items?: ItemPedidoInputDto[];
+
+  @ApiPropertyOptional({
+    type: [DtfPedidoInputDto],
+    description: 'Trabajos DTF (impresión por metro) del pedido.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => DtfPedidoInputDto)
+  dtf?: DtfPedidoInputDto[];
 
   @ApiPropertyOptional({ enum: CanalOrigen, default: CanalOrigen.WEB })
   @IsOptional()
@@ -74,7 +99,7 @@ export class CreatePedidoDto {
   @IsEnum(ModoEntrega)
   modoEntrega?: ModoEntrega;
 
-  // Envío (sólo DOMICILIO)
+  // Envío (solo DOMICILIO)
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

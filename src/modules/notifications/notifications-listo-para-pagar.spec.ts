@@ -11,7 +11,8 @@ import { NotificationsService } from './notifications.service';
  * mano. Aquí se lee el HTML RENDERIZADO, que es lo que lee el cliente.
  */
 
-const FOLIO_VFP = 'F-778899';
+// Un folio del Sistema Comercial real: exactamente 10 dígitos (`esFolioErp`).
+const FOLIO_VFP = '0000778899';
 
 function crearServicio(pago: { estado: E } | null) {
   const enviados: Array<{
@@ -36,7 +37,6 @@ function crearServicio(pago: { estado: E } | null) {
           },
           referencia: '3340781',
           concepto: 'PD2026000123',
-          venceAt: new Date('2026-10-18T07:00:00Z'),
         },
       ),
     },
@@ -147,6 +147,13 @@ describe('enviarListoParaPagar — pago en caja', () => {
     expect(t).not.toMatch(/datos para transferir/i);
     expect(t).not.toMatch(/elegiste pagar por transferencia/i);
     expect(html).toContain('data:image/png;base64'); // el QR de caja
+  });
+
+  it('un folio que no es de 10 dígitos (el "PD-2026-00" del agente anterior) no se le muestra al cliente', async () => {
+    const { svc, enviados } = crearServicio({ estado: E.PENDIENTE });
+    await svc.enviarListoParaPagar(pedido(), 'PD-2026-00');
+    expect(enviados[0].subject).not.toContain('PD-2026-00');
+    expect(texto(enviados[0])).not.toMatch(/PD-2026-00(?!\d)/);
   });
 
   it('sin correo del cliente no envía nada', async () => {

@@ -34,6 +34,7 @@ import { TesoreriaService } from './transferencia/tesoreria.service';
     PagoTransferenciaService,
     TesoreriaService,
   ],
-  exports: [PagoTransferenciaService],
+  // `TesoreriaService`: el módulo de destrabar marca vencida una transferencia por la misma vía que Tesorería.
+  exports: [PagoTransferenciaService, TesoreriaService],
 })
 export class PagosModule {}

@@ -1,24 +1,25 @@
 import { EstadoPedido } from '@prisma/client';
 
 /**
- * Mapeo del enum EstadoPedido a texto legible en español para mostrar en
- * emails al cliente. Sin emojis, sin jerga técnica — sólo el nombre que
- * tiene sentido para una persona que está del lado del cliente.
+ * Mapeo del enum EstadoPedido a texto legible en español para el CLIENTE (hoy lo lee el kiosko en "Estado:" al avisar la
+ * llegada). Sin emojis, sin jerga técnica y en VOZ NEUTRA (sin "tu" ni imperativos).
+ *
+ * Es la MISMA tabla que `ETIQUETA_ESTADO` del frontend (`lib/utils/seguimiento.ts`): las mismas palabras que la barra de
+ * pasos del pedido. Oct 2026: antes el kiosko decía "Listo en tienda · revísalo" y "Te estamos atendiendo en mostrador", y la
+ * app tres frases distintas para el mismo estado. `estado-labels.spec.ts` fija los valores; el frontend los fija en
+ * `scripts/test-seguimiento.ts`: si se cambia uno hay que cambiar el otro.
  */
 export const ESTADO_PEDIDO_LABELS: Record<EstadoPedido, string> = {
-  SOLICITADO: 'Recibido · en cola de revisión',
-  EN_REVISION: 'En revisión por bodega',
-  ESPERANDO_APROBACION: 'Propuesta pendiente de tu aprobación',
+  SOLICITADO: 'Recibido',
+  EN_REVISION: 'En preparación',
+  ESPERANDO_APROBACION: 'Pendiente de aprobación',
   EN_ASESORIA: 'Con un asesor de ventas',
-  // F16 (sep 2026): el pedido está apartado en tienda esperando que el cliente
-  // lo revise antes de pagar.
-  REVISADO: 'Listo en tienda · revísalo',
-  // F17: el operador ya lo está atendiendo. El cliente no recibe email de este
-  // paso (está enfrente), pero el mapa es exhaustivo y el valor hace falta.
-  EN_ATENCION: 'Te estamos atendiendo en mostrador',
+  EN_DTF: 'En impresión DTF',
+  REVISADO: 'Listo en tienda',
+  EN_ATENCION: 'En atención en mostrador',
   PENDIENTE_PAGO: 'Pendiente de pago',
-  PAGADO: 'Pago confirmado',
-  ENVIADO: 'Enviado · en camino',
+  PAGADO: 'Pagado',
+  ENVIADO: 'Enviado',
   ENTREGADO: 'Entregado',
   CANCELADO: 'Cancelado',
 };

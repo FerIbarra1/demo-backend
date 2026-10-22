@@ -97,6 +97,72 @@ describe('Contrato de roles', () => {
     });
   });
 
+  describe('GERENTE solo está donde se le nombra (lista cerrada)', () => {
+    // El gerente supervisa UNA tienda (torre, salud, búsqueda). Lo que solo hace el ADMIN —marcar gratis, cancelar
+    // pagados, cambiar precios, crear empleados— es solo del ADMIN porque `RolesGuard` niega por defecto: basta con
+    // que GERENTE no aparezca en esos controllers. Este test lo convierte en contrato: si alguien agrega GERENTE a
+    // un `@Roles` fuera de esta lista (sea de método o de clase), falla y tiene que explicar por qué.
+    const PERMITIDO_COMPLETO = [
+      'GerenciaController',
+      'PedidoConsultaController',
+      'PedidoBusquedaController',
+      // Destrabar pedidos (gerente y admin) y las tareas del Sistema Comercial (también las ve el cajero).
+      'DestrabarController',
+      'TareasErpController',
+    ];
+    const PERMITIDO_SOLO = {
+      AuthController: ['logout', 'getProfile', 'updateProfile', 'changePassword', 'heartbeat'],
+      // Kioskos de SU tienda (alta, ubicación, apagar, desvincular) y vincular sus tablets. El alcance por tienda
+      // lo hace `KioskoService`/`KioskoPairingService` (`kiosko.service.spec.ts`); aquí solo se nombra dónde entra.
+      KioskoController: ['listar', 'crear', 'actualizar', 'desvincular'],
+      KioskoPairingController: ['buscar', 'aprobar', 'cancelar'],
+    } as Record<string, string[]>;
+
+    const raiz = join(__dirname, '..', 'modules');
+    const archivos: string[] = [];
+    const recorrer = (dir: string) => {
+      for (const nombre of readdirSync(dir)) {
+        const ruta = join(dir, nombre);
+        if (statSync(ruta).isDirectory()) recorrer(ruta);
+        else if (nombre.endsWith('.controller.ts')) archivos.push(ruta);
+      }
+    };
+    recorrer(raiz);
+
+    it('GERENTE aparece únicamente en las rutas autorizadas', () => {
+      const encontrados: string[] = [];
+      for (const archivo of archivos) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const modulo = require(archivo) as Record<string, unknown>;
+        for (const exportado of Object.values(modulo)) {
+          if (typeof exportado !== 'function' || !exportado.prototype) continue;
+          const clase = exportado as new (...a: never[]) => object;
+          if (Reflect.getMetadata('path', clase) === undefined) continue;
+          for (const nombre of Object.getOwnPropertyNames(clase.prototype)) {
+            if (nombre === 'constructor') continue;
+            const handler = (clase.prototype as Record<string, object>)[nombre];
+            if (typeof handler !== 'function') continue;
+            if (Reflect.getMetadata(METHOD_METADATA, handler) === undefined) continue;
+            // Como `RolesGuard`: el `@Roles` del método manda sobre el de la clase.
+            const roles = rolesDe(handler) ?? rolesDe(clase) ?? [];
+            if (!roles.includes(RolUsuario.GERENTE)) continue;
+            const permitido =
+              PERMITIDO_COMPLETO.includes(clase.name) ||
+              PERMITIDO_SOLO[clase.name]?.includes(nombre);
+            if (!permitido) encontrados.push(`${clase.name}.${nombre}`);
+          }
+        }
+      }
+      expect(encontrados).toEqual([]);
+    });
+
+    it('y de verdad está en las que dice la lista (no es una lista que quedó vacía)', () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { GerenciaController } = require('../modules/admin-torre/gerencia.controller');
+      expect(rolesDe(GerenciaController)).toEqual([RolUsuario.GERENTE]);
+    });
+  });
+
   describe('TESORERIA no entra a las consolas de otros roles', () => {
     // Las consolas operan pedidos de UNA tienda y asumen `user.tiendaId`. Tesorería no tiene tienda
     // y su única puerta a los pedidos es el módulo de pagos, que ve solo lo que tiene una

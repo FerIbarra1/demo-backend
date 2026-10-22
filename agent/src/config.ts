@@ -43,6 +43,11 @@ export interface SyncConfig {
   checkpointBatch: number;
   queueRetentionDays: number;
   expirationHours: number;
+  /**
+   * Cada cuánto el agente COMPARA los pedidos de la nube contra el Sistema Comercial (conciliación activa), en ms.
+   * Por defecto 10 min; 0 la apaga. El trigger avisa de los cambios; esto verifica el resultado.
+   */
+  conciliacionIntervalMs?: number;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 

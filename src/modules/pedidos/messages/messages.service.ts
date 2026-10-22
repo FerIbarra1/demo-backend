@@ -11,7 +11,8 @@ import { PedidoStateService } from '../core/pedido-state.service';
 import { RealtimeService } from '../../realtime/realtime.service';
 import { MailService } from '../../mail/mail.service';
 import { ConfiguracionService } from '../../configuracion/configuracion.service';
-import { mailTemplates, mailSubjects } from '../../mail/mail.templates';
+import { mailTemplates, mailSubjects, folioVisible } from '../../mail/mail.templates';
+import { referenciaWebDelPrimerCorreo } from '../../mail/referencia-web';
 
 /**
  * F13 (sep 2026): el chat con el cliente es del ASESOR DE VENTAS. El bodeguero
@@ -45,8 +46,8 @@ export class MessagesService {
   /**
    * Crea un mensaje en un pedido, anclado opcionalmente a un item.
    *
-   * Autorización (sólo pueden escribir):
-   *   - CLIENTE: sólo en SUS pedidos (dueño).
+   * Autorización (solo pueden escribir):
+   *   - CLIENTE: solo en SUS pedidos (dueño).
    *   - VENTAS: cualquier pedido de su tienda (F13: el asesor atiende la cola
    *     de escalados de la tienda, sin asignación 1:1).
    *   - ADMIN: pasa siempre.
@@ -55,7 +56,7 @@ export class MessagesService {
    *     asignado).
    *
    * - visibleParaCliente=true: el cliente lo ve (default).
-   * - visibleParaCliente=false: anotación interna. Sólo VENTAS/CAJERO/ADMIN.
+   * - visibleParaCliente=false: anotación interna. Solo VENTAS/CAJERO/ADMIN.
    *
    * Si viene itemId, valida que el item pertenezca al mismo pedido.
    *
@@ -71,15 +72,15 @@ export class MessagesService {
 
     if (!esCliente && !esVentas && !esAdmin) {
       throw new BadRequestException(
-        'Sólo el cliente dueño del pedido o el asesor de ventas pueden escribir mensajes. ' +
-          'Bodega, monitores y cajero tienen acceso de sólo lectura.',
+        'Solo el cliente dueño del pedido o el asesor de ventas pueden escribir mensajes. ' +
+          'Bodega, monitores y cajero tienen acceso de solo lectura.',
       );
     }
 
     const quiereInterno = dto.visibleParaCliente === false;
     if (quiereInterno && !ROLES_PUEDEN_INTERNO.includes(usuario.rol)) {
       throw new BadRequestException(
-        'Sólo VENTAS, CAJERO o ADMIN pueden crear mensajes no visibles al cliente',
+        'Solo VENTAS, CAJERO o ADMIN pueden crear mensajes no visibles al cliente',
       );
     }
 
@@ -126,7 +127,7 @@ export class MessagesService {
     }
 
     // Email al cliente: PRIMERA respuesta visible del asesor en este pedido.
-    // Se marca con un flag (MensajeBodegueroEnviado) para que sólo se mande
+    // Se marca con un flag (MensajeBodegueroEnviado) para que solo se mande
     // UNA vez por pedido — los siguientes mensajes llegan al cliente por
     // realtime dentro de la app sin saturar el buzón.
     //
@@ -156,7 +157,7 @@ export class MessagesService {
     // Cargamos el pedido completo con la info que necesita la plantilla.
     const pedido = await this.prisma.pedido.findUnique({
       where: { id: pedidoId },
-      include: { tienda: true },
+      include: { tienda: true, pendienteEnvio: { select: { externalFolio: true } } },
     });
     if (!pedido?.clienteEmail) return;
     const mensaje = await this.prisma.pedidoMensaje.findUnique({
@@ -178,7 +179,7 @@ export class MessagesService {
         data: { pedidoId, mensajeId },
       });
     } catch (err) {
-      // Sólo P2002 (unique constraint) significa "otro hilo ya creó el flag".
+      // Solo P2002 (unique constraint) significa "otro hilo ya creó el flag".
       // Cualquier otro fallo —BD caída, timeout, conexión perdida— NO debe
       // tragarse: antes este catch era ciego, así que un error de
       // infraestructura devolvía en silencio y el cliente nunca recibía el
@@ -190,16 +191,24 @@ export class MessagesService {
       return;
     }
 
+    // El asesor solo escribe con el pedido ya surtido (EN_ASESORIA), o sea cuando el folio del Sistema Comercial ya
+    // existe: el correo tiene que llamarlo como lo llama la pantalla y el ticket. Antes el asunto y el cuerpo llevaban el
+    // `PD-…` (sin los datos del folio), y el cliente recibía un número que su pedido ya no mostraba.
+    const pedidoData = {
+      pedidoId: pedido.id,
+      numeroPedido: pedido.numeroPedido,
+      referenciaWeb: await referenciaWebDelPrimerCorreo(this.prisma, pedido),
+      externalFolio: pedido.pendienteEnvio?.externalFolio ?? null,
+      folioErp: pedido.folioErp ?? null,
+      serieTienda: pedido.tienda?.serie ?? null,
+      clienteNombre: pedido.clienteNombre,
+      estado: pedido.estado,
+      total: pedido.total,
+      fechaPedido: pedido.fechaPedido,
+      tiendaNombre: pedido.tienda?.nombre,
+    };
     const template = mailTemplates.MensajeBodeguero({
-      pedido: {
-        pedidoId: pedido.id,
-        numeroPedido: pedido.numeroPedido,
-        clienteNombre: pedido.clienteNombre,
-        estado: pedido.estado,
-        total: pedido.total,
-        fechaPedido: pedido.fechaPedido,
-        tiendaNombre: pedido.tienda?.nombre,
-      },
+      pedido: pedidoData,
       pedidoUrl,
       mensaje: mensaje.contenido,
       nombreBodeguero: nombreAsesor || 'Tu asesor de ventas',
@@ -209,7 +218,7 @@ export class MessagesService {
 
     await this.mail.sendEmail({
       to: pedido.clienteEmail,
-      subject: mailSubjects.MENSAJE_BODEGUERO(pedido.numeroPedido),
+      subject: mailSubjects.MENSAJE_BODEGUERO(folioVisible(pedidoData)),
       template,
       tipoNotificacion: TipoNotificacion.MENSAJE_BODEGUERO,
       pedidoId: pedido.id,
@@ -218,9 +227,9 @@ export class MessagesService {
 
   /**
    * Lista mensajes del pedido respetando el rol:
-   * - CLIENTE: sólo visibleParaCliente=true y sólo de SUS pedidos.
+   * - CLIENTE: solo visibleParaCliente=true y solo de SUS pedidos.
    * - BODEGA, CAJERO, ADMIN, BODEGA_MONITOR: todos los mensajes internos
-   *   sólo si el pedido es de su tienda.
+   *   solo si el pedido es de su tienda.
    */
   async listar(pedidoId: number, usuario: UserContext) {
     await this.access.cargarYValidar(pedidoId, usuario);
@@ -275,9 +284,9 @@ export class MessagesService {
     // llama desde ninguna vista de bodega.
     if (!esCliente && !esVentas && !esAdmin) {
       throw new BadRequestException(
-        'Sólo el cliente dueño del pedido, el asesor de ventas o admin pueden ' +
+        'Solo el cliente dueño del pedido, el asesor de ventas o admin pueden ' +
           'escribir mensajes con adjunto. Bodega, monitores y cajero tienen ' +
-          'acceso de sólo lectura.',
+          'acceso de solo lectura.',
       );
     }
 
@@ -293,60 +302,66 @@ export class MessagesService {
     // segundo create fallaba, el cliente quedaba con una propuesta pendiente
     // que no podía ver ni responder — justo el bug que se decía haber
     // arreglado.
-    const { mensaje, adjunto, efectosTransicion, propuestaEnviada } = await this.prisma.$transaction(async (tx) => {
-      let adjunto: { tipo: 'propuesta'; propuestaId: number } | null = null;
-      let propuestaEnviada: { pedidoId: number; propuestaId: number; origen: RolUsuario } | null = null;
-      // Efectos de la transición a ESPERANDO_APROBACION (realtime + correo).
-      // `enviarPropuesta` no puede dispararlos cuando corre dentro de esta tx:
-      // todavía no confirmó. Los emitimos nosotros después del commit.
-      let efectosTransicion:
-        | Parameters<PedidoStateService['dispararEfectosDeTransicion']>[1]
-        | null = null;
+    const { mensaje, adjunto, efectosTransicion, propuestaEnviada } =
+      await this.prisma.$transaction(async (tx) => {
+        let adjunto: { tipo: 'propuesta'; propuestaId: number } | null = null;
+        let propuestaEnviada: { pedidoId: number; propuestaId: number; origen: RolUsuario } | null =
+          null;
+        // Efectos de la transición a ESPERANDO_APROBACION (realtime + correo).
+        // `enviarPropuesta` no puede dispararlos cuando corre dentro de esta tx:
+        // todavía no confirmó. Los emitimos nosotros después del commit.
+        let efectosTransicion:
+          | Parameters<PedidoStateService['dispararEfectosDeTransicion']>[1]
+          | null = null;
 
-      if (dto.ajuste && dto.ajuste.length > 0) {
-        // Fase 2: el servidor arma la propuesta a partir de la INTENCIÓN del
-        // asesor, DENTRO de esta transacción (lee el mismo estado de items que
-        // guarda). `enviarPropuesta` hace las validaciones de rol y de estado;
-        // nosotros sólo creamos el `PedidoMensaje` con el id resultante.
-        const calculo = await this.ajuste.calcular(pedidoId, dto.ajuste, tx);
-        const { propuesta, efectos, propuestaEnviada: avisoPropuesta } = await this.propuesta.enviarPropuesta(
-          pedidoId,
-          // El texto del mensaje YA es el "comentario" de la propuesta; no
-          // necesitamos un campo `nota` separado en la propuesta.
-          { calculo },
-          usuario,
-          tx,
-        );
-        adjunto = { tipo: 'propuesta', propuestaId: propuesta.id };
-        efectosTransicion = efectos;
-        propuestaEnviada = avisoPropuesta;
-      }
+        if (dto.ajuste && dto.ajuste.length > 0) {
+          // Fase 2: el servidor arma la propuesta a partir de la INTENCIÓN del
+          // asesor, DENTRO de esta transacción (lee el mismo estado de items que
+          // guarda). `enviarPropuesta` hace las validaciones de rol y de estado;
+          // nosotros solo creamos el `PedidoMensaje` con el id resultante.
+          const calculo = await this.ajuste.calcular(pedidoId, dto.ajuste, tx);
+          const {
+            propuesta,
+            efectos,
+            propuestaEnviada: avisoPropuesta,
+          } = await this.propuesta.enviarPropuesta(
+            pedidoId,
+            // El texto del mensaje YA es el "comentario" de la propuesta; no
+            // necesitamos un campo `nota` separado en la propuesta.
+            { calculo },
+            usuario,
+            tx,
+          );
+          adjunto = { tipo: 'propuesta', propuestaId: propuesta.id };
+          efectosTransicion = efectos;
+          propuestaEnviada = avisoPropuesta;
+        }
 
-      // Oct 2026: si trae propuesta pero el texto viene vacío, usar uno por
-      // defecto. Sin esto el chat muestra una burbuja vacía que parece un error.
-      const contenidoFinal =
-        dto.contenido && dto.contenido.trim()
-          ? dto.contenido
-          : adjunto
-            ? 'Te envío una nueva propuesta'
-            : dto.contenido;
+        // Oct 2026: si trae propuesta pero el texto viene vacío, usar uno por
+        // defecto. Sin esto el chat muestra una burbuja vacía que parece un error.
+        const contenidoFinal =
+          dto.contenido && dto.contenido.trim()
+            ? dto.contenido
+            : adjunto
+              ? 'Te envío una nueva propuesta'
+              : dto.contenido;
 
-      // 3. Crear el mensaje con el adjunto, en la misma transacción.
-      const mensaje = await tx.pedidoMensaje.create({
-        data: {
-          pedidoId,
-          itemId: null,
-          autorId: usuario.userId,
-          autorRol: usuario.rol,
-          contenido: contenidoFinal,
-          visibleParaCliente: true, // el nuevo endpoint siempre es visible al cliente
-          adjunto: adjunto ?? undefined,
-        },
-        include: { autor: { select: { id: true, nombre: true, rol: true } } },
+        // 3. Crear el mensaje con el adjunto, en la misma transacción.
+        const mensaje = await tx.pedidoMensaje.create({
+          data: {
+            pedidoId,
+            itemId: null,
+            autorId: usuario.userId,
+            autorRol: usuario.rol,
+            contenido: contenidoFinal,
+            visibleParaCliente: true, // el nuevo endpoint siempre es visible al cliente
+            adjunto: adjunto ?? undefined,
+          },
+          include: { autor: { select: { id: true, nombre: true, rol: true } } },
+        });
+
+        return { mensaje, adjunto, efectosTransicion, propuestaEnviada };
       });
-
-      return { mensaje, adjunto, efectosTransicion, propuestaEnviada };
-    });
 
     // Oct 2026: disparar los efectos de la transición, AHORA que la transacción
     // confirmó. Es el contrato que `cambiarEstado` documenta para los callers

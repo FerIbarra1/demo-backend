@@ -65,7 +65,7 @@ export class StorageService {
       throw new Error('AWS_S3_BUCKET es obligatorio cuando hay credenciales AWS configuradas.');
     }
 
-    // Sólo instanciar S3 si hay credenciales. Sin ellas → disco local.
+    // Solo instanciar S3 si hay credenciales. Sin ellas → disco local.
     this.s3 =
       accessKeyId && secretAccessKey
         ? new S3Client({

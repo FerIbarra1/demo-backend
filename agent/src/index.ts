@@ -6,12 +6,15 @@ import { LocalStore } from './checkpoint-store';
 import { TiendaResolver } from './tienda-resolver';
 import { UpProcessor } from './up-processor';
 import { DownProcessor } from './down-processor';
+import { FolioProcessor } from './folio-processor';
+import { ConciliacionProcessor } from './conciliacion';
 
 /**
  * Entry point del agente.
  *
  * Diseño: dos loops independientes se ejecutan en serie en cada tick:
  *   - up-processor: BANDEJA_SYNC -> nube
+ *   - folio-processor: solicitudes de folio de la nube -> CONSECUTIVOS (parte B)
  *   - down-processor: nube pedidos -> GRABAR_PEDIDOS Firebird
  *
  * Esto simplifica la lógica y hace el flujo determinista. Si el volumen
@@ -34,6 +37,8 @@ async function main() {
   const tiendaResolver = new TiendaResolver(firebird);
   const up = new UpProcessor(cfg, firebird, cloud, store, tiendaResolver, log);
   const down = new DownProcessor(cfg, firebird, cloud, store, log);
+  const folios = new FolioProcessor(firebird, cloud, store, log);
+  const conciliacion = new ConciliacionProcessor(cfg, firebird, cloud, log);
 
   // Init Firebird pool.
   try {
@@ -77,10 +82,14 @@ async function main() {
   while (running) {
     try {
       const { procesados } = await up.runOnce();
+      // Antes de bajar pedidos: un pedido que acaba de recibir su folio baja al ERP ya con él.
+      const { reservados, errores: erroresFolio } = await folios.runOnce();
       const { descargados, errores } = await down.runOnce();
-      if (procesados > 0 || descargados > 0 || errores > 0) {
-        log.info({ procesados, descargados, errores }, 'ciclo completo');
+      if (procesados > 0 || descargados > 0 || errores > 0 || reservados > 0 || erroresFolio > 0) {
+        log.info({ procesados, descargados, errores, reservados, erroresFolio }, 'ciclo completo');
       }
+      // Cada ~10 min compara los pedidos contra el Sistema Comercial. Va aparte: si falla, subir y bajar no se detienen.
+      await conciliacion.runIfDue();
     } catch (err) {
       log.error({ err: (err as Error).message }, 'ciclo con error');
       if ((err as any).name === 'AuthError') {

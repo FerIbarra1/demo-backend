@@ -39,7 +39,13 @@ export class VentanillasService {
       where: { tiendaId },
       include: {
         cajero: {
-          select: { id: true, nombre: true, apellido: true, lastLogin: true, ultimoHeartbeat: true },
+          select: {
+            id: true,
+            nombre: true,
+            apellido: true,
+            lastLogin: true,
+            ultimoHeartbeat: true,
+          },
         },
       },
       orderBy: { numero: 'asc' },
@@ -122,7 +128,7 @@ export class VentanillasService {
   }
 
   /**
-   * Borra una ventanilla. Sólo si está libre. Si está ocupada por un cajero,
+   * Borra una ventanilla. Solo si está libre. Si está ocupada por un cajero,
    * tira error para que el admin primero lo desasigne.
    */
   async borrar(tiendaId: number, id: number) {
@@ -153,7 +159,9 @@ export class VentanillasService {
    */
   async elegir(usuarioId: number, tiendaId: number, ventanillaId: number, forzar = false) {
     const usuario = await this.prisma.usuario.findUnique({ where: { id: usuarioId } });
-    if (!usuario || usuario.tiendaId !== tiendaId) {
+    // F3.5 (oct 2026, "cubrir puesto"): el ADMIN no tiene tienda en su cuenta y cubre la ventanilla de la que
+    // OPERA; el resto debe ser de la tienda. Que la ventanilla sea de `tiendaId` se comprueba abajo.
+    if (!usuario || (usuario.rol !== RolUsuario.ADMIN && usuario.tiendaId !== tiendaId)) {
       throw new NotFoundException(`Usuario ${usuarioId} no pertenece a tienda ${tiendaId}`);
     }
     if (usuario.rol !== RolUsuario.CAJERO && usuario.rol !== RolUsuario.ADMIN) {
@@ -184,17 +192,39 @@ export class VentanillasService {
       });
     }
     let regresados: Array<{ id: number; numeroPedido: string }> = [];
+    let anteriorDeOtraTienda: {
+      tiendaId: number;
+      numero: number;
+      id: number;
+      regresados: Array<{ id: number; numeroPedido: string }>;
+    } | null = null;
 
     const actualizada = await this.prisma.$transaction(async (tx) => {
-      // Liberar ventanilla anterior del usuario (si era de esta tienda).
+      // Liberar la ventanilla anterior del usuario. `cajeroId` es único: quien tenga una en OTRA tienda (el
+      // ADMIN que cambió de tienda) debe soltarla antes, o la asignación de abajo violaría esa unicidad.
       const anterior = await tx.ventanilla.findFirst({
-        where: { tiendaId, cajeroId: usuarioId, NOT: { id: ventanillaId } },
+        where: { cajeroId: usuarioId, NOT: { id: ventanillaId } },
       });
       if (anterior) {
         await tx.ventanilla.update({
           where: { id: anterior.id },
           data: { cajeroId: null },
         });
+        // Cambiar de ventanilla DENTRO de la tienda conserva sus pedidos (siguen siendo suyos). Soltar la de
+        // OTRA tienda no: esos pedidos no pueden quedar asignados a alguien que ya no está ahí.
+        if (anterior.tiendaId !== tiendaId) {
+          anteriorDeOtraTienda = {
+            tiendaId: anterior.tiendaId,
+            numero: anterior.numero,
+            id: anterior.id,
+            regresados: await this.regresarPedidosALaFila(
+              tx,
+              usuarioId,
+              anterior.tiendaId,
+              anterior.numero,
+            ),
+          };
+        }
       }
 
       // Si ya era la misma, no-op (idempotente).
@@ -210,7 +240,9 @@ export class VentanillasService {
           data: { cajeroId: usuarioId },
         });
         if (quitada.count !== 1) {
-          throw new ConflictException('La ventanilla cambió mientras la tomabas. Inténtalo de nuevo.');
+          throw new ConflictException(
+            'La ventanilla cambió mientras la tomabas. Inténtalo de nuevo.',
+          );
         }
         return tx.ventanilla.findUnique({
           where: { id: ventanillaId },
@@ -218,7 +250,7 @@ export class VentanillasService {
         });
       }
 
-      // Asignación con guarda atómica: sólo si la ventanilla está libre o ya
+      // Asignación con guarda atómica: solo si la ventanilla está libre o ya
       // es del usuario. Si otro cajero la tomó entre la lectura y aquí, count=0.
       const asignado = await tx.ventanilla.updateMany({
         where: {
@@ -244,6 +276,19 @@ export class VentanillasService {
     }
 
     // Emitir realtime fuera de la transacción (no bloquear el commit).
+    const previa = anteriorDeOtraTienda as {
+      tiendaId: number;
+      numero: number;
+      id: number;
+      regresados: Array<{ id: number; numeroPedido: string }>;
+    } | null;
+    if (previa) {
+      this.realtime.emitToTienda(previa.tiendaId, 'ventanilla.liberada', {
+        ventanillaId: previa.id,
+        numero: previa.numero,
+      });
+      this.avisarPedidosRegresados(previa.tiendaId, previa.regresados);
+    }
     if (ocupanteId !== null) {
       // Al que la tenía se le avisa: su consola pasa a modo observador.
       this.realtime.emitToUser(ocupanteId, 'ventanilla.perdida', { numero: v.numero });
@@ -367,6 +412,20 @@ export class VentanillasService {
       liberadas++;
     }
     return liberadas;
+  }
+
+  /**
+   * Suelta la ventanilla que el usuario tenga en CUALQUIER tienda (y regresa sus pedidos a la fila). Lo usa
+   * "soltar mis puestos" del ADMIN al cambiar de tienda o cerrar sesión (F3.5). Null si no tenía ninguna.
+   */
+  async liberarDelUsuario(usuarioId: number) {
+    const v = await this.prisma.ventanilla.findFirst({ where: { cajeroId: usuarioId } });
+    if (!v) return null;
+    return {
+      numero: v.numero,
+      tiendaId: v.tiendaId,
+      ...(await this.liberar(usuarioId, v.tiendaId, v.id)),
+    };
   }
 
   /** Helper: ventanilla del cajero en una tienda. Null si no tiene. */

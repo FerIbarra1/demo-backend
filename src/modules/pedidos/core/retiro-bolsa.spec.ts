@@ -8,14 +8,14 @@ import type { ItemPropuestaJson } from '../propuesta/dto/propuesta.dto';
  * El caso que los motiva: el asesor quita un producto que bodega YA había
  * surtido completo. `quedanPendientes` da false — no hay nada que surtir — así
  * que el pedido iba directo a mostrador con la prenda de más todavía dentro de
- * la bolsa, y bodega nunca se enteraba porque su checklist de retiro sólo se
+ * la bolsa, y bodega nunca se enteraba porque su checklist de retiro solo se
  * alimenta de pedidos en EN_REVISION.
  *
  * `huboRetiro` es la señal que faltaba. Es distinta de `quedanPendientes`:
  * `quedanPendientes` mira el estado FINAL (¿hay algo por surtir?), `huboRetiro`
  * mira si hubo que SACAR algo que ya estaba apartado.
  *
- * El fake de `tx` implementa sólo lo que el util usa: `itemPedido.findUnique`,
+ * El fake de `tx` implementa solo lo que el util usa: `itemPedido.findUnique`,
  * `itemPedido.update`, `itemPedido.create`, `itemPedido.count`, `precioCO.findUnique`.
  */
 function fakeTx(items: Array<Record<string, unknown>>) {
@@ -25,18 +25,13 @@ function fakeTx(items: Array<Record<string, unknown>>) {
   let nextId = 1000;
 
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: async ({ where }: { where: { id: number } }) => {
         const it = store.get(where.id);
         return it ? { ...it } : null;
       },
-      update: async ({
-        where,
-        data,
-      }: {
-        where: { id: number };
-        data: Record<string, unknown>;
-      }) => {
+      update: async ({ where, data }: { where: { id: number }; data: Record<string, unknown> }) => {
         const it = store.get(where.id);
         if (!it) throw new Error(`item ${where.id} no existe`);
         Object.assign(it, data);
@@ -151,8 +146,24 @@ describe('aplicarPropuestaDeVentas — huboRetiro', () => {
   it('quitar un item que estaba COMPLETO marca huboRetiro', async () => {
     const { tx } = fakeTx([itemCompleto(), itemRelleno()]);
     const propuesta: ItemPropuestaJson[] = [
-      { itemId: 1, tipo: 'no-disponible', producto: 'Camiseta', variante: 'M', cantidad: 5, precioUnitario: 100, subtotal: 500 },
-      { itemId: 2, tipo: 'completo', producto: 'Camiseta', variante: 'L', cantidad: 2, precioUnitario: 100, subtotal: 200 },
+      {
+        itemId: 1,
+        tipo: 'no-disponible',
+        producto: 'Camiseta',
+        variante: 'M',
+        cantidad: 5,
+        precioUnitario: 100,
+        subtotal: 500,
+      },
+      {
+        itemId: 2,
+        tipo: 'completo',
+        producto: 'Camiseta',
+        variante: 'L',
+        cantidad: 2,
+        precioUnitario: 100,
+        subtotal: 200,
+      },
     ];
 
     const r = await aplicarPropuestaDeVentas(
@@ -182,8 +193,24 @@ describe('aplicarPropuestaDeVentas — huboRetiro', () => {
       itemRelleno(),
     ]);
     const propuesta: ItemPropuestaJson[] = [
-      { itemId: 1, tipo: 'no-disponible', producto: 'Camiseta', variante: 'M', cantidad: 5, precioUnitario: 100, subtotal: 0 },
-      { itemId: 2, tipo: 'completo', producto: 'Camiseta', variante: 'L', cantidad: 2, precioUnitario: 100, subtotal: 200 },
+      {
+        itemId: 1,
+        tipo: 'no-disponible',
+        producto: 'Camiseta',
+        variante: 'M',
+        cantidad: 5,
+        precioUnitario: 100,
+        subtotal: 0,
+      },
+      {
+        itemId: 2,
+        tipo: 'completo',
+        producto: 'Camiseta',
+        variante: 'L',
+        cantidad: 2,
+        precioUnitario: 100,
+        subtotal: 200,
+      },
     ];
 
     const r = await aplicarPropuestaDeVentas(
@@ -204,7 +231,16 @@ describe('aplicarPropuestaDeVentas — huboRetiro', () => {
   it('bajar la cantidad por debajo de lo apartado marca huboRetiro', async () => {
     const { tx } = fakeTx([itemCompleto()]);
     const propuesta: ItemPropuestaJson[] = [
-      { itemId: 1, tipo: 'parcial', producto: 'Camiseta', variante: 'M', cantidad: 5, precioUnitario: 100, subtotal: 500, cantidadNueva: 2 },
+      {
+        itemId: 1,
+        tipo: 'parcial',
+        producto: 'Camiseta',
+        variante: 'M',
+        cantidad: 5,
+        precioUnitario: 100,
+        subtotal: 500,
+        cantidadNueva: 2,
+      },
     ];
 
     const r = await aplicarPropuestaDeVentas(
@@ -215,14 +251,23 @@ describe('aplicarPropuestaDeVentas — huboRetiro', () => {
       'lista1',
     );
 
-    // Bodega apartó 5 y sólo se van a llevar 2: el sobrante vuelve al anaquel.
+    // Bodega apartó 5 y solo se van a llevar 2: el sobrante vuelve al anaquel.
     expect(r.huboRetiro).toBe(true);
   });
 
   it('subir la cantidad no marca huboRetiro: no hay nada que sacar de la bolsa', async () => {
     const { tx } = fakeTx([itemCompleto()]);
     const propuesta: ItemPropuestaJson[] = [
-      { itemId: 1, tipo: 'parcial', producto: 'Camiseta', variante: 'M', cantidad: 5, precioUnitario: 100, subtotal: 500, cantidadNueva: 8 },
+      {
+        itemId: 1,
+        tipo: 'parcial',
+        producto: 'Camiseta',
+        variante: 'M',
+        cantidad: 5,
+        precioUnitario: 100,
+        subtotal: 500,
+        cantidadNueva: 8,
+      },
     ];
 
     const r = await aplicarPropuestaDeVentas(
@@ -241,7 +286,17 @@ describe('aplicarPropuestaDeVentas — huboRetiro', () => {
   it('cambiar un producto que estaba apartado marca huboRetiro', async () => {
     const { tx } = fakeTx([itemCompleto()]);
     const propuesta: ItemPropuestaJson[] = [
-      { itemId: 1, tipo: 'cambio', producto: 'Camiseta', variante: 'M', cantidad: 5, precioUnitario: 100, subtotal: 500, cantidadNueva: 5, precioCOId: 55 },
+      {
+        itemId: 1,
+        tipo: 'cambio',
+        producto: 'Camiseta',
+        variante: 'M',
+        cantidad: 5,
+        precioUnitario: 100,
+        subtotal: 500,
+        cantidadNueva: 5,
+        precioCOId: 55,
+      },
     ];
 
     const r = await aplicarPropuestaDeVentas(
@@ -258,8 +313,26 @@ describe('aplicarPropuestaDeVentas — huboRetiro', () => {
   it('agregar un producto no marca huboRetiro', async () => {
     const { tx } = fakeTx([itemCompleto()]);
     const propuesta: ItemPropuestaJson[] = [
-      { itemId: 1, tipo: 'completo', producto: 'Camiseta', variante: 'M', cantidad: 5, precioUnitario: 100, subtotal: 500 },
-      { itemId: -1, tipo: 'agregado', producto: 'Camiseta Nueva', variante: 'M · Gris', cantidad: 3, precioUnitario: 100, subtotal: 300, precioCOId: 55, tempId: -1 },
+      {
+        itemId: 1,
+        tipo: 'completo',
+        producto: 'Camiseta',
+        variante: 'M',
+        cantidad: 5,
+        precioUnitario: 100,
+        subtotal: 500,
+      },
+      {
+        itemId: -1,
+        tipo: 'agregado',
+        producto: 'Camiseta Nueva',
+        variante: 'M · Gris',
+        cantidad: 3,
+        precioUnitario: 100,
+        subtotal: 300,
+        precioCOId: 55,
+        tempId: -1,
+      },
     ];
 
     const r = await aplicarPropuestaDeVentas(

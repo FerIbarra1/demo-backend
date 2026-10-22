@@ -1,19 +1,15 @@
-import {
-  Controller,
-  Get,
-  Post,
-  Body,
-  Param,
-  Query,
-  ParseIntPipe,
-  BadRequestException,
-} from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, ParseIntPipe, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { VentasService, FILTROS_COLA, FiltroCola } from './ventas.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { DevolverABodegaDto } from './dto/devolver-a-bodega.dto';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
+import {
+  ApiTiendaConsola,
+  TiendaConsola,
+  TiendaConsolaGuard,
+} from '../../../common/tienda-consola';
 import { RolUsuario } from '@prisma/client';
 
 /**
@@ -27,6 +23,7 @@ import { RolUsuario } from '@prisma/client';
  * VENTAS y valida que el pedido esté en EN_ASESORIA o re-negociando.
  */
 @ApiTags('Pedidos - Ventas')
+@UseGuards(TiendaConsolaGuard)
 @Controller('ventas/pedidos')
 @Roles(RolUsuario.VENTAS, RolUsuario.ADMIN)
 @ApiBearerAuth()
@@ -42,6 +39,7 @@ export class VentasController {
       'Cola de pedidos escalados a asesoría en la tienda del asesor. ' +
       'Incluye los recién escalados y los que esperan respuesta del cliente.',
   })
+  @ApiTiendaConsola()
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
   @ApiQuery({
@@ -53,17 +51,11 @@ export class VentasController {
       'cliente) | respondidos (el cliente rechazó una propuesta de ventas).',
   })
   async cola(
-    @CurrentUser() user: any,
+    @TiendaConsola() tiendaId: number,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
     @Query('filtro') filtro?: string,
   ) {
-    const tiendaId = user.tiendaId;
-    if (!tiendaId) {
-      throw new BadRequestException(
-        'Tu usuario no tiene tienda asignada. Contacta al administrador.',
-      );
-    }
     const filtroValido = FILTROS_COLA.includes(filtro as FiltroCola)
       ? (filtro as FiltroCola)
       : 'todos';
@@ -80,9 +72,11 @@ export class VentasController {
     summary: 'Detalle del pedido con items, historial y propuestas (para negociar)',
   })
   async detalle(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
-    // Valida acceso (tienda) reutilizando el access service compartido.
+    // Valida acceso (tienda) reutilizando el access service compartido: un empleado solo ve pedidos de
+    // su tienda y el ADMIN, de cualquiera. Oct 2026: ya no se vuelve a comparar con `user.tiendaId` aquí;
+    // era una segunda copia de esa regla (redundante, y el contrato de la tienda de consola la prohíbe).
     await this.pedidoState.obtenerDetalle(id, user);
-    return this.ventasService.obtenerDetalle(id, user.tiendaId);
+    return this.ventasService.obtenerDetalle(id);
   }
 
   @Post(':id/devolver-a-bodega')

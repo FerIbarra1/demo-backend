@@ -38,8 +38,6 @@ export interface DatosInstrucciones {
   cuenta: CuentaSnapshot;
   referencia: string;
   concepto: string;
-  venceAt: Date;
-  zonaHoraria: string;
   /** Enlace al pedido, para subir el comprobante. */
   pedidoUrl?: string;
 }
@@ -47,14 +45,6 @@ export interface DatosInstrucciones {
 export function formatearMonto(monto: number | string | { toString(): string }): string {
   const n = Number(monto.toString());
   return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n);
-}
-
-export function formatearFechaLarga(fecha: Date, zonaHoraria: string): string {
-  return new Intl.DateTimeFormat('es-MX', {
-    dateStyle: 'long',
-    timeStyle: 'short',
-    timeZone: zonaHoraria,
-  }).format(fecha);
 }
 
 export function construirInstrucciones(d: DatosInstrucciones): InstruccionesTransferencia {
@@ -84,8 +74,6 @@ export function construirInstrucciones(d: DatosInstrucciones): InstruccionesTran
     { etiqueta: 'Concepto', valor: d.concepto, copiable: true },
   );
 
-  // "12:25 a.m." ya termina en punto: sin esto la nota salía con ".." al final.
-  const vence = formatearFechaLarga(d.venceAt, d.zonaHoraria);
   // Las NOTAS son lo que se muestra junto a la tabla de datos (pantalla y correo), así que no
   // repiten lo que la tabla ya dice: antes la primera nota volvía a escribir el monto (que sale en
   // "Monto exacto") y la última mandaba "sube tu comprobante en tu pedido: <enlace>" a quien ya
@@ -94,7 +82,6 @@ export function construirInstrucciones(d: DatosInstrucciones): InstruccionesTran
   const notas = [
     'Transfiere el monto EXACTO indicado: si es distinto no podremos aplicarlo a tu pedido.',
     'Escribe la referencia y el concepto tal cual: así identificamos tu pago.',
-    `Estas instrucciones son válidas hasta el ${vence}${vence.endsWith('.') ? '' : '.'}`,
   ];
   if (d.cuenta.instrucciones?.trim()) notas.push(d.cuenta.instrucciones.trim());
 

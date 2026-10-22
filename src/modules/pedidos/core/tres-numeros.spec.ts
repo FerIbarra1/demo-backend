@@ -80,6 +80,7 @@ function crearTx(items: any[]) {
   const updates: Array<{ id: number; data: any }> = [];
   const estado = new Map(items.map((i) => [i.id, { ...i }]));
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: async ({ where }: any) => estado.get(where.id) ?? null,
       findMany: async () => [...estado.values()],

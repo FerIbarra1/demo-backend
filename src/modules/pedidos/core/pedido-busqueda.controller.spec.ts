@@ -30,6 +30,8 @@ function pedido(over: Record<string, unknown> = {}) {
     estado: 'EN_REVISION',
     canalOrigen: 'WEB',
     total: 100,
+    tiendaId: 5,
+    folioErp: '0000152573',
     tienda: { nombre: 'Punto Textil' },
     _count: { items: 3 },
     ...over,
@@ -56,10 +58,7 @@ function crearController(p: Record<string, unknown> | null = pedido()) {
 describe('PedidoBusquedaController.resolverEscaneo', () => {
   it('NO devuelve rutaAccion (el escáner ya no navega)', async () => {
     const { svc } = crearController();
-    const r = (await svc.resolverEscaneo('PD-2026-000042', usuario)) as Record<
-      string,
-      unknown
-    >;
+    const r = (await svc.resolverEscaneo('PD-2026-000042', usuario)) as Record<string, unknown>;
 
     // Si este campo volviera, el panel lo usaría para navegar a una ruta que
     // ya no existe. La regresión es silenciosa: solo se ve al escanear.
@@ -103,7 +102,14 @@ describe('PedidoBusquedaController.resolverEscaneo', () => {
       tiendaNombre: 'Punto Textil',
     });
     // El label legible viene del mapa de estados, no del enum crudo.
-    expect(r.pedido.estadoLabel).toBe('En revisión por bodega');
+    // La tabla compartida con el kiosko (`mail/estado-labels.ts`): voz neutra, sin "por bodega".
+    expect(r.pedido.estadoLabel).toBe('En preparación');
+  });
+
+  it('lleva tiendaId y folioErp: es lo que el servidor necesita para decorar el pedido con su `folio` (B2)', async () => {
+    const { svc } = crearController();
+    const r = (await svc.resolverEscaneo('0000152573', usuario)) as any;
+    expect(r.pedido).toMatchObject({ tiendaId: 5, folioErp: '0000152573' });
   });
 
   it('si el pedido se borró entre la búsqueda y el detalle, no revienta', async () => {

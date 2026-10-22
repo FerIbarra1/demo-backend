@@ -44,7 +44,7 @@ export class AuthService {
     });
 
     if (existingUser) {
-      throw new ConflictException('El email ya está registrado');
+      throw new ConflictException('Ya existe una cuenta con ese correo. Inicia sesión o recupera tu contraseña.');
     }
 
     const hashedPassword = await bcrypt.hash(dto.password, 10);
@@ -231,11 +231,11 @@ export class AuthService {
         secret: this.configService.get<string>('app.jwtSecret'),
       });
     } catch {
-      throw new UnauthorizedException('Kiosk token inválido o expirado');
+      throw new UnauthorizedException('El código QR venció o no es válido. Genera uno nuevo.');
     }
 
     if (payload.kind !== 'kiosk') {
-      throw new BadRequestException('Token no es de kiosco');
+      throw new BadRequestException('Ese código no es de un kiosko.');
     }
 
     // Defensa: el QR está atado a la tienda donde se generó. Si el
@@ -293,7 +293,8 @@ export class AuthService {
     // Oct 2026: un bodeguero que sale deja la TV y regresa a la cola lo que traía. Va DESPUÉS de
     // revocar los tokens (así un latido rezagado no lo revive) y nunca impide cerrar sesión: si
     // falla, el latido sigue guardado y el barrido de inactividad lo saca igual.
-    if (rol === RolUsuario.BODEGA) {
+    // F3.5: el ADMIN que cubrió un puesto en bodega también devuelve a la cola lo que traía.
+    if (rol === RolUsuario.BODEGA || rol === RolUsuario.ADMIN) {
       await this.bodegaPresencia
         .salio(userId)
         .catch((err: Error) =>
@@ -411,7 +412,7 @@ export class AuthService {
   }
 
   /**
-   * F7 (jul 2026): heartbeat del operador. Sólo actualiza `ultimoHeartbeat`
+   * F7 (jul 2026): heartbeat del operador. Solo actualiza `ultimoHeartbeat`
    * en la fila del Usuario autenticado. Es best-effort: si la fila no existe
    * (caso muy raro de token de un user ya borrado), se ignora silenciosamente
    * porque no queremos spamear logs ni mostrar errores al cliente en cada ping.

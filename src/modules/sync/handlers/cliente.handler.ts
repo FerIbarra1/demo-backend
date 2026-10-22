@@ -213,7 +213,7 @@ export class ClienteHandler {
   private async procesarVendedor(
     _evento: SyncEventoDto,
   ): Promise<{ ok: boolean; mensaje?: string }> {
-    // VENDEDORES no tiene modelo dedicado en la nube. Se persiste sólo
+    // VENDEDORES no tiene modelo dedicado en la nube. Se persiste solo
     // como ExternalRef por si en el futuro se necesita mapear pedidos
     // con un vendedor específico.
     return { ok: true, mensaje: 'VENDEDORES: ExternalRef no implementado en esta fase' };

@@ -9,7 +9,6 @@ export type VarianteTransferencia =
   | 'COMPROBANTE_RECIBIDO'
   | 'VERIFICADA'
   | 'RECHAZADA'
-  | 'POR_VENCER'
   | 'REEMBOLSADA';
 
 export interface LineaCorreo {
@@ -24,7 +23,7 @@ export interface TransferenciaPagoProps {
   pedidoUrl: string;
   logoUrl: string;
   frontendUrl: string;
-  /** Datos para transferir (solo INSTRUCCIONES / POR_VENCER). */
+  /** Datos para transferir (solo INSTRUCCIONES). */
   lineas?: LineaCorreo[];
   /** Avisos que acompañan a los datos. */
   notas?: string[];
@@ -47,6 +46,8 @@ interface Textos {
   cta: string;
   callout?: { variante: CalloutVariant; etiqueta: string };
   cierre?: string;
+  /** A DOMICILIO no hay tienda donde pagar ni mostrador donde recoger (la transferencia es el único medio). */
+  cierreDomicilio?: string;
 }
 
 // El correo dice QUÉ SIGUE y no promete de más. En particular VERIFICADA no dice "pagado": el
@@ -60,11 +61,11 @@ const TEXTOS: Record<VarianteTransferencia, Textos> = {
     saludo: (_f, n) => `Hola, ${n}. Con estos datos puedes pagar tu pedido por transferencia.`,
     cta: 'Subir mi comprobante',
     cierre: 'Si prefieres pagar en tienda, pídelo en caja y te cambiamos la forma de pago.',
+    cierreDomicilio: 'Tu pedido sale a envío en cuanto confirmemos tu pago.',
   },
   COMPROBANTE_RECIBIDO: {
     titulo: 'Recibimos tu comprobante',
-    saludo: (_f, n) =>
-      `Hola, ${n}. Estamos confirmando en el banco que tu transferencia llegó.`,
+    saludo: (_f, n) => `Hola, ${n}. Estamos confirmando en el banco que tu transferencia llegó.`,
     cta: 'Ver mi pedido',
     cierre: 'Te avisaremos por correo en cuanto la confirmemos. No necesitas hacer nada más.',
   },
@@ -76,6 +77,8 @@ const TEXTOS: Record<VarianteTransferencia, Textos> = {
     // OJO: no dice "pagado". El pedido no lo está hasta que la tienda registra el cobro en VFP.
     cierre:
       'En cuanto la tienda registre el pago podrás recoger tu pedido. Presenta tu folio en el mostrador.',
+    cierreDomicilio:
+      'En cuanto la tienda registre el pago, tu pedido sale a envío. Te avisaremos por correo.',
   },
   RECHAZADA: {
     titulo: 'No pudimos validar tu comprobante',
@@ -84,13 +87,7 @@ const TEXTOS: Record<VarianteTransferencia, Textos> = {
     callout: { variante: 'warning', etiqueta: 'Motivo' },
     cierre:
       'Si ya transferiste, no repitas la transferencia. Si prefieres pagar en tienda, pídelo en caja.',
-  },
-  POR_VENCER: {
-    titulo: 'Tus datos de transferencia están por vencer',
-    saludo: (_f, n) => `Hola, ${n}. Las instrucciones para pagar tu pedido por transferencia vencen pronto.`,
-    cta: 'Ver mi pedido',
-    callout: { variante: 'warning', etiqueta: 'Aviso' },
-    cierre: 'Si ya transferiste, sube tu comprobante. Si no, puedes pagar en tienda.',
+    cierreDomicilio: 'Si ya transferiste, no repitas la transferencia.',
   },
   REEMBOLSADA: {
     titulo: 'Te devolvimos tu dinero',
@@ -112,6 +109,8 @@ export const TransferenciaPago = ({
   detalle,
 }: TransferenciaPagoProps) => {
   const t = TEXTOS[variante];
+  // Un pedido a domicilio no tiene «pagar en tienda» ni «recoger»: ver `cierreDomicilio`.
+  const cierre = pedido.direccionEnvio && t.cierreDomicilio ? t.cierreDomicilio : t.cierre;
   return (
     <PedidoEmailShell
       preview={t.titulo}
@@ -152,7 +151,7 @@ export const TransferenciaPago = ({
               • {n}
             </Text>
           ))}
-          {t.cierre ? <Text style={parrafo}>{t.cierre}</Text> : null}
+          {cierre ? <Text style={parrafo}>{cierre}</Text> : null}
         </>
       }
     />

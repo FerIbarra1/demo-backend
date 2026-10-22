@@ -2,14 +2,13 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
-  ConflictException,
+  ForbiddenException,
   Logger,
 } from '@nestjs/common';
-import { randomBytes, createHash, timingSafeEqual } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
-import { ActivarKioskoDto } from './dto/activar-kiosko.dto';
 import { ActualizarKioskoDto } from './dto/actualizar-kiosko.dto';
-import { EstadoKiosko, Prisma } from '@prisma/client';
+import { EstadoKiosko, Prisma, RolUsuario } from '@prisma/client';
 import { calcularSaludKiosko, resumirSalud } from './kiosko-salud';
 
 /**
@@ -18,25 +17,37 @@ import { calcularSaludKiosko, resumirSalud } from './kiosko-salud';
  */
 export type MotivoTokenInvalido = 'SIN_TOKEN' | 'TOKEN_INVALIDO' | 'KIOSKO_INACTIVO';
 
+/** Quién pide: el ADMIN opera cualquier tienda; el GERENTE solo la suya (la tienda sale de su token). */
+export interface ActorKiosko {
+  userId: number;
+  rol: RolUsuario;
+  tiendaId?: number | null;
+}
+
+/** Lo que el heartbeat lee y devuelve de un kiosko (ver `respuestaHeartbeat`). */
+const SELECT_HEARTBEAT = {
+  id: true,
+  ultimoHeartbeat: true,
+  estado: true,
+  nombre: true,
+  tiendaId: true,
+  tienda: { select: { nombre: true } },
+} satisfies Prisma.KioskoSelect;
+
 /**
  * Servicio del módulo kiosko.
  *
- * Un kiosko es una tablet física en una tienda donde los clientes hacen
- * pedidos usando SU propia cuenta (no hay cuenta kiosko compartida). El
- * kiosko sólo aporta trazabilidad: cada pedido guardará kioskoId.
+ * Un kiosko es una tablet física en una tienda donde los clientes hacen pedidos usando SU propia cuenta (no hay
+ * cuenta kiosko compartida). Pertenece a UNA tienda y no cambia de tienda nunca.
  *
- * Flujo:
- * 1. ADMIN da de alta kiosko para tienda + nombre → kiosko en BD INACTIVO
- *    (sin tablet aún). El nombre del admin activador queda registrado en
- *    `activadoPorId` (trazabilidad del alta), pero `primerConexionAt` queda NULL.
- * 2. La tablet abre `/kiosko/[tiendaId]` y el primer `heartbeat` público
- *    dispara la transición INACTIVO → ACTIVO + setea `primerConexionAt`.
- * 3. Cada cliente hace login con sus credenciales y pide normalmente.
- * 4. Al pedir, frontend manda header `X-Kiosko-Id`; backend lo valida y
- *    fuerza `canalOrigen=KIOSKO` + `kioskoId=...`.
- * 5. La tablet hace heartbeat cada 60s; admin ve "último heartbeat".
- * 6. ADMIN desactiva kiosko cuando quiere apagarlo (pasa a INACTIVO con
- *    `desactivadoAt` poblado; un heartbeat posterior no lo reactiva).
+ * Ciclo de vida (oct 2026, simplificado):
+ *  1. El ADMIN —o el GERENTE, solo en su tienda— da de alta el kiosko: el sistema le pone el nombre ("Kiosko 1",
+ *     "Kiosko 2"…) y queda ACTIVO pero SIN tablet ("pendiente de instalar").
+ *  2. La tablet abre `/kiosko`, muestra un código y quien administra lo autoriza (`KioskoPairingService`): ahí
+ *     recibe su token. Es la ÚNICA forma de entregar un token.
+ *  3. La tablet late cada 60 s con ese token; cada latido le dice quién es según el servidor.
+ *  4. Para apagarlo: estado INACTIVO (reversible). Para desvincular la tablet (robada, reemplazada): `desvincular`
+ *     borra el token y la tablet vuelve sola a pedir emparejamiento.
  */
 @Injectable()
 export class KioskoService {
@@ -45,150 +56,103 @@ export class KioskoService {
   constructor(private prisma: PrismaService) {}
 
   /**
-   * Da de alta un kiosko para una tienda con un nombre. Lo crea INACTIVO
-   * (sin tablet aún). Si ya existe uno con ese nombre en la tienda, lanza
-   * 409 sin importar su estado. La transición INACTIVO → ACTIVO la dispara
-   * la tablet en su primer heartbeat (ver `heartbeat()`).
-   *
-   * Si el admin quiere reactivar manualmente un kiosko INACTIVO sin esperar
-   * a la tablet, lo hace vía PATCH `/kiosko/:id` con `{ estado: 'ACTIVO' }`
-   * (ver `actualizar()`).
+   * La tienda sobre la que puede actuar el actor. El GERENTE solo la suya (sale de su token, nunca de la
+   * petición); el ADMIN la que elija. `null` = "todas" (solo el ADMIN, solo al listar).
    */
-  async activar(dto: ActivarKioskoDto, adminUserId: number) {
-    const tienda = await this.prisma.tienda.findFirst({
-      where: { id: dto.tiendaId, activa: true },
-    });
-    if (!tienda) {
-      throw new NotFoundException('Tienda no encontrada o inactiva');
+  private tiendaDelActor(actor: ActorKiosko, pedida?: number | null): number | null {
+    if (actor.rol === RolUsuario.GERENTE) {
+      if (!actor.tiendaId) throw new ForbiddenException('Tu usuario no tiene tienda asignada.');
+      return actor.tiendaId;
     }
+    return pedida ?? null;
+  }
 
-    const existente = await this.prisma.kiosko.findUnique({
-      where: { tiendaId_nombre: { tiendaId: dto.tiendaId, nombre: dto.nombre } },
-    });
-
-    if (existente) {
-      // Ya hay un kiosko con ese nombre (activo o inactivo) en esta tienda.
-      // La unicidad por (tiendaId, nombre) es absoluta, no por estado.
-      throw new ConflictException(
-        `Ya existe un kiosko con el nombre "${dto.nombre}" en esta tienda (estado: ${existente.estado})`,
-      );
+  /** Carga un kiosko comprobando que el actor puede tocarlo. Para otro gerente es un 404, no un 403 (no revela ids). */
+  private async cargarParaActor(kioskoId: number, actor: ActorKiosko) {
+    const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
+    if (!kiosko || (actor.rol === RolUsuario.GERENTE && kiosko.tiendaId !== actor.tiendaId)) {
+      throw new NotFoundException('Kiosko no encontrado');
     }
+    return kiosko;
+  }
 
-    // PR2 (kiosko-profesional): al activar un kiosko generamos su
-    // `deviceToken` (token de larga vida, sha256-hash en BD, claro solo
-    // devuelto al admin UNA VEZ). La tablet lo guarda en localStorage y
-    // lo manda en `X-Kiosko-Token` para probar que es ella. Sin este
-    // token, el header `X-Kiosko-Id` solo prueba que alguien conoce un
-    // kioskoId adivinado.
-    const deviceTokenPlain = this.generarDeviceTokenPlano();
-    const deviceTokenHash = this.hashDeviceToken(deviceTokenPlain);
-
-    const creado = await this.prisma.kiosko.create({
-      data: {
-        tiendaId: dto.tiendaId,
-        nombre: dto.nombre,
-        estado: EstadoKiosko.INACTIVO,
-        activadoPorId: adminUserId,
-        deviceTokenHash,
-        deviceTokenCreadoAt: new Date(),
-        // primerConexionAt queda null: se setea en el primer heartbeat.
-        // ultimoHeartbeat queda null: la tablet aún no se conectó.
-      },
-      include: this.includeCompleto,
+  /** "Kiosko N": el siguiente número libre de la tienda. Los nombres que no siguen el patrón se ignoran. */
+  private async siguienteNombre(tiendaId: number): Promise<string> {
+    const existentes = await this.prisma.kiosko.findMany({
+      where: { tiendaId },
+      select: { nombre: true },
     });
-    this.logger.log(
-      `Kiosko ${creado.id} dado de alta por admin ${adminUserId} (pendiente de primera conexión)`,
-    );
-    // Devolvemos el kiosko + el token en claro. El controller decide si
-    // exponerlo en la API pública (lo exponemos solo en alta/regenerar,
-    // nunca en listar/obtener).
-    return { ...creado, deviceTokenPlain };
+    const usados = existentes
+      .map((k) => /^Kiosko (\d+)$/.exec(k.nombre)?.[1])
+      .filter((n): n is string => !!n)
+      .map(Number);
+    return `Kiosko ${Math.max(0, ...usados) + 1}`;
   }
 
   /**
-   * Desactiva un kiosko. NO elimina pedidos históricos (trazabilidad).
+   * Da de alta un kiosko en una tienda. El nombre lo pone el sistema. Queda ACTIVO y sin tablet: el token lo
+   * entrega el emparejamiento.
    *
-   * PR3 (kiosko-profesional): idempotente. Si ya estaba INACTIVO,
-   * devolvemos la fila actual sin error. Antes lanzaba 400, lo que
-   * rompía el caso "admin hace click en Desactivar dos veces" y el
-   * caso "kiosko recién creado por el admin está INACTIVO y el botón
-   * Desactivar salta error sin haberlo desactivado antes".
+   * Dos altas a la vez calcularían el mismo número: la unicidad `(tiendaId, nombre)` hace perder a una, que
+   * reintenta con el siguiente.
    */
-  async desactivar(kioskoId: number, adminUserId: number) {
-    const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
-    if (!kiosko) {
-      throw new NotFoundException('Kiosko no encontrado');
+  async crear(actor: ActorKiosko, dto: { tiendaId?: number; ubicacion?: string }) {
+    const tiendaId = this.tiendaDelActor(actor, dto.tiendaId);
+    if (!tiendaId) throw new BadRequestException('Elige la tienda del kiosko');
+    // Un gerente no puede dar de alta en otra tienda ni "por equivocación": si manda una distinta, 403.
+    if (actor.rol === RolUsuario.GERENTE && dto.tiendaId && dto.tiendaId !== tiendaId) {
+      throw new ForbiddenException('Solo puedes dar de alta kioskos de tu tienda.');
     }
-    if (kiosko.estado === EstadoKiosko.INACTIVO) {
-      // Idempotente: devolver la fila actual sin re-marcar timestamps.
-      return this.prisma.kiosko.findUniqueOrThrow({
-        where: { id: kioskoId },
-        include: this.includeCompleto,
-      });
-    }
+    const tienda = await this.prisma.tienda.findFirst({ where: { id: tiendaId, activa: true } });
+    if (!tienda) throw new NotFoundException('Tienda no encontrada o inactiva');
 
-    const actualizado = await this.prisma.kiosko.update({
-      where: { id: kioskoId },
-      data: {
-        estado: EstadoKiosko.INACTIVO,
-        desactivadoAt: new Date(),
-        desactivadoPorId: adminUserId,
-      },
-      include: this.includeCompleto,
-    });
-    this.logger.log(`Kiosko ${kioskoId} desactivado por admin ${adminUserId}`);
-    return actualizado;
-  }
-
-  /**
-   * Actualiza nombre y/o estado de un kiosko existente.
-   * - Si cambia el nombre, valida unicidad por tienda.
-   * - Si cambia a INACTIVO, registra desactivadoAt/Por.
-   * - Si reactiva (INACTIVO → ACTIVO), resetea timestamps y ultimoHeartbeat.
-   */
-  async actualizar(kioskoId: number, dto: ActualizarKioskoDto, adminUserId: number) {
-    const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
-    if (!kiosko) {
-      throw new NotFoundException('Kiosko no encontrado');
-    }
-
-    // Validar unicidad de nombre si cambia
-    if (dto.nombre !== undefined && dto.nombre !== kiosko.nombre) {
-      const duplicado = await this.prisma.kiosko.findUnique({
-        where: {
-          tiendaId_nombre: { tiendaId: kiosko.tiendaId, nombre: dto.nombre },
-        },
-      });
-      if (duplicado && duplicado.id !== kioskoId) {
-        throw new ConflictException(
-          `Ya existe un kiosko con nombre "${dto.nombre}" en esta tienda`,
+    for (let intento = 0; ; intento++) {
+      try {
+        const creado = await this.prisma.kiosko.create({
+          data: {
+            tiendaId,
+            nombre: await this.siguienteNombre(tiendaId),
+            ubicacion: dto.ubicacion?.trim() || null,
+            estado: EstadoKiosko.ACTIVO,
+            activadoPorId: actor.userId,
+          },
+          include: this.includeCompleto,
+        });
+        this.logger.log(
+          `Kiosko ${creado.id} (${creado.nombre}) dado de alta por usuario ${actor.userId}`,
         );
+        return creado;
+      } catch (err) {
+        const choque = (err as { code?: string }).code === 'P2002';
+        if (!choque || intento >= 4) throw err;
       }
     }
+  }
+
+  /**
+   * Cambia la ubicación y/o el estado (el interruptor). Pasar a INACTIVO anota quién y cuándo; volver a ACTIVO lo
+   * borra. El nombre y la tienda NO se editan.
+   */
+  async actualizar(kioskoId: number, dto: ActualizarKioskoDto, actor: ActorKiosko) {
+    const kiosko = await this.cargarParaActor(kioskoId, actor);
 
     const data: Prisma.KioskoUpdateInput = {};
-
-    if (dto.nombre !== undefined) {
-      data.nombre = dto.nombre;
-    }
+    if (dto.ubicacion !== undefined) data.ubicacion = dto.ubicacion.trim() || null;
 
     if (dto.estado !== undefined && dto.estado !== kiosko.estado) {
       data.estado = dto.estado;
       if (dto.estado === EstadoKiosko.INACTIVO) {
         data.desactivadoAt = new Date();
-        data.desactivadoPor = { connect: { id: adminUserId } };
-      } else if (dto.estado === EstadoKiosko.ACTIVO) {
-        // Reactivación
+        data.desactivadoPor = { connect: { id: actor.userId } };
+      } else {
         data.activadoAt = new Date();
-        data.activadoPor = { connect: { id: adminUserId } };
+        data.activadoPor = { connect: { id: actor.userId } };
         data.desactivadoAt = null;
         data.desactivadoPor = { disconnect: true };
-        data.ultimoHeartbeat = null;
       }
     }
 
     if (Object.keys(data).length === 0) {
-      // No hay cambios
       return this.prisma.kiosko.findUniqueOrThrow({
         where: { id: kioskoId },
         include: this.includeCompleto,
@@ -201,102 +165,56 @@ export class KioskoService {
       include: this.includeCompleto,
     });
     this.logger.log(
-      `Kiosko ${kioskoId} actualizado por admin ${adminUserId} (cambios: ${Object.keys(data).join(', ')})`,
+      `Kiosko ${kioskoId} actualizado por usuario ${actor.userId} (${Object.keys(data).join(', ')})`,
     );
     return actualizado;
   }
 
   /**
-   * Heartbeat del kiosko: actualiza ultimoHeartbeat.
-   *
-   * Si el kiosko está INACTIVO con `primerConexionAt` null (recién dado de
-   * alta por admin, sin tablet aún), este primer heartbeat dispara la
-   * transición INACTIVO → ACTIVO + setea `primerConexionAt`. Reusa el
-   * `activadoPorId` del alta original para no perder la trazabilidad de
-   * "qué admin dio de alta este kiosko".
-   *
-   * Si el kiosko está INACTIVO pero ya tuvo `primerConexionAt` (es decir,
-   * estuvo activo y luego fue desactivado por admin), devuelve 400 para
-   * preservar la semántica de "desactivar = apagar".
+   * Quita el token del kiosko: la tablet que lo tenía (robada, reemplazada, desconfigurada) deja de poder operar
+   * al instante y, al recibir el rechazo, pide emparejarse sola. El kiosko NO se borra: sus pedidos conservan la
+   * trazabilidad y se puede vincular otra tablet al mismo.
    */
-  async heartbeat(kioskoId: number) {
-    const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
-    if (!kiosko) {
-      throw new NotFoundException('Kiosko no encontrado');
-    }
-
-    const now = new Date();
-
-    if (kiosko.estado === EstadoKiosko.ACTIVO) {
-      // Path normal: kiosko ya activo, sólo actualizar heartbeat.
-      const actualizado = await this.prisma.kiosko.update({
-        where: { id: kioskoId },
-        data: { ultimoHeartbeat: now },
-        select: { id: true, ultimoHeartbeat: true, estado: true },
-      });
-      return {
-        kioskoId: actualizado.id,
-        ultimoHeartbeat: actualizado.ultimoHeartbeat,
-        estado: actualizado.estado,
-        recienActivado: false,
-      };
-    }
-
-    if (kiosko.estado === EstadoKiosko.INACTIVO && kiosko.desactivadoAt === null) {
-      // El kiosko está INACTIVO pero el admin nunca lo desactivó
-      // explícitamente. Reactivamos por heartbeat. Cubre dos casos:
-      // 1) Primera conexión: kiosko dado de alta por admin, nunca
-      //    encendido. `primerConexionAt` es null, lo seteamos ahora.
-      // 2) Kiosko legacy que estuvo activo, se desactivó
-      //    programáticamente (e.g. prueba anterior), `desactivadoAt`
-      //    quedó en null porque nunca se llamó desactivar() — se
-      //    reactiva porque la tablet lo está pidiendo.
-      // Si `desactivadoAt` tuviera valor, es un kiosko que el admin
-      // desactivó intencionalmente; NO se reactiva automáticamente.
-      const isPrimeraConexion = kiosko.primerConexionAt === null;
-      const actualizado = await this.prisma.kiosko.update({
-        where: { id: kioskoId },
-        data: {
-          estado: EstadoKiosko.ACTIVO,
-          ultimoHeartbeat: now,
-          // Si es primera conexión, setea primerConexionAt. Si ya
-          // tenía, no lo toca (preserva la trazabilidad de cuándo se
-          // conectó por primera vez).
-          ...(isPrimeraConexion ? { primerConexionAt: now } : {}),
-        },
-        select: { id: true, ultimoHeartbeat: true, estado: true },
-      });
-      this.logger.log(
-        `Kiosko ${kioskoId} ${isPrimeraConexion ? 'activado por primera conexión' : 'reactivado'} (heartbeat)`,
-      );
-      return {
-        kioskoId: actualizado.id,
-        ultimoHeartbeat: actualizado.ultimoHeartbeat,
-        estado: actualizado.estado,
-        recienActivado: true,
-      };
-    }
-
-    // INACTIVO con desactivadoAt no null: admin lo desactivó
-    // intencionalmente. No se reactiva.
-    throw new BadRequestException('Kiosko inactivo');
+  async desvincular(kioskoId: number, actor: ActorKiosko) {
+    await this.cargarParaActor(kioskoId, actor);
+    const actualizado = await this.prisma.kiosko.update({
+      where: { id: kioskoId },
+      data: { deviceTokenHash: null, deviceTokenCreadoAt: null },
+      include: this.includeCompleto,
+    });
+    this.logger.log(`Kiosko ${kioskoId}: tablet desvinculada por usuario ${actor.userId}`);
+    return actualizado;
   }
 
   /**
-   * Lista kioskos con filtros opcionales.
+   * Latido del kiosko: actualiza `ultimoHeartbeat` y le dice a la tablet quién es según el servidor. El controller
+   * ya validó el token y que el kiosko esté ACTIVO.
    */
+  async heartbeat(kioskoId: number) {
+    const kiosko = await this.prisma.kiosko.findUnique({
+      where: { id: kioskoId },
+      select: { id: true, estado: true },
+    });
+    if (!kiosko) throw new NotFoundException('Kiosko no encontrado');
+    if (kiosko.estado !== EstadoKiosko.ACTIVO) throw new BadRequestException('Kiosko inactivo');
+
+    const actualizado = await this.prisma.kiosko.update({
+      where: { id: kioskoId },
+      data: { ultimoHeartbeat: new Date() },
+      select: SELECT_HEARTBEAT,
+    });
+    return this.respuestaHeartbeat(actualizado);
+  }
+
   /**
-   * Lista kioskos con su estado de SALUD derivado.
-   *
-   * La salud se calcula aquí (no en el frontend) para que todos los clientes
-   * coincidan y el panel no tenga que re-derivar reglas. Distingue
-   * explícitamente "el admin lo apagó" de "la tablet se cayó": son problemas
-   * con soluciones distintas y confundirlos hacía que el admin no supiera si
-   * actuar o no.
+   * Lista kioskos con su estado de SALUD derivado. La salud se calcula aquí (no en el frontend) para que todos los
+   * clientes coincidan; distingue "el admin lo apagó" de "la tablet se cayó" porque piden acciones distintas.
+   * El GERENTE solo ve los de su tienda; el ADMIN, todos o los de la tienda que pida.
    */
-  async listar(filtros?: { tiendaId?: number; estado?: EstadoKiosko }) {
+  async listar(actor: ActorKiosko, filtros?: { tiendaId?: number; estado?: EstadoKiosko }) {
     const where: Prisma.KioskoWhereInput = {};
-    if (filtros?.tiendaId) where.tiendaId = filtros.tiendaId;
+    const tiendaId = this.tiendaDelActor(actor, filtros?.tiendaId);
+    if (tiendaId) where.tiendaId = tiendaId;
     if (filtros?.estado) where.estado = filtros.estado;
 
     const kioskos = await this.prisma.kiosko.findMany({
@@ -317,26 +235,7 @@ export class KioskoService {
     };
   }
 
-  /**
-   * Devuelve el kiosko activo de una tienda. Si hay varios, devuelve el
-   * primero por nombre. Usado por la tablet en /kiosko/[tiendaId] para
-   * validar que existe kiosko antes de mostrar login.
-   */
-  async obtenerActivoPorTienda(tiendaId: number) {
-    const kiosko = await this.prisma.kiosko.findFirst({
-      where: { tiendaId, estado: EstadoKiosko.ACTIVO },
-      include: { tienda: { select: { id: true, nombre: true } } },
-      orderBy: { nombre: 'asc' },
-    });
-    if (!kiosko) {
-      throw new NotFoundException('Esta tienda no tiene un kiosko activo');
-    }
-    return kiosko;
-  }
-
-  /**
-   * Helper interno para includes repetidos en listar/activar/desactivar.
-   */
+  /** Helper interno para includes repetidos. */
   private get includeCompleto() {
     return {
       tienda: { select: { id: true, nombre: true, direccion: true, ciudad: true } },
@@ -345,69 +244,33 @@ export class KioskoService {
     } satisfies Prisma.KioskoInclude;
   }
 
-  /**
-   * PR2 (kiosko-profesional): genera un token opaco de larga vida.
-   * 32 bytes random → base64url (43 chars). El hash se persiste; el
-   * claro se devuelve UNA sola vez al admin y nunca vuelve a salir.
-   */
-  private generarDeviceTokenPlano(): string {
-    return randomBytes(32).toString('base64url');
-  }
-
-  /**
-   * PR2: hashea el token con SHA-256. La BD guarda solo el hash; el
-   * admin lo pega en la tablet y la tablet lo manda en cada request.
-   */
+  /** SHA-256 del token. La BD guarda solo el hash; el claro lo tiene únicamente la tablet. */
   private hashDeviceToken(tokenPlano: string): string {
     return createHash('sha256').update(tokenPlano).digest('hex');
   }
 
   /**
-   * PR2: regenera el device token de un kiosko existente. El anterior
-   * queda invalidado al instante — la tablet vieja deja de poder mandar
-   * heartbeat hasta que el admin le pegue el nuevo token.
+   * Respuesta del heartbeat: además del latido, la IDENTIDAD que el servidor conoce de esta tablet.
    *
-   * Pensado para:
-   *  - kioskos legacy (device_token_hash IS NULL tras la migración) que
-   *    necesitan un token para empezar a operar;
-   *  - tablets comprometidas / robadas: el admin regenera desde el panel
-   *    y la tablet atacante queda bloqueada.
+   * La tablet guarda en su localStorage a qué kiosko y tienda pertenece; cada latido se la confirma. Si no
+   * coincide, GANA EL SERVIDOR (la tablet nunca decide a qué tienda pertenece: el kiosko tiene `tiendaId` fijo
+   * en la BD y nada lo cambia).
    */
-  async regenerarDeviceToken(
-    kioskoId: number,
-    adminUserId: number,
-  ): Promise<{ kiosko: any; deviceTokenPlain: string }> {
-    const kiosko = await this.prisma.kiosko.findUnique({ where: { id: kioskoId } });
-    if (!kiosko) {
-      throw new NotFoundException('Kiosko no encontrado');
-    }
-
-    const deviceTokenPlain = this.generarDeviceTokenPlano();
-    const deviceTokenHash = this.hashDeviceToken(deviceTokenPlain);
-
-    const actualizado = await this.prisma.kiosko.update({
-      where: { id: kioskoId },
-      data: {
-        deviceTokenHash,
-        deviceTokenCreadoAt: new Date(),
-      },
-      include: this.includeCompleto,
-    });
-    this.logger.log(`Device token regenerado para kiosko ${kioskoId} por admin ${adminUserId}`);
-    return { kiosko: actualizado, deviceTokenPlain };
+  private respuestaHeartbeat(k: Prisma.KioskoGetPayload<{ select: typeof SELECT_HEARTBEAT }>) {
+    return {
+      kioskoId: k.id,
+      ultimoHeartbeat: k.ultimoHeartbeat,
+      estado: k.estado,
+      nombre: k.nombre,
+      tiendaId: k.tiendaId,
+      tiendaNombre: k.tienda.nombre,
+    };
   }
 
   /**
-   * PR2: validación constante-tiempo del `X-Kiosko-Token` enviado por
-   * la tablet. Devuelve true solo si:
-   *  - el kiosko existe;
-   *  - está ACTIVO;
-   *  - el hash guardado coincide con el del token enviado.
-   *
-   * Falla silenciosa (false) si el kiosko no tiene token (legacy) — la
-   * política es que TODO kiosko debe tener device token; los legacy
-   * deben regenerar antes de poder operar (ver validarKioskoParaPedido
-   * en cliente.service.ts).
+   * Validación constante-tiempo del `X-Kiosko-Token` enviado por la tablet. Devuelve true solo si el kiosko
+   * existe, está ACTIVO y el hash guardado coincide con el del token enviado. Un kiosko sin token (nunca
+   * vinculado, o desvinculado) nunca valida.
    */
   async validarDeviceToken(kioskoId: number, tokenPlano: string | undefined): Promise<boolean> {
     const resultado = await this.validarDeviceTokenConMotivo(kioskoId, tokenPlano);
@@ -415,21 +278,14 @@ export class KioskoService {
   }
 
   /**
-   * Igual que `validarDeviceToken`, pero distingue POR QUÉ falló.
-   *
-   * El booleano colapsaba tres causas que el cliente necesita separar:
+   * Igual que `validarDeviceToken`, pero distingue POR QUÉ falló:
    *  - `SIN_TOKEN`: la tablet no mandó el header.
-   *  - `TOKEN_INVALIDO`: mandó uno que no coincide con el hash guardado.
-   *  - `KIOSKO_INACTIVO`: el token es correcto, pero el admin apagó el kiosko.
+   *  - `TOKEN_INVALIDO`: mandó uno que no coincide con el hash guardado (o el kiosko ya no tiene token).
+   *  - `KIOSKO_INACTIVO`: el token es correcto, pero el kiosko está apagado.
+   * Las dos primeras son fallos de credenciales (401); la tercera es un conflicto de estado (409).
    *
-   * Las dos primeras son fallos de credenciales (401); la tercera es un
-   * conflicto de estado (409). Sin esta distinción el frontend mostraba
-   * "token inválido" a un operador cuyo kiosko simplemente estaba apagado.
-   *
-   * Nota de seguridad: el orden de las comprobaciones importa. Se verifica
-   * el token ANTES de revelar el estado del kiosko, para que un atacante
-   * que enumera IDs no pueda usar el código de respuesta como oráculo de
-   * qué kioskos existen y están activos.
+   * Nota de seguridad: el token se verifica ANTES de revelar el estado del kiosko, para que quien enumera ids no
+   * pueda usar el código de respuesta como oráculo de qué kioskos existen y están activos.
    */
   async validarDeviceTokenConMotivo(
     kioskoId: number,
@@ -446,9 +302,7 @@ export class KioskoService {
     if (!kiosko.deviceTokenHash) return { valido: false, motivo: 'TOKEN_INVALIDO' };
 
     const hashDado = this.hashDeviceToken(tokenPlano);
-    // timingSafeEqual requiere buffers del mismo largo. Si el hash guardado
-    // está malformado por alguna razón, comparamos con un buffer de ceros
-    // del largo correcto y devolvemos false (mismo tiempo de respuesta).
+    // timingSafeEqual requiere buffers del mismo largo. Si el hash guardado está malformado, se devuelve false.
     let a: Buffer, b: Buffer;
     try {
       a = Buffer.from(hashDado, 'hex');

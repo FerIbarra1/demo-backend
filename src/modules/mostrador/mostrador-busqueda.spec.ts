@@ -44,6 +44,8 @@ function crearServicio(ids: number[] = [1, 2, 3]) {
 
   const prisma = {
     pedido: { findMany, count },
+    // Las filas llevan su resumen de DTF; estos pedidos no tienen ninguno.
+    pedidoDtf: { findMany: jest.fn().mockResolvedValue([]) },
     $queryRaw: queryRaw,
   };
 
@@ -289,11 +291,24 @@ describe('buscarPedidos — aislamiento por tienda', () => {
     expect(findMany).not.toHaveBeenCalled();
   });
 
-  it('ADMIN no queda acotado a una tienda', async () => {
+  it('ADMIN sin tienda no queda acotado a ninguna (la búsqueda global del servicio)', async () => {
     const { svc, findMany, queryRaw } = crearServicio();
     await svc.buscarPedidos('Juan', admin, undefined);
 
     expect(whereDe(findMany).tiendaId).toBeUndefined();
     expect(sqlDe(queryRaw).sql).not.toContain('p.tienda_id');
+  });
+
+  // PLAN-ADMIN-MULTITIENDA (oct 2026, D1): la consola del ADMIN muestra UNA tienda a la vez. Antes el
+  // servicio ignoraba la tienda para el ADMIN y su buscador devolvía pedidos de todas, mezclados, dentro
+  // de una consola que decía "Obregón". La búsqueda global es otra cosa (N2) y se pide sin tienda.
+  it('ADMIN que eligió tienda: la búsqueda se acota a ESA tienda, en las dos capas', async () => {
+    const { svc, findMany, queryRaw } = crearServicio();
+    await svc.buscarPedidos('Juan', admin, 7);
+
+    expect(whereDe(findMany).tiendaId).toBe(7);
+    const { sql, values } = sqlDe(queryRaw);
+    expect(sql).toContain('p.tienda_id =');
+    expect(values).toContain(7);
   });
 });

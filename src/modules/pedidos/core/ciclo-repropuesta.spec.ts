@@ -67,6 +67,7 @@ function crearTx(items: any[]) {
   const creados: any[] = [];
   const estado = new Map(items.map((i) => [i.id, { ...i }]));
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: async ({ where }: any) => estado.get(where.id) ?? null,
       findMany: async () => [...estado.values()],
@@ -152,7 +153,13 @@ describe('F21 fase 3 — el ajuste que SUBE y bodega no alcanza', () => {
     // Bodega fue a surtir las 4 nuevas y solo encontró 1. El estado queda:
     // pidió 7, hay 4, se lleva 4 → y el sistema tiene que proponerle eso.
     const trasSurtido = [
-      item({ id: 1, cantidadPedida: 7, cantidadSurtida: 4, cantidad: 4, estadoSurtido: EstadoSurtido.PARCIAL }),
+      item({
+        id: 1,
+        cantidadPedida: 7,
+        cantidadSurtida: 4,
+        cantidad: 4,
+        estadoSurtido: EstadoSurtido.PARCIAL,
+      }),
     ];
 
     const { items, total } = construirPropuestaDeBodega(trasSurtido as never);
@@ -166,7 +173,13 @@ describe('F21 fase 3 — el ajuste que SUBE y bodega no alcanza', () => {
 
   it('el cliente aprueba la propuesta nueva y el pedido cierra', async () => {
     const items = [
-      item({ id: 1, cantidadPedida: 7, cantidadSurtida: 4, cantidad: 4, estadoSurtido: EstadoSurtido.PARCIAL }),
+      item({
+        id: 1,
+        cantidadPedida: 7,
+        cantidadSurtida: 4,
+        cantidad: 4,
+        estadoSurtido: EstadoSurtido.PARCIAL,
+      }),
     ];
     const { tx, updates } = crearItemTx(items);
 
@@ -187,6 +200,7 @@ function crearItemTx(items: any[]) {
   const updates: Array<{ id: number; data: any }> = [];
   const estado = new Map(items.map((i) => [i.id, { ...i }]));
   const tx = {
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: async ({ where }: any) => estado.get(where.id) ?? null,
       update: async ({ where, data }: any) => {

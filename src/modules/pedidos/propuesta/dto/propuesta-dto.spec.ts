@@ -115,9 +115,9 @@ describe('IntencionAjusteDto — lo que el asesor puede decir', () => {
   });
 
   it('QUITAR no necesita cantidad', () => {
-    expect(
-      validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'QUITAR', itemId: 1 }])),
-    ).toEqual([]);
+    expect(validar(VistaPreviaAjusteDto, enVistaPrevia([{ accion: 'QUITAR', itemId: 1 }]))).toEqual(
+      [],
+    );
   });
 
   it('rechaza cantidades absurdas', () => {

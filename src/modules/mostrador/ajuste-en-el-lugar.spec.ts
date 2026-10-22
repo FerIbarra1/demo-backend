@@ -55,6 +55,7 @@ function crearServicio(items: any[], opts: { estado?: EstadoPedido } = {}) {
     pedido: { update: jest.fn(async () => ({})) },
     pedidoPropuesta: { updateMany: jest.fn(async () => ({ count: 0 })) },
     historialPedido: { create: jest.fn(async () => ({})) },
+    pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
     itemPedido: {
       findUnique: jest.fn(async ({ where }: any) => items.find((i) => i.id === where.id) ?? null),
       // Honra `cancelada: false` (lo pide el recálculo de totales); sin ese filtro

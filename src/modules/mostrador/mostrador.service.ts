@@ -34,6 +34,7 @@ import {
 import { umbralesSinRecoger } from '../pedidos/core/sin-recoger.util';
 import { ConfigService } from '@nestjs/config';
 import { UserContext } from '../../types/pedido.types';
+import { turnoCorto } from '../pedidos/core/folio-erp.util';
 
 /**
  * Módulo Mostrador (jul 2026).
@@ -111,6 +112,7 @@ export class MostradorService {
       where: { id: pedidoId },
       select: {
         numeroPedido: true,
+        folioErp: true,
         tiendaId: true,
         canalOrigen: true,
         llegadaAnunciadaAt: true,
@@ -173,6 +175,8 @@ export class MostradorService {
       this.realtime.emitToTienda(completo.tiendaId, 'pedido.enviado-a-pagar', {
         id: pedidoId,
         numeroPedido: completo.numeroPedido,
+        // Oct 2026 (B2): lo que la TV pinta (los últimos dígitos del folio); null = aún sin folio.
+        turno: turnoCorto(completo.folioErp),
       });
     }
     // `destinoPago` SÍ viaja en la respuesta HTTP: es para el toast de la operadora, privado.
@@ -246,7 +250,20 @@ export class MostradorService {
    * manda el pedido a bodega. Eso permite desplegar el backend antes que el
    * frontend sin romper nada.
    */
-  async ajustar(pedidoId: number, usuario: UserContext, nota: string, items?: ItemAjusteDto[]) {
+  async ajustar(
+    pedidoId: number,
+    usuario: UserContext,
+    nota: string,
+    items?: ItemAjusteDto[],
+    /**
+     * Oct 2026 (destrabar): el GERENTE o el ADMIN quitan productos desde el panel del pedido, con el cliente AUSENTE.
+     * Eso cambia tres cosas del ajuste de mostrador, que da por hecho que el cliente está enfrente:
+     *  - NO registra su llegada (sería un aviso de presencia falso: bodega lo trataría como "cliente en tienda");
+     *  - el historial y la propuesta superada no llevan la `nota` (aquí es el motivo interno, y el cliente lee ambos);
+     *  - el historial dice "la tienda", no "mostrador por <operador>".
+     */
+    opts: { porLaTienda?: boolean } = {},
+  ) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
     /**
      * F21 (oct 2026): también desde `ESPERANDO_APROBACION`.
@@ -330,9 +347,11 @@ export class MostradorService {
      * después y lee `dto.observacion`). Ahora el DTO la lee con un getter: la
      * transición la consulta cuando escribe la fila, ya con el conteo real.
      */
-    let observacion = hayCambios
-      ? `Ajuste en mostrador por ${usuario.nombre}: ${nota}`
-      : `Ajuste solicitado en mostrador por ${usuario.nombre}: ${nota}`;
+    let observacion = opts.porLaTienda
+      ? 'Ajuste hecho por la tienda'
+      : hayCambios
+        ? `Ajuste en mostrador por ${usuario.nombre}: ${nota}`
+        : `Ajuste solicitado en mostrador por ${usuario.nombre}: ${nota}`;
     let piezasAReposicion = 0;
 
     /**
@@ -402,7 +421,7 @@ export class MostradorService {
             data: {
               estado: EstadoPropuesta.SUPERADA,
               respondidaAt: new Date(),
-              notaCliente: nota,
+              notaCliente: opts.porLaTienda ? null : nota,
             },
           });
 
@@ -419,7 +438,10 @@ export class MostradorService {
           // F21: el número REAL de cambios aplicados, no los propuestos. Ver el
           // comentario de `observacion` arriba.
           observacion =
-            `Ajuste en mostrador por ${usuario.nombre}: ${nota} (${cambios.length} cambio(s))` +
+            (opts.porLaTienda
+              ? 'Ajuste hecho por la tienda'
+              : `Ajuste en mostrador por ${usuario.nombre}: ${nota}`) +
+            ` (${cambios.length} cambio(s))` +
             (vaABodega ? '' : ' — resuelto en el área de entrega, sin pasar por bodega');
 
           // Oct 2026 (decisión 4): lo que el operador quitó pasa a REPOSICIÓN. Las
@@ -465,7 +487,7 @@ export class MostradorService {
     // pasó cuando el pedido ya volvió a bodega — peor que un aviso faltante, que
     // se puede marcar a mano con "El cliente está aquí".
     try {
-      await this.llegada.confirmarDesdeMostrador(pedidoId, usuario);
+      if (!opts.porLaTienda) await this.llegada.confirmarDesdeMostrador(pedidoId, usuario);
     } catch (err) {
       this.logger.warn(
         `Pedido ${pedidoId}: el ajuste se aplicó pero no se pudo registrar la llegada ` +
@@ -841,6 +863,15 @@ export class MostradorService {
    * `omitidas`, con la razón, en vez de fallar el lote entero.
    */
   async cancelarVencidos(usuario: UserContext, ids: number[], motivo?: string) {
+    // PLAN-ADMIN-MULTITIENDA §4.5.4: cancelar es destructivo y el ADMIN lo puede hacer en la tienda de
+    // cualquiera. El operador puede dejar el texto por defecto ("pasaron más de 3 días…"); el ADMIN debe
+    // decir POR QUÉ —es lo que el cliente lee en su correo y lo que queda en el historial—, igual que en
+    // "marcar pagado manual". Se exige antes de consultar nada.
+    if (usuario.rol === RolUsuario.ADMIN && (motivo?.trim().length ?? 0) < 3) {
+      throw new BadRequestException(
+        'Escribe el motivo de la cancelación (mínimo 3 caracteres): el cliente lo lee en su correo.',
+      );
+    }
     const u = umbralesSinRecoger(this.config);
     const limite = new Date(Date.now() - u.vencidoHoras * 3_600_000);
     const dias = Math.max(1, Math.round(u.vencidoHoras / 24));
@@ -1075,7 +1106,7 @@ export class MostradorService {
    * que elegir el pedido. Es el espejo de `CajeroService.llamarSiguiente`.
    *
    * Por qué existe: en cajero el operador puede llamar al siguiente o tomar
-   * uno específico; en mostrador sólo estaba lo segundo. Con un cliente
+   * uno específico; en mostrador solo estaba lo segundo. Con un cliente
    * enfrente el operador busca su folio, pero cuando la fila está llena y
    * nadie se acerca, llamar al siguiente es el flujo natural — y era el único
    * caso donde el operador tenía que elegir un pedido a mano.
@@ -1087,14 +1118,17 @@ export class MostradorService {
    * Reutiliza `llamar` para no duplicar los efectos (llamadoAt, historial,
    * realtime, invalidación del monitor).
    */
-  async llamarSiguiente(usuario: UserContext) {
-    if (!usuario.tiendaId) {
+  async llamarSiguiente(usuario: UserContext, tiendaId: number | undefined = usuario.tiendaId) {
+    // Oct 2026 (PLAN-ADMIN-MULTITIENDA): la tienda llega resuelta (`@TiendaConsola()`): la del token para
+    // un empleado, la que está operando para el ADMIN (que no trae una). Sin ella, el ADMIN no tenía cómo
+    // decir de qué cola llamar y recibía "no tiene tienda asignada".
+    if (!tiendaId) {
       throw new BadRequestException('Tu usuario no tiene tienda asignada');
     }
 
     const siguiente = await this.prisma.pedido.findFirst({
       where: {
-        tiendaId: usuario.tiendaId,
+        tiendaId,
         // F17: solo REVISADO. Un pedido ya llamado está en EN_ATENCION, así que
         // el estado por sí solo lo excluye — el filtro `llamadoAt: null` que
         // hacía falta antes ya no es necesario.
@@ -1172,6 +1206,7 @@ export class MostradorService {
       where: { id: pedidoId },
       select: {
         numeroPedido: true,
+        folioErp: true,
         clienteNombre: true,
         tiendaId: true,
         canalOrigen: true,
@@ -1255,6 +1290,7 @@ export class MostradorService {
     this.realtime.emitToTienda(completo.tiendaId, 'pedido.llamado-mostrador', {
       id: pedidoId,
       numeroPedido: completo.numeroPedido,
+      turno: turnoCorto(completo.folioErp),
       clienteNombre: completo.clienteNombre,
       operadorId: usuario.userId,
       operadorNombre: nombreOperador,
@@ -1270,6 +1306,9 @@ export class MostradorService {
     return {
       pedidoId,
       numeroPedido: completo.numeroPedido,
+      // Con estas dos el servidor decora la respuesta con su `folio` (el toast de la operadora lo usa).
+      tiendaId: completo.tiendaId,
+      folioErp: completo.folioErp,
       clienteNombre: completo.clienteNombre,
       operadorNombre: nombreOperador,
       mostradorId: mostrador?.id ?? null,
@@ -1292,13 +1331,13 @@ export class MostradorService {
    * `HistorialPedido.observacion`.
    */
   async entregar(pedidoId: number, usuario: UserContext, recogioNombre?: string) {
-    // 1. Cargar y validar acceso (ADMIN cross-tienda, MOSTRADOR sólo su tienda).
+    // 1. Cargar y validar acceso (ADMIN cross-tienda, MOSTRADOR solo su tienda).
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
     // 2. Validar estado.
     if (pedido.estado !== EstadoPedido.PAGADO && pedido.estado !== EstadoPedido.ENVIADO) {
       throw new BadRequestException(
-        `Sólo se pueden entregar pedidos en PAID o SHIPPED (actual: ${pedido.estado})`,
+        `Solo se pueden entregar pedidos en PAID o SHIPPED (actual: ${pedido.estado})`,
       );
     }
 

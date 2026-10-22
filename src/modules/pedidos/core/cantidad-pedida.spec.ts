@@ -23,13 +23,7 @@ function fakeTx(items: Array<Record<string, unknown>>) {
         const it = store.get(where.id);
         return it ? { ...it } : null;
       },
-      update: async ({
-        where,
-        data,
-      }: {
-        where: { id: number };
-        data: Record<string, unknown>;
-      }) => {
+      update: async ({ where, data }: { where: { id: number }; data: Record<string, unknown> }) => {
         const it = store.get(where.id);
         if (!it) throw new Error(`item ${where.id} no existe`);
         Object.assign(it, data);
@@ -69,9 +63,11 @@ describe('aplicarCambiosFisicos — cantidadPedida sobrevive al surtido', () => 
       },
     ]);
 
-    const item = await (tx as never as {
-      itemPedido: { findUnique: (a: unknown) => Promise<Record<string, unknown>> };
-    }).itemPedido.findUnique({ where: { id: 1 } });
+    const item = await (
+      tx as never as {
+        itemPedido: { findUnique: (a: unknown) => Promise<Record<string, unknown>> };
+      }
+    ).itemPedido.findUnique({ where: { id: 1 } });
 
     // `cantidad` es la VIGENTE: lo que se cobra.
     expect(item.cantidad).toBe(10);
@@ -103,9 +99,11 @@ describe('aplicarCambiosFisicos — cantidadPedida sobrevive al surtido', () => 
       },
     ]);
 
-    const item = await (tx as never as {
-      itemPedido: { findUnique: (a: unknown) => Promise<Record<string, unknown>> };
-    }).itemPedido.findUnique({ where: { id: 1 } });
+    const item = await (
+      tx as never as {
+        itemPedido: { findUnique: (a: unknown) => Promise<Record<string, unknown>> };
+      }
+    ).itemPedido.findUnique({ where: { id: 1 } });
 
     expect(item.cancelada).toBe(true);
     expect(item.cantidadSurtida).toBe(0);

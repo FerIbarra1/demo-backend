@@ -9,13 +9,22 @@ import { ESTADOS_NO_COBRAR } from '../../pagos/transferencia/reglas';
  * el pedido— en vez de por cuándo llegó a caja.
  */
 
-/** Pedidos que se cobran en ventanilla y ningún cajero ha tomado. */
-export function whereFilaDeCaja(tiendaId?: number): Prisma.PedidoWhereInput {
+/**
+ * Pedidos que se cobran en ventanilla y ningún cajero ha tomado.
+ *
+ * `incluirDomicilio` es SOLO para la pestaña «Por registrar»: un pedido a DOMICILIO no se cobra en ventanilla (el cliente
+ * no va a la tienda: ni "Llamar siguiente" ni la TV lo ven), pero SU transferencia, una vez verificada por Tesorería,
+ * la tienda tiene que registrarla en el Sistema Comercial. Sin verla en alguna parte, un domicilio pagado nunca llegaría
+ * a `PAGADO` ni a `ENVIADO` (hallazgo H1 del plan de pagos). Desde el 19-oct-2026 a domicilio solo se paga por transferencia.
+ */
+export function whereFilaDeCaja(
+  tiendaId?: number,
+  opts: { incluirDomicilio?: boolean } = {},
+): Prisma.PedidoWhereInput {
   return {
     estado: EstadoPedido.PENDIENTE_PAGO,
     cajeroAsignadoId: null,
-    // Un pedido a DOMICILIO no se cobra en ventanilla: el cliente no va a la tienda.
-    modoEntrega: { not: ModoEntrega.DOMICILIO },
+    ...(opts.incluirDomicilio ? {} : { modoEntrega: { not: ModoEntrega.DOMICILIO } }),
     ...(tiendaId ? { tiendaId } : {}),
   };
 }

@@ -11,6 +11,7 @@ import { RealtimeService } from '../../realtime/realtime.service';
 import { PedidoStateService } from '../core/pedido-state.service';
 import { VentanillasService } from '../../ventanillas/ventanillas.service';
 import { UserContext } from '../../../types/pedido.types';
+import { resumenDtfPorPedido } from '../../dtf/dtf-resumen';
 import {
   EstadoPedido,
   Prisma,
@@ -31,13 +32,14 @@ import {
   ordenarFilaDeCaja,
   whereFilaDeCaja,
 } from '../core/cola-caja.util';
+import { turnoCorto } from '../core/folio-erp.util';
 
 /**
  * Servicio del dominio CAJERO.
  *
  * Responsabilidad: cola de pedidos en PENDIENTE_PAGO (kiosko y web, no domicilio),
  * asignar pedidos a la ventanilla del cajero logueado (1:1), liberar y listar
- * mis pedidos. NO dispara transiciones de estado: sólo cambia la
+ * mis pedidos. NO dispara transiciones de estado: solo cambia la
  * asignación de ventanilla. El cobro se confirma en un sistema externo
  * (Firebird) que llama al webhook `POST /admin/pedidos/:id/marcar-pagado`.
  */
@@ -58,8 +60,8 @@ const PAGO_PARA_CAJA = {
     montoEsperado: true,
     verificadoAt: true,
     requiereRevision: true,
-    // Para que caja sepa si unas instrucciones ya vencieron (ver `mensajeParaCaja`).
-    venceAt: true,
+    // Para decirle a caja cuánto lleva esperando la transferencia (ver `esperaDelPago`).
+    createdAt: true,
   },
 } satisfies Prisma.Pedido$pagosTransferenciaArgs;
 
@@ -120,7 +122,11 @@ export class CajeroService {
     // La fila es la misma que ve la TV y la que recorre "Llamar siguiente" (`cola-caja.util.ts`);
     // aquí se muestra ENTERA (también las transferencias en proceso, marcadas "no cobrar"), pero en
     // el mismo orden de turno.
-    const where: Prisma.PedidoWhereInput = whereFilaDeCaja(tiendaId);
+    // «Por registrar» (`verificado`) también trae los pedidos a DOMICILIO: no se atienden en ventanilla, pero su
+    // transferencia verificada hay que registrarla en el Sistema Comercial (ver `whereFilaDeCaja`).
+    const where: Prisma.PedidoWhereInput = whereFilaDeCaja(tiendaId, {
+      incluirDomicilio: pago === 'verificado',
+    });
     if (canal !== 'TODOS') where.canalOrigen = canal;
     if (pago === 'verificado') {
       where.pagosTransferencia = { some: { estado: EstadoPagoTransferencia.VERIFICADO } };
@@ -147,6 +153,8 @@ export class CajeroService {
         })
       : [];
     const porId = new Map(pedidos.map((p) => [p.id, p]));
+    // El DTF no es un item pero SÍ suma al total: sin su resumen caja vería un total que no cuadra con las líneas.
+    const dtfPorPedido = await resumenDtfPorPedido(this.prisma, ids);
     const ahora = Date.now();
     const data = ids.flatMap((id) => {
       const p = porId.get(id);
@@ -154,7 +162,14 @@ export class CajeroService {
       // Minutos que lleva en la fila de caja (no desde que se hizo el pedido).
       const desde = (p.colaCajaDesdeAt ?? p.fechaPedido).getTime();
       return [
-        { ...conPagoParaCaja(p), minutosEnCola: Math.max(0, Math.floor((ahora - desde) / 60_000)) },
+        {
+          ...conPagoParaCaja(p),
+          // A domicilio no hay a quién llamar ni atender: la cajera solo lo REGISTRA en el Sistema Comercial. Lo
+          // decide el servidor; la consola no deduce de `modoEntrega` qué botones ofrecer.
+          soloRegistrar: p.modoEntrega === ModoEntrega.DOMICILIO,
+          minutosEnCola: Math.max(0, Math.floor((ahora - desde) / 60_000)),
+          dtfResumen: dtfPorPedido.get(id) ?? null,
+        },
       ];
     });
     return {
@@ -173,7 +188,39 @@ export class CajeroService {
   }
 
   async tomarPedidoCajero(pedidoId: number, usuario: UserContext) {
+    if (usuario.rol === RolUsuario.ADMIN) {
+      const p = await this.prisma.pedido.findUnique({
+        where: { id: pedidoId },
+        select: { tiendaId: true },
+      });
+      // Sin esto un pedido inexistente le daba al ADMIN un 403 "elige una ventanilla" que no tiene nada que ver.
+      if (!p) throw new NotFoundException('Pedido no encontrado');
+      await this.exigirVentanillaSiEsAdmin(usuario, p.tiendaId);
+    }
     return this.tomarPedidoCajeroInterno(pedidoId, usuario, true);
+  }
+
+  /**
+   * Tomar un pedido —o llamar al siguiente— lo ASIGNA a quien lo toma, a SU ventanilla. Un cajero ya tiene una
+   * (`EstacionGuard` lo exige); el ADMIN está exento de la estación para MIRAR y actuar, pero tomar sin
+   * ventanilla dejaría el pedido asignado a un usuario invisible en la TV (solo lista a un cajero activo) y
+   * en la fila (solo lista los sin asignar). F3.5 ("cubrir puesto"): el ADMIN puede tomar SI ocupa una
+   * ventanilla de la tienda del pedido: aparece en la TV como un cajero más, con latido y barrido de inactividad.
+   * Va en el servicio y no solo en el botón: una pantalla desfasada o un cliente de la API no pueden saltárselo.
+   */
+  private async exigirVentanillaSiEsAdmin(
+    usuario: UserContext,
+    tiendaId: number | undefined,
+  ): Promise<void> {
+    if (usuario.rol !== RolUsuario.ADMIN) return;
+    const mia = tiendaId
+      ? await this.ventanillasService.ventanillaDelCajero(usuario.userId, tiendaId)
+      : null;
+    if (!mia) {
+      throw new ForbiddenException(
+        'Elige una ventanilla de esta tienda para atender. El administrador puede cubrir un puesto, pero no tomar pedidos sin tenerlo.',
+      );
+    }
   }
 
   /**
@@ -198,7 +245,7 @@ export class CajeroService {
       // o por el camino de domicilio (que no pasa por caja).
       if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO) {
         throw new BadRequestException(
-          `Sólo se toman pedidos en PENDIENTE_PAGO (actual: ${pedido.estado})`,
+          `Solo se toman pedidos en PENDIENTE_PAGO (actual: ${pedido.estado})`,
         );
       }
       // Un pedido a domicilio no se cobra en ventanilla.
@@ -276,13 +323,18 @@ export class CajeroService {
       const pedido = await tx.pedido.findUnique({ where: { id: pedidoId } });
       if (!pedido) throw new NotFoundException('Pedido no encontrado');
 
+      // Oct 2026 (destrabar): el GERENTE libera el pedido de una ventanilla que quedó atorada, pero solo en SU tienda
+      // y solo por `DestrabarService` (con motivo y bitácora). Aquí no hay `cargarYValidar`, así que la tienda se
+      // comprueba a mano: el servicio es frontera de confianza propia.
+      const esGerenteDeLaTienda =
+        usuario.rol === RolUsuario.GERENTE && pedido.tiendaId === usuario.tiendaId;
       const esAdmin = usuario.rol === RolUsuario.ADMIN;
       const esAsignado =
         usuario.rol === RolUsuario.CAJERO && pedido.cajeroAsignadoId === usuario.userId;
 
-      if (!esAdmin && !esAsignado) {
+      if (!esAdmin && !esGerenteDeLaTienda && !esAsignado) {
         throw new BadRequestException(
-          'Sólo el cajero asignado al pedido (o un admin) puede liberarlo.',
+          'Solo el cajero asignado al pedido (o un admin) puede liberarlo.',
         );
       }
 
@@ -340,7 +392,7 @@ export class CajeroService {
         usuario.rol === RolUsuario.CAJERO && pedido.cajeroAsignadoId === usuario.userId;
       if (!esAdmin && !esAsignado) {
         throw new BadRequestException(
-          'Sólo el cajero asignado al pedido (o un admin) puede marcar que no se presentó.',
+          'Solo el cajero asignado al pedido (o un admin) puede marcar que no se presentó.',
         );
       }
       if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO || pedido.cajeroAsignadoId === null) {
@@ -427,7 +479,7 @@ export class CajeroService {
         usuario.rol === RolUsuario.CAJERO && pedido.cajeroAsignadoId === usuario.userId;
       if (!esAdmin && !esAsignado) {
         throw new ForbiddenException(
-          'Sólo el cajero asignado al pedido (o un admin) puede regresarlo a la cola.',
+          'Solo el cajero asignado al pedido (o un admin) puede regresarlo a la cola.',
         );
       }
       if (pedido.estado !== EstadoPedido.PENDIENTE_PAGO || pedido.cajeroAsignadoId === null) {
@@ -506,9 +558,14 @@ export class CajeroService {
     });
     // El servidor decide qué botones caben: "Regresar a la cola hasta que se valide" solo con una
     // transferencia sin validar (`esperarValidacion` lo vuelve a exigir).
+    const dtfPorPedido = await resumenDtfPorPedido(
+      this.prisma,
+      pedidos.map((p) => p.id),
+    );
     return pedidos.map((p) => ({
       ...conPagoParaCaja(p),
       puedeEsperarValidacion: esNoCobrar(p),
+      dtfResumen: dtfPorPedido.get(p.id) ?? null,
     }));
   }
 
@@ -529,16 +586,15 @@ export class CajeroService {
    * Realtime: emite `pedido.llamado` con el folio + número de ventanilla a
    * `tienda-{id}` para que el TV muestre la alerta bancaria.
    */
-  async llamarSiguiente(usuario: UserContext) {
-    if (!usuario.tiendaId) {
+  async llamarSiguiente(usuario: UserContext, tiendaId: number | undefined = usuario.tiendaId) {
+    // F3.5: la tienda llega resuelta (`@TiendaConsola()`): la del cajero, o la que el ADMIN opera. El ADMIN
+    // necesita una ventanilla EN ELLA (se comprueba abajo, igual que para un cajero).
+    if (!tiendaId) {
       throw new BadRequestException('Tu usuario no tiene tienda asignada');
     }
 
     // 1) Verificar que el cajero tiene ventanilla.
-    const ventanilla = await this.ventanillasService.ventanillaDelCajero(
-      usuario.userId,
-      usuario.tiendaId,
-    );
+    const ventanilla = await this.ventanillasService.ventanillaDelCajero(usuario.userId, tiendaId);
     if (!ventanilla) {
       throw new BadRequestException(
         'Debes elegir una ventanilla antes de llamar al siguiente turno',
@@ -560,7 +616,7 @@ export class CajeroService {
       // la cajera regresó "hasta que se valide" (`esperarValidacion`), o lo volvería a llamar al
       // instante, y otra vez.
       const candidatos = await this.prisma.pedido.findMany({
-        where: { ...whereFilaDeCaja(usuario.tiendaId), ...WHERE_LLAMABLE },
+        where: { ...whereFilaDeCaja(tiendaId), ...WHERE_LLAMABLE },
         select: SELECT_ORDEN_COLA_CAJA,
       });
       const [siguiente] = ordenarFilaDeCaja(candidatos);
@@ -582,15 +638,17 @@ export class CajeroService {
     }
 
     // 4) Realtime: alerta bancaria para el TV + sonido.
-    this.realtime.emitToTienda(usuario.tiendaId, 'pedido.cajero-asignado', {
+    this.realtime.emitToTienda(tiendaId, 'pedido.cajero-asignado', {
       id: pedido.id,
       numeroPedido: pedido.numeroPedido,
+      turno: turnoCorto(pedido.folioErp),
       cajeroAsignadoId: usuario.userId,
       cajeroAsignadoNombre: usuario.nombre,
     });
-    this.realtime.emitToTienda(usuario.tiendaId, 'pedido.llamado', {
+    this.realtime.emitToTienda(tiendaId, 'pedido.llamado', {
       id: pedido.id,
       numeroPedido: pedido.numeroPedido,
+      turno: turnoCorto(pedido.folioErp),
       ventanillaId: ventanilla.id,
       ventanillaNumero: ventanilla.numero,
       cajeroId: usuario.userId,
@@ -604,6 +662,9 @@ export class CajeroService {
     return {
       pedidoId: pedido.id,
       numeroPedido: pedido.numeroPedido,
+      // Con estas dos el servidor decora la respuesta con su `folio` (el toast de la cajera lo usa).
+      tiendaId: pedido.tiendaId,
+      folioErp: pedido.folioErp,
       ventanillaId: ventanilla.id,
       ventanillaNumero: ventanilla.numero,
     };

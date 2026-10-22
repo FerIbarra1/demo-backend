@@ -13,6 +13,7 @@ import {
 } from '../pedidos/core/presencia.util';
 import { estadoDeEspera, umbralesSinRecoger } from '../pedidos/core/sin-recoger.util';
 import { UserContext } from '../../types/pedido.types';
+import { resumenDtfPorPedido } from '../dtf/dtf-resumen';
 
 /**
  * F22: el pedido "como lo ve el mostrador" — con los minutos que el cliente lleva
@@ -68,7 +69,7 @@ function sinAcentos(t: string): string {
  *
  * Se extrajeron de `MostradorService`, que era tres servicios en uno: las
  * consultas, las transiciones de estado y la mutación de items tipo POS. Estas
- * cinco no mutan nada — sólo leen y paginan — así que no tienen por qué
+ * cinco no mutan nada — solo leen y paginan — así que no tienen por qué
  * convivir con las acciones ni con `PedidoStateService`.
  *
  * `obtenerPedido` delega en `PedidoStateService.obtenerDetalle` porque el
@@ -128,9 +129,9 @@ export class MostradorQueryService {
           items: true,
           tienda: true,
           usuario: { select: { nombre: true, telefono: true, email: true } },
-          // Oct 2026: sin `pendienteEnvio` el folio visible del frontend cae a
-          // "Pedido #id" (`lib/utils/folio.ts`) y la lista muestra un número
-          // que el cliente no reconoce. Es el folio de VFP, el del ticket.
+          // Oct 2026: sin `pendienteEnvio` el folio visible del frontend pierde el
+          // folio de la bandeja (`lib/utils/folio.ts`) y la lista cae al número
+          // `PD-…`, que el cliente no trae en el ticket. Es el folio de VFP.
           pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
         },
         orderBy,
@@ -143,9 +144,14 @@ export class MostradorQueryService {
     // Anotar `esperandoDesdeMin` para que la UI del mostrador pueda
     // mostrar "EN TIENDA · hace 2 min" sin recalcular en cliente.
     const ahora = Date.now();
+    const dtfPorPedido = await resumenDtfPorPedido(
+      this.prisma,
+      pedidos.map((p) => p.id),
+    );
     const data = pedidos.map((p) => ({
       ...p,
       esperandoDesdeMin: minutosEsperando(p, ahora),
+      dtfResumen: dtfPorPedido.get(p.id) ?? null,
     }));
 
     return {
@@ -188,8 +194,8 @@ export class MostradorQueryService {
    *    reciente primero (el cliente que acaba de llegar).
    *
    * El `include` de `pendienteEnvio` no es cosmético: sin él, `folioVisible()`
-   * del frontend cae a `"Pedido #id"` y el operador lee un número que el
-   * cliente no reconoce.
+   * del frontend cae al `PD-…` y el operador lee un número que no es el del
+   * ticket del cliente.
    */
   async buscarPedidos(q: string, usuario: UserContext, tiendaId?: number, pagina = 1, limite = 20) {
     // La tienda sale SOLO del JWT (`user.tiendaId`), nunca de un header. Antes el
@@ -197,22 +203,21 @@ export class MostradorQueryService {
     // quedaba SIN filtro y veía pedidos de todas las tiendas. Falla cerrado,
     // igual que `PedidoAccessService.validar`.
     const where: Prisma.PedidoWhereInput = {};
-    if (usuario.rol !== RolUsuario.ADMIN) {
-      if (!tiendaId) {
-        throw new ForbiddenException(
-          'Tu usuario no tiene tienda asignada. Contacta al administrador.',
-        );
-      }
-      where.tiendaId = tiendaId;
+    if (usuario.rol !== RolUsuario.ADMIN && !tiendaId) {
+      throw new ForbiddenException(
+        'Tu usuario no tiene tienda asignada. Contacta al administrador.',
+      );
     }
+    // Oct 2026 (PLAN-ADMIN-MULTITIENDA, D1): también para el ADMIN que ELIGIÓ una tienda. Antes se le
+    // ignoraba y su buscador, dentro de la consola de "Obregón", traía pedidos de todas las tiendas
+    // mezclados. Sin tienda (`undefined`) sigue siendo la búsqueda global: solo la pide el ADMIN
+    // directamente al servicio; el controller siempre resuelve una (`@TiendaConsola()`).
+    if (tiendaId) where.tiendaId = tiendaId;
 
     // F22: los IDs que coinciden se calculan en SQL (ver `idsQueCoinciden`) y
     // Prisma pagina y ordena sobre ellos. `where.tiendaId` se conserva ADEMÁS del
     // filtro del SQL: la tienda no puede depender de una sola de las dos capas.
-    const ids = await this.idsQueCoinciden(
-      q,
-      usuario.rol === RolUsuario.ADMIN ? undefined : tiendaId,
-    );
+    const ids = await this.idsQueCoinciden(q, tiendaId);
     if (ids.length === 0) {
       return { data: [], meta: { total: 0, pagina, limite, totalPaginas: 0 } };
     }
@@ -227,7 +232,7 @@ export class MostradorQueryService {
           tienda: true,
           usuario: { select: { nombre: true, telefono: true, email: true } },
           // El folio que el cliente trae en el ticket. Sin esto la UI muestra
-          // "Pedido #id" y el operador no puede confirmar con el cliente.
+          // el `PD-…` y el operador no puede confirmar con el cliente.
           pendienteEnvio: { select: { externalFolio: true, externalIdPEDIDOS: true } },
           ...INCLUDE_ATENCION,
         },
@@ -247,7 +252,15 @@ export class MostradorQueryService {
     // `undefined`, así que un pedido con aviso vigente se veía igual que uno
     // sin aviso — justo la distinción que el operador necesita.
     const ahora = Date.now();
-    const data = pedidos.map((p) => conAtencion(p, ahora));
+    // El DTF no es un item: sin esto la tarjeta no diría que el pedido incluye impresión ni cuánto falta.
+    const dtfPorPedido = await resumenDtfPorPedido(
+      this.prisma,
+      pedidos.map((p) => p.id),
+    );
+    const data = pedidos.map((p) => ({
+      ...conAtencion(p, ahora),
+      dtfResumen: dtfPorPedido.get(p.id) ?? null,
+    }));
 
     return {
       data,
@@ -296,11 +309,20 @@ export class MostradorQueryService {
         digitos.length >= 3
           ? Prisma.sql`OR regexp_replace(coalesce(p.cliente_telefono, ''), '\\D', '', 'g') LIKE ${`%${digitos}%`}`
           : Prisma.empty;
+      // Oct 2026 (B2): el folio del Sistema Comercial (`HMO-0000152573`, `0000152573`, `152573`) y también sus últimos
+      // dígitos —el "turno" que el cliente lee en la TV de pared y dicta en voz alta— se buscan sobre los DÍGITOS: el
+      // prefijo de la serie es solo visual y no está en la BD. `interpretarFolio` solo reconoce las formas válidas; los
+      // demás casos (un fragmento de 3 dígitos) caen en el LIKE.
+      const folio =
+        digitos.length >= 3
+          ? Prisma.sql`OR coalesce(p.folio_erp, '') LIKE ${`%${digitos}%`}`
+          : Prisma.empty;
       return Prisma.sql`(
         lower(translate(p.cliente_nombre, 'áéíóúüñÁÉÍÓÚÜÑ', 'aeiouunAEIOUUN')) LIKE ${like}
         OR lower(p.numero_pedido) LIKE ${like}
         OR lower(p.cliente_email) LIKE ${like}
         OR lower(coalesce(pe.external_folio, '')) LIKE ${like}
+        ${folio}
         ${telefono}
       )`;
     });
@@ -392,7 +414,15 @@ export class MostradorQueryService {
     // Anotar `esperandoDesdeMin` para que la UI muestre "EN TIENDA · hace X min"
     // sin recalcular en cliente (mismo shape que `obtenerPedidosListos`).
     const ahora = Date.now();
-    const data = pedidos.map((p) => conAtencion(p, ahora));
+    // El DTF no es un item: sin esto la tarjeta no diría que el pedido incluye impresión ni cuánto falta.
+    const dtfPorPedido = await resumenDtfPorPedido(
+      this.prisma,
+      pedidos.map((p) => p.id),
+    );
+    const data = pedidos.map((p) => ({
+      ...conAtencion(p, ahora),
+      dtfResumen: dtfPorPedido.get(p.id) ?? null,
+    }));
 
     return {
       data,
@@ -476,10 +506,17 @@ export class MostradorQueryService {
     ]);
 
     const ahora = Date.now();
+    // El DTF no es un item: sin esto la tarjeta de un pedido solo-DTF decía "0 producto(s)" y mostrador no
+    // sabía que la bolsa apartada incluía una impresión (ni si ya estaba lista).
+    const dtfPorPedido = await resumenDtfPorPedido(
+      this.prisma,
+      pedidos.map((p) => p.id),
+    );
     const data = pedidos.map((p) => {
       const espera = estadoDeEspera(p.esperaClienteDesdeAt, umbrales, ahora);
       return {
         ...p,
+        dtfResumen: dtfPorPedido.get(p.id) ?? null,
         // Mismo nombre que en el monitor, para que la consola y la TV hablen
         // igual de "cuánto lleva esperando este pedido".
         minutosEsperando: Math.max(0, Math.floor((ahora - p.fechaPedido.getTime()) / 60_000)),

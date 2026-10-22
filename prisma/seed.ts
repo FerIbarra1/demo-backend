@@ -1,3 +1,4 @@
+import { seedDtf } from './seed-dtf';
 import { PrismaClient, RolUsuario } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 
@@ -390,6 +391,26 @@ async function main() {
     apellido: 'Tesorería',
     rol: RolUsuario.TESORERIA,
   });
+
+  // Oct 2026: gerentes de UNA tienda (supervisan: torre, salud y búsqueda de SU tienda). Uno por tienda para
+  // poder probar que el de Mexicali no ve nada de Monterrey.
+  await upsertUsuario('gerente.mexicali@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Gerente',
+    apellido: 'Mexicali',
+    rol: RolUsuario.GERENTE,
+    tiendaId: tiendaMexicali.id,
+  });
+  await upsertUsuario('gerente.mty@puntotextil.com', {
+    password: passwordHash,
+    nombre: 'Gerente',
+    apellido: 'Monterrey',
+    rol: RolUsuario.GERENTE,
+    tiendaId: tiendaMonterrey.id,
+  });
+
+  // Oct 2026 (impresión DTF): tipos, tiendas que imprimen y usuarios de Impresión (ver prisma/seed-dtf.ts).
+  await seedDtf(prisma);
 
   // Cuenta bancaria GLOBAL de demostración, para poder probar las transferencias en desarrollo.
   // La CLABE es inventada pero con dígito verificador válido. En producción la da de alta ADMIN
@@ -821,6 +842,8 @@ async function main() {
   console.log('  cajero@puntotextil.com              (Mexicali)');
   console.log('  ventas@puntotextil.com              (Mexicali, rol VENTAS)');
   console.log('  mostrador@puntotextil.com           (Mexicali)');
+  console.log('  gerente.mexicali@puntotextil.com    (Mexicali, rol GERENTE)');
+  console.log('  gerente.mty@puntotextil.com         (Monterrey, rol GERENTE)');
   console.log('  monitor.mexicali@puntotextil.com    (TV monitor Mexicali, rol BODEGA_MONITOR)');
   console.log('  monitor.mty@puntotextil.com         (TV monitor Monterrey, rol BODEGA_MONITOR)');
   console.log('');

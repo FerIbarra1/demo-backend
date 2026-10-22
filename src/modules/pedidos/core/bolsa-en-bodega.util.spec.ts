@@ -30,9 +30,9 @@ describe('bolsaEnManosDeBodega', () => {
 
   it('EN_REVISION con bodeguero: lo está surtiendo ahora mismo', async () => {
     const { prisma, findFirst } = prismaCon(true);
-    await expect(
-      bolsaEnManosDeBodega(prisma, pedido(EstadoPedido.EN_REVISION, 42)),
-    ).resolves.toBe(true);
+    await expect(bolsaEnManosDeBodega(prisma, pedido(EstadoPedido.EN_REVISION, 42))).resolves.toBe(
+      true,
+    );
     // Aunque el pedido haya cerrado un surtido antes (ajuste en curso), el
     // bodeguero lo tiene en las manos: no hace falta mirar el historial.
     expect(findFirst).not.toHaveBeenCalled();
@@ -40,7 +40,9 @@ describe('bolsaEnManosDeBodega', () => {
 
   it('EN_REVISION sin bodeguero y NUNCA surtido: no hay bolsa en ningún lado', async () => {
     const { prisma } = prismaCon(false);
-    await expect(bolsaEnManosDeBodega(prisma, pedido(EstadoPedido.EN_REVISION))).resolves.toBe(true);
+    await expect(bolsaEnManosDeBodega(prisma, pedido(EstadoPedido.EN_REVISION))).resolves.toBe(
+      true,
+    );
   });
 
   it('EN_REVISION sin bodeguero que VOLVIÓ del área de entrega: su bolsa sigue en la mesa', async () => {

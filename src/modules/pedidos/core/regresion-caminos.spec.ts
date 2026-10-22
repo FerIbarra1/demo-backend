@@ -142,6 +142,7 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
           // Con nada que escribir, la máquina verifica el guard de estado con un conteo.
           count: jest.fn(async () => 1),
         },
+        pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
         historialPedido: {
           create: jest.fn(async (args: any) => {
             historial.push({ observacion: args.data.observacion });
@@ -149,6 +150,8 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
           }),
           count: jest.fn(async () => 0),
         },
+        // Oct 2026 (parte B): al salir del surtido la máquina deja la solicitud del folio del ERP.
+        pedidoFolioSolicitud: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
         pedidoPendienteEnvio: { findFirst: jest.fn(async () => null), create: jest.fn() },
       };
 
@@ -243,12 +246,15 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
             return { count: 1 };
           }),
         },
+        pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
         historialPedido: {
           create: jest.fn().mockResolvedValue({}),
           // F22: el correo "listo en tienda" es del PRIMER paso a REVISADO; la máquina
           // cuenta cuántas veces ya estuvo ahí.
           count: jest.fn().mockResolvedValue(0),
         },
+        // Oct 2026 (parte B): al salir del surtido la máquina deja la solicitud del folio del ERP.
+        pedidoFolioSolicitud: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
         pedidoPendienteEnvio: { findFirst: jest.fn(), create: jest.fn() },
       };
 
@@ -298,10 +304,13 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
           }),
           count: jest.fn(async () => 1),
         },
+        pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
         historialPedido: {
           create: jest.fn().mockResolvedValue({}),
           count: jest.fn().mockResolvedValue(0),
         },
+        // Oct 2026 (parte B): al salir del surtido la máquina deja la solicitud del folio del ERP.
+        pedidoFolioSolicitud: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
         pedidoPendienteEnvio: { findFirst: jest.fn(), create: jest.fn() },
       };
 
@@ -345,7 +354,10 @@ describe('Regresión: los tres caminos que cierran bodega (F16)', () => {
           updateMany: jest.fn(),
           count: jest.fn(async () => 0),
         },
+        pedidoDtf: { count: async () => 0, findMany: async () => [] }, // sin trabajos DTF (impresión DTF, oct 2026)
         historialPedido: { create: jest.fn(), count: jest.fn().mockResolvedValue(0) },
+        // Oct 2026 (parte B): al salir del surtido la máquina deja la solicitud del folio del ERP.
+        pedidoFolioSolicitud: { createMany: jest.fn().mockResolvedValue({ count: 1 }) },
         pedidoPendienteEnvio: { findFirst: jest.fn(), create: jest.fn() },
       };
       const svc = new PedidoStateService(

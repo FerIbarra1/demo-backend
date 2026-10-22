@@ -23,6 +23,13 @@ export class MonitorMostradorPedidoDto {
   @ApiProperty() numeroPedido: string;
   @ApiProperty({
     nullable: true,
+    type: String,
+    description:
+      'Los últimos dígitos del folio del Sistema Comercial ("2573"): lo que la TV pinta y el cliente lee en voz alta. La TV es pública y de espacio chico, por eso NO lleva el folio completo. null = el pedido aún no tiene folio (la TV muestra el número de siempre).',
+  })
+  turno: string | null;
+  @ApiProperty({
+    nullable: true,
     type: Number,
     description:
       'Número del mostrador al que pasa el cliente. Solo en los ya llamados; null en la cola.',

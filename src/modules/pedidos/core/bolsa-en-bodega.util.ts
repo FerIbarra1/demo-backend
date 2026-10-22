@@ -53,11 +53,7 @@ export async function bolsaEnManosDeBodega(
       pedidoId: pedido.id,
       estadoAnterior: EstadoPedido.EN_REVISION,
       estadoNuevo: {
-        in: [
-          EstadoPedido.REVISADO,
-          EstadoPedido.ESPERANDO_APROBACION,
-          EstadoPedido.PENDIENTE_PAGO,
-        ],
+        in: [EstadoPedido.REVISADO, EstadoPedido.ESPERANDO_APROBACION, EstadoPedido.PENDIENTE_PAGO],
       },
     },
     select: { id: true },

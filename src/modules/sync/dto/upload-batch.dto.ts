@@ -75,7 +75,7 @@ export class UploadBatchDto {
   @ApiProperty({
     example: 93847,
     description:
-      'Último BANDEJA_SYNC.ID incluido en este batch. El servidor avanza el checkpoint a este ID sólo tras procesar exitosamente.',
+      'Último BANDEJA_SYNC.ID incluido en este batch. El servidor avanza el checkpoint a este ID solo tras procesar exitosamente.',
   })
   @IsInt()
   @Min(0)

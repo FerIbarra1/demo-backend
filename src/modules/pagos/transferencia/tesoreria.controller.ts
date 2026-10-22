@@ -26,6 +26,7 @@ import {
   RegistrarReembolsoDto,
   ReenviarInstruccionesDto,
   ResolverRevisionDto,
+  VencerPagoDto,
 } from './dto/pago.dto';
 
 /**
@@ -71,16 +72,6 @@ export class TesoreriaController {
       'Content-Disposition': `attachment; filename="${nombre}"`,
     });
     return new StreamableFile(Buffer.from(csv, 'utf8'));
-  }
-
-  @Post('cerrar-vencidas')
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  @ApiOperation({
-    summary:
-      'Cierra por vencimiento todas las instrucciones vencidas SIN comprobante (manual; nada las vence solo)',
-  })
-  cerrarVencidas(@CurrentUser() user: any, @Req() req: any) {
-    return this.service.cerrarVencidas(user, req.ip);
   }
 
   @Get('comprobantes/:comprobanteId/archivo')
@@ -157,14 +148,15 @@ export class TesoreriaController {
   @Post(':id/vencer')
   @ApiOperation({
     summary:
-      'Cierra por vencimiento unas instrucciones vencidas sin comprobante. Un abono posterior se verifica igual.',
+      'Marca vencidas unas instrucciones sin comprobante (manual, sin plazo; con motivo). Un abono posterior se verifica igual.',
   })
   vencer(
     @Param('id', ParseIntPipe) id: number,
+    @Body() dto: VencerPagoDto,
     @CurrentUser() user: any,
     @Req() req: any,
   ) {
-    return this.service.vencer(id, user, req.ip);
+    return this.service.vencer(id, dto.motivo, user, req.ip);
   }
 
   @Post(':id/rechazar')

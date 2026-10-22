@@ -10,8 +10,6 @@ const base = {
   },
   referencia: '4821907',
   concepto: 'PD2026000123',
-  venceAt: new Date('2026-10-20T20:00:00.000Z'),
-  zonaHoraria: 'America/Mexico_City',
 };
 
 describe('construirInstrucciones', () => {

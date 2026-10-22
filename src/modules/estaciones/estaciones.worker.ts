@@ -1,4 +1,5 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
+import { ActividadWorkers } from '../../common/actividad-workers';
 import { VentanillasService } from '../ventanillas/ventanillas.service';
 import { MostradoresService } from '../mostradores/mostradores.service';
 import { BodegaPresenciaService } from './bodega-presencia.service';
@@ -26,9 +27,12 @@ export class EstacionesWorker implements OnModuleInit, OnModuleDestroy {
     private readonly ventanillas: VentanillasService,
     private readonly mostradores: MostradoresService,
     private readonly bodegueros: BodegaPresenciaService,
+    // N3: la pantalla de salud ve cuándo corrió por última vez. Opcional: sin él funciona igual.
+    @Optional() private readonly actividad?: ActividadWorkers,
   ) {}
 
   onModuleInit() {
+    this.actividad?.declarar('estaciones', EstacionesWorker.TICK_MS);
     this.timer = setInterval(() => void this.barrer(), EstacionesWorker.TICK_MS);
     this.timer.unref?.();
   }
@@ -47,8 +51,10 @@ export class EstacionesWorker implements OnModuleInit, OnModuleDestroy {
           `Sin actividad: ${v} ventanilla(s) y ${m} mostrador(es) liberados, ${b} bodeguero(s) fuera`,
         );
       }
+      this.actividad?.corrio('estaciones');
     } catch (err) {
       this.logger.error(`Barrido de estaciones falló: ${(err as Error).message}`);
+      this.actividad?.fallo('estaciones', (err as Error).message);
     }
   }
 }

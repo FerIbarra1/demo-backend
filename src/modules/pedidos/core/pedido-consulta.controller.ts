@@ -1,8 +1,13 @@
-import { Controller, Get, Param, ParseIntPipe, Query } from '@nestjs/common';
+import { Controller, Get, Param, ParseIntPipe, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { RolUsuario } from '@prisma/client';
 import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
+import {
+  ApiTiendaConsola,
+  TiendaConsola,
+  TiendaConsolaGuard,
+} from '../../../common/tienda-consola';
 import { MostradorQueryService } from '../../mostrador/mostrador-query.service';
 import { PedidoStateService } from './pedido-state.service';
 import { responsableDe, puedeOperar, mensajeNoEsTuyo } from './escaneo.util';
@@ -24,20 +29,24 @@ import { BuscarPedidoDto } from '../../mostrador/dto/buscar-pedido.dto';
  * por folio interno, folio de VFP, nombre y correo. Solo se le quita el candado
  * de rol que la encerraba en mostrador.
  *
- * **La regla de tienda es la misma y no se toca:** sale SOLO del JWT
- * (`user.tiendaId`), nunca de un header. Un empleado no puede ver pedidos de
- * otra tienda (ver `PedidoAccessService.validar`).
+ * **La regla de tienda es la misma y no se toca:** la de un empleado sale SOLO
+ * del JWT, nunca de un header ni de `?tiendaId=`. Un empleado no puede ver
+ * pedidos de otra tienda (ver `PedidoAccessService.validar`). El ADMIN, que no
+ * trae tienda en el token, elige la suya con `?tiendaId=` (`@TiendaConsola()`).
  *
  * El detalle delega en `PedidoStateService.obtenerDetalle`, que ya valida
  * tienda y ya devuelve items, historial, propuestas y `pendienteEnvio`.
  */
 @ApiTags('Pedidos - Consulta')
+@UseGuards(TiendaConsolaGuard)
 @Controller('pedidos/consulta')
 @Roles(
   RolUsuario.BODEGA,
   RolUsuario.CAJERO,
   RolUsuario.MOSTRADOR,
   RolUsuario.VENTAS,
+  // Oct 2026: el gerente busca y abre pedidos de SU tienda (la tienda sale del token, como en el resto).
+  RolUsuario.GERENTE,
   RolUsuario.ADMIN,
 )
 @ApiBearerAuth()
@@ -54,7 +63,12 @@ export class PedidoConsultaController {
       'interno, folio de VFP, nombre o correo. Paginado.',
   })
   @ApiQuery({ name: 'q', required: true, type: String, description: 'Mínimo 2 caracteres.' })
-  async buscar(@Query() query: BuscarPedidoDto, @CurrentUser() user: any) {
+  @ApiTiendaConsola()
+  async buscar(
+    @Query() query: BuscarPedidoDto,
+    @CurrentUser() user: any,
+    @TiendaConsola() tienda: number,
+  ) {
     // Menos de 2 caracteres devuelve vacío en vez de la tienda entera: el
     // buscador del frontend dispara por debounce y no queremos un listado
     // completo en cada tecla.
@@ -67,7 +81,7 @@ export class PedidoConsultaController {
     return this.mostradorQuery.buscarPedidos(
       query.q.trim(),
       user,
-      user.tiendaId,
+      tienda,
       query.pagina ?? 1,
       query.limite ?? 20,
     );

@@ -27,7 +27,7 @@ export class MessagesController {
   @Get()
   @ApiOperation({
     summary:
-      'Listar mensajes del pedido. Cliente sólo ve visibleParaCliente=true. VENTAS/CAJERO/ADMIN ven todos.',
+      'Listar mensajes del pedido. Cliente solo ve visibleParaCliente=true. VENTAS/CAJERO/ADMIN ven todos.',
   })
   async listar(@Param('pedidoId', ParseIntPipe) pedidoId: number, @CurrentUser() user: any) {
     return this.service.listar(pedidoId, user);
@@ -67,7 +67,7 @@ export class MessagesController {
    *
    * El cliente lo llama al abrir el detalle del pedido con foco, y el lado tienda
    * (VENTAS/ADMIN/CAJERO) cuando un operador abre el detalle. Es idempotente:
-   * nunca decrementa el watermark (sólo lo avanza si el nuevo id es mayor).
+   * nunca decrementa el watermark (solo lo avanza si el nuevo id es mayor).
    *
    * El backend emite `mensaje.leido` a `pedido-{id}` y a `user-{clienteId}`
    * para que el otro lado vea los ticks ✓✓ actualizarse en tiempo real.
@@ -76,7 +76,7 @@ export class MessagesController {
   @ApiOperation({
     summary:
       'Avanzar la marca de agua de lectura del chat del lado del caller. ' +
-      'Idempotente: nunca decrementa, sólo avanza si el nuevo id es mayor.',
+      'Idempotente: nunca decrementa, solo avanza si el nuevo id es mayor.',
   })
   async marcarLeido(
     @Param('pedidoId', ParseIntPipe) pedidoId: number,

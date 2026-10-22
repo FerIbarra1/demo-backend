@@ -6,6 +6,11 @@ import { Roles } from '../../../common/decorators/roles.decorator';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import { RolUsuario } from '@prisma/client';
 import { EstacionGuard, RequiereEstacion } from '../../../common/guards/estacion.guard';
+import {
+  ApiTiendaConsola,
+  TiendaConsola,
+  TiendaConsolaGuard,
+} from '../../../common/tienda-consola';
 
 /**
  * Consola del Cajero (jun 2026):
@@ -19,7 +24,7 @@ import { EstacionGuard, RequiereEstacion } from '../../../common/guards/estacion
  * `POST /admin/pedidos/:id/marcar-pagado`. Este controller NO aprueba pagos.
  */
 @ApiTags('Pedidos - Cajero')
-@UseGuards(EstacionGuard)
+@UseGuards(EstacionGuard, TiendaConsolaGuard)
 @Controller('cajero/pedidos')
 @Roles(RolUsuario.CAJERO, RolUsuario.ADMIN)
 @ApiBearerAuth()
@@ -36,7 +41,7 @@ export class CajeroController {
       'F16: incluye KIOSKO y WEB por defecto — los pedidos web también se ' +
       'cobran aquí. Pasar canal=KIOSKO para ver solo los de la tienda.',
   })
-  @ApiQuery({ name: 'tiendaId', required: false, type: Number })
+  @ApiTiendaConsola()
   @ApiQuery({ name: 'pagina', required: false, type: Number })
   @ApiQuery({ name: 'limite', required: false, type: Number })
   @ApiQuery({
@@ -53,18 +58,14 @@ export class CajeroController {
     description: 'Filtro por canal. Default: TODOS.',
   })
   async obtenerColaVentanilla(
-    @CurrentUser() user: any,
-    @Query('tiendaId') tiendaId?: string,
+    @TiendaConsola() tienda: number,
     @Query('pagina') pagina?: string,
     @Query('limite') limite?: string,
     @Query('canal') canal?: string,
     @Query('pago') pago?: string,
   ) {
-    const tiendaSolicitada = tiendaId ? parseInt(tiendaId, 10) : undefined;
-    const tiendaEfectiva =
-      user.rol === RolUsuario.ADMIN ? (tiendaSolicitada ?? user.tiendaId) : user.tiendaId;
     return this.cajeroService.obtenerColaVentanilla(
-      tiendaEfectiva,
+      tienda,
       pagina ? parseInt(pagina, 10) : 1,
       limite ? parseInt(limite, 10) : 20,
       // F16: default 'TODOS' (antes 'KIOSKO', que escondía los pedidos web).
@@ -77,12 +78,13 @@ export class CajeroController {
   @ApiOperation({
     summary: 'Pedidos en PENDIENTE_PAGO asignados al cajero autenticado',
   })
-  async misPedidos(@CurrentUser() user: any) {
-    return this.cajeroService.obtenerMisPedidosCajero(user.userId, user.tiendaId);
+  @ApiTiendaConsola()
+  async misPedidos(@CurrentUser() user: any, @TiendaConsola() tienda: number) {
+    return this.cajeroService.obtenerMisPedidosCajero(user.userId, tienda);
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Detalle de pedido (sólo validación de tienda)' })
+  @ApiOperation({ summary: 'Detalle de pedido (solo validación de tienda)' })
   async obtenerPedido(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: any) {
     return this.pedidoState.obtenerDetalle(id, user);
   }
@@ -143,7 +145,8 @@ export class CajeroController {
       'F11: llamar al siguiente turno de la cola. Asigna el pedido más antiguo ' +
       'sin asignar a la ventanilla del cajero logueado.',
   })
-  async llamarSiguiente(@CurrentUser() user: any) {
-    return this.cajeroService.llamarSiguiente(user);
+  @ApiTiendaConsola()
+  async llamarSiguiente(@CurrentUser() user: any, @TiendaConsola() tienda: number) {
+    return this.cajeroService.llamarSiguiente(user, tienda);
   }
 }

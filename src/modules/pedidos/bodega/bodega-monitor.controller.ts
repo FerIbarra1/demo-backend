@@ -32,7 +32,7 @@ export class BodegaMonitorController {
   }
 
   /**
-   * Sólo el equipo de bodega de la tienda del usuario.
+   * Solo el equipo de bodega de la tienda del usuario.
    * Útil para poblar un dropdown de re-asignación sin pedir el snapshot completo.
    */
   @Get('equipo')

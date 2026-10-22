@@ -18,9 +18,9 @@ export type SaludKiosko =
   | 'CAIDA'
   /** El admin la apagó a propósito. No requiere acción. */
   | 'APAGADO_ADMIN'
-  /** Dada de alta pero la tablet nunca se ha conectado. */
+  /** Dada de alta pero todavía sin tablet: nunca se ha vinculado ni ha latido. */
   | 'PENDIENTE_INSTALAR'
-  /** Activa pero sin credencial: la tablet necesita re-vincularse. */
+  /** Tuvo tablet y la desvincularon (o perdió su credencial): hay que vincular otra. */
   | 'SIN_CREDENCIAL';
 
 /** Un latido más viejo que esto se considera caída. */
@@ -41,20 +41,14 @@ interface KioskoParaSalud {
  * sea determinista y testeable (nada de `Date.now()` interno).
  */
 export function calcularSaludKiosko(kiosko: KioskoParaSalud, ahora: number): SaludKiosko {
-  // El admin lo apagó: es una decisión, no una falla. Se revisa PRIMERO porque
-  // un kiosko apagado no debe reportarse como caído aunque no lata.
-  if (kiosko.estado !== 'ACTIVO') {
-    // `desactivadoAt` es el criterio correcto para "el admin lo apagó": un
-    // kiosko puede estar INACTIVO sin haberse instalado nunca (alta recién
-    // creada) o haberse apagado después de operar. `primerConexionAt` no
-    // sirve para distinguirlo — un kiosko que operó y se apagó puede tenerlo
-    // en null si su primer latido nunca se registró.
-    return kiosko.desactivadoAt ? 'APAGADO_ADMIN' : 'PENDIENTE_INSTALAR';
-  }
+  // INACTIVO es SOLO el interruptor del admin o gerente: una decisión, no una falla. Se revisa PRIMERO porque un
+  // kiosko apagado no debe reportarse como caído aunque no lata.
+  if (kiosko.estado !== 'ACTIVO') return 'APAGADO_ADMIN';
 
-  // Activo pero sin credencial: la tablet no puede operar hasta re-vincularse.
+  // Sin credencial: nunca tuvo tablet (recién dado de alta) o se la quitaron. Se distingue por `primerConexionAt`,
+  // que fija el emparejamiento la primera vez que una tablet se vincula.
   if (!kiosko.deviceTokenHash) {
-    return 'SIN_CREDENCIAL';
+    return kiosko.primerConexionAt ? 'SIN_CREDENCIAL' : 'PENDIENTE_INSTALAR';
   }
 
   if (!kiosko.ultimoHeartbeat) {

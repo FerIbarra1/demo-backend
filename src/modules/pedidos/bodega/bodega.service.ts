@@ -159,10 +159,7 @@ export class BodegaService {
       // monitor de mostrador; aquí se replica.
       esperandoDesdeMin:
         p.llegadaAnunciadaAt && !p.llegadaDescartadaAt
-          ? Math.max(
-              0,
-              Math.floor((ahora.getTime() - p.llegadaAnunciadaAt.getTime()) / 60_000),
-            )
+          ? Math.max(0, Math.floor((ahora.getTime() - p.llegadaAnunciadaAt.getTime()) / 60_000))
           : null,
     }));
     return {
@@ -183,6 +180,10 @@ export class BodegaService {
         select: {
           id: true,
           numeroPedido: true,
+          // Oct 2026 (B2): un pedido que vuelve a bodega con un ajuste YA tiene su folio del Sistema Comercial (el del
+          // ticket que trae la bolsa): `folioErp` + `tiendaId` es lo que el servidor necesita para decorarlo con `folio`.
+          tiendaId: true,
+          folioErp: true,
           estado: true,
           canalOrigen: true,
           clienteNombre: true,
@@ -325,12 +326,14 @@ export class BodegaService {
   async liberarPedido(pedidoId: number, usuario: UserContext) {
     const pedido = await this.access.cargarYValidar(pedidoId, usuario);
 
-    const esAdmin = usuario.rol === RolUsuario.ADMIN;
+    // Oct 2026 (destrabar): el GERENTE también libera, pero SOLO por `DestrabarService` (que deja el motivo en la
+    // bitácora): ninguna ruta de bodega lo nombra en su `@Roles`. `cargarYValidar` ya lo acotó a su tienda.
+    const esSupervisor = usuario.rol === RolUsuario.ADMIN || usuario.rol === RolUsuario.GERENTE;
     const esAsignado = usuario.rol === RolUsuario.BODEGA && pedido.asignadoAId === usuario.userId;
 
-    if (!esAdmin && !esAsignado) {
+    if (!esSupervisor && !esAsignado) {
       throw new BadRequestException(
-        'Sólo el bodeguero asignado al pedido (o un admin) puede liberarlo.',
+        'Solo el bodeguero asignado al pedido (o un admin) puede liberarlo.',
       );
     }
 
@@ -340,7 +343,7 @@ export class BodegaService {
     // bodeguero asignado" de un pedido en ese estado — era código inalcanzable.
     if (pedido.estado !== EstadoPedido.EN_REVISION) {
       throw new BadRequestException(
-        `Sólo se puede liberar un pedido en EN_REVISION (actual: ${pedido.estado})`,
+        `Solo se puede liberar un pedido en EN_REVISION (actual: ${pedido.estado})`,
       );
     }
 
@@ -417,7 +420,7 @@ export class BodegaService {
     }
     if (!pedidoCompleto.shippingDireccion) {
       throw new BadRequestException(
-        'Sólo los pedidos a domicilio pasan por "Enviado". Para pedidos de kiosko o web recoger en tienda, entrégalo desde el módulo Mostrador.',
+        'Solo los pedidos a domicilio pasan por "Enviado". Para pedidos de kiosko o web recoger en tienda, entrégalo desde el módulo Mostrador.',
       );
     }
     return this.state.cambiarEstado(
@@ -656,6 +659,8 @@ export class BodegaService {
       select: {
         id: true,
         numeroPedido: true,
+        tiendaId: true,
+        folioErp: true,
         clienteNombre: true,
         canalOrigen: true,
         fechaPedido: true,
@@ -687,6 +692,8 @@ export class BodegaService {
       .map((p) => ({
         id: p.id,
         numeroPedido: p.numeroPedido,
+        tiendaId: p.tiendaId,
+        folioErp: p.folioErp,
         clienteNombre: p.clienteNombre,
         canalOrigen: p.canalOrigen,
         fechaPedido: p.fechaPedido.toISOString(),
@@ -1012,7 +1019,11 @@ export class BodegaService {
    * `tomarPedido`: SOLICITADO → EN_REVISION + asignación, o EN_REVISION
    * libre → asignación.
    */
-  async tomarGrupo(ids: number[], usuario: UserContext) {
+  async tomarGrupo(
+    ids: number[],
+    usuario: UserContext,
+    tiendaId: number | undefined = usuario.tiendaId,
+  ) {
     if (ids.length === 0) {
       throw new BadRequestException('Debes indicar al menos un pedido.');
     }
@@ -1022,7 +1033,9 @@ export class BodegaService {
     const pedidos = await this.prisma.pedido.findMany({
       where: {
         id: { in: idsUnicos },
-        tiendaId: usuario.tiendaId,
+        // F3.5: la tienda llega resuelta (`@TiendaConsola()`): sin ella, un ADMIN (sin tienda en su cuenta) tomaba
+        // grupos de CUALQUIER tienda porque `tiendaId: undefined` no filtra.
+        tiendaId,
         // F16 (sep 2026): solo se toman pedidos que están EN la cola de bodega.
         //
         // Antes esta query no filtraba por estado y el `updateMany` de abajo
