@@ -22,11 +22,6 @@ import { adjuntarBorradoresAPedido } from '../../dtf/dtf-pedido.service';
 import { dtfDelPedido } from '../../dtf/dtf-vista';
 import { contarMensajesNoLeidos } from '../core/mensajes-no-leidos.util';
 import { PreciosService } from '../../precios/precios.service';
-import {
-  precioDeLista,
-  precioConPromoVolumen,
-  COLUMNA_MAYOREO,
-} from '../../precios/precio-lista.util';
 import { KioskoService } from '../../kiosko/kiosko.service';
 import { KioskoLlegadaService } from '../../kiosko/kiosko-llegada.service';
 import { PresenciaService } from '../core/presencia.service';
@@ -145,7 +140,9 @@ export class ClienteService {
         where: { id: kioskoIdHeader, tiendaId, estado: 'ACTIVO' },
       });
       if (!kiosko) {
-        throw new BadRequestException('Este kiosko no está activo en esta tienda. Pide ayuda al personal.');
+        throw new BadRequestException(
+          'Este kiosko no está activo en esta tienda. Pide ayuda al personal.',
+        );
       }
       // Validar device token (timing-safe en el service).
       const tokenValido = await this.kioskoService.validarDeviceToken(

@@ -297,10 +297,14 @@ describe('Emitir instrucciones', () => {
     const { pagos } = servicios();
     const p = await crearPedido({ modo: ModoEntrega.DOMICILIO });
     await pagos.emitirInstrucciones(p.id, cliente());
-    await expect(pagos.cambiarATienda(p.id, cajero())).rejects.toThrow(/solo se paga por transferencia/i);
+    await expect(pagos.cambiarATienda(p.id, cajero())).rejects.toThrow(
+      /solo se paga por transferencia/i,
+    );
     // El pago sigue vivo.
     expect(
-      await prisma.pedidoPagoTransferencia.count({ where: { pedidoId: p.id, estado: 'PENDIENTE' } }),
+      await prisma.pedidoPagoTransferencia.count({
+        where: { pedidoId: p.id, estado: 'PENDIENTE' },
+      }),
     ).toBe(1);
   });
 
@@ -1129,7 +1133,9 @@ describe('Transferencia elegida al pedir: se emite sola al pasar a pago', () => 
     await conMetodo(domicilio.id, 'TRANSFERENCIA');
     expect(await emitir(domicilio.id)).not.toBeNull();
     expect(
-      await prisma.pedidoPagoTransferencia.count({ where: { pedidoId: domicilio.id, estado: 'PENDIENTE' } }),
+      await prisma.pedidoPagoTransferencia.count({
+        where: { pedidoId: domicilio.id, estado: 'PENDIENTE' },
+      }),
     ).toBe(1);
   });
 });

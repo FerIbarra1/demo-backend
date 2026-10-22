@@ -39,7 +39,7 @@ export interface Umbral {
  *  - Donde el cliente está de pie (mostrador, caja) la paciencia es corta: 10 / 20.
  *  - Bodega es trabajo físico: 15 / 30 sin tomar y el doble ya en manos de alguien.
  *  - Lo que depende de una persona que revisa a su ritmo (transferencias, DTF) se mide en horas.
- *  - `sinRegistrar` NO está aquí: su umbral sale de `PAGOS_ALERTA_SIN_REGISTRAR_HORAS` (el mismo de Tesorería).
+ *  - `sinRegistrar` NO está aquí: su umbral sale de `pagos.alertaSinRegistrarHoras` (constante de `app.config`; el mismo de Tesorería).
  */
 export const UMBRALES_MIN: Record<Exclude<EtapaEspera, 'sinRegistrar'>, Umbral> = {
   bodega: { ambar: 15, rojo: 30 },

@@ -177,7 +177,9 @@ describe('folios-ack', () => {
     expect(emitToTienda).toHaveBeenCalledWith(tiendas[0].id, 'pedido.folio-asignado', payload);
     expect(emitToPedido).toHaveBeenCalledWith(p.id, 'pedido.folio-asignado', payload);
     // Las TV de pared pintan el turno (cola del folio): un pedido que ya estaba en pantalla se refresca.
-    expect(emitToTienda).toHaveBeenCalledWith(tiendas[0].id, 'monitor.invalidado', { pedidoId: p.id });
+    expect(emitToTienda).toHaveBeenCalledWith(tiendas[0].id, 'monitor.invalidado', {
+      pedidoId: p.id,
+    });
   });
 
   it('repetir el ACK es idempotente y NO vuelve a avisar', async () => {

@@ -95,7 +95,7 @@ export class AjustarPedidoDto {
   items?: ItemAjusteDto[];
 }
 
-export class CancelarPedidoDto {
+export class CancelarPedidoMostradorDto {
   @ApiProperty({
     description: 'Motivo de la cancelación. Queda en el historial del pedido.',
     example: 'El cliente se arrepintió al ver los productos',

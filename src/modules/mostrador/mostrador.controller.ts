@@ -5,7 +5,7 @@ import { MostradorQueryService } from './mostrador-query.service';
 import { BuscarPedidoDto } from './dto/buscar-pedido.dto';
 import {
   AjustarPedidoDto,
-  CancelarPedidoDto,
+  CancelarPedidoMostradorDto,
   CancelarVencidosDto,
   EnviarAPagarDto,
   EntregarPedidoDto,
@@ -352,7 +352,7 @@ export class MostradorController {
   })
   async cancelar(
     @Param('id', ParseIntPipe) id: number,
-    @Body() dto: CancelarPedidoDto,
+    @Body() dto: CancelarPedidoMostradorDto,
     @CurrentUser() user: any,
   ) {
     return this.mostradorService.cancelar(id, user, dto.motivo);

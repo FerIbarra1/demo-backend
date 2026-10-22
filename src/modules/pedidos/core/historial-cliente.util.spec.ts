@@ -43,13 +43,26 @@ describe('fraseDelHito', () => {
 
   it('ninguna frase lleva jerga, números internos ni nombres de piso', () => {
     const estados = [
-      'SOLICITADO', 'EN_REVISION', 'ESPERANDO_APROBACION', 'EN_ASESORIA', 'EN_DTF', 'REVISADO',
-      'EN_ATENCION', 'PENDIENTE_PAGO', 'PAGADO', 'ENVIADO', 'ENTREGADO', 'CANCELADO',
+      'SOLICITADO',
+      'EN_REVISION',
+      'ESPERANDO_APROBACION',
+      'EN_ASESORIA',
+      'EN_DTF',
+      'REVISADO',
+      'EN_ATENCION',
+      'PENDIENTE_PAGO',
+      'PAGADO',
+      'ENVIADO',
+      'ENTREGADO',
+      'CANCELADO',
     ];
     for (const a of [null, ...estados]) {
       for (const n of estados) {
         const f = fraseDelHito(a, n);
-        if (f) expect(f).not.toMatch(/#\d|bodega|plancha|ventanilla|sistema comercial|firebird|vfp|erp|[A-Z]{3,}_[A-Z]+/i);
+        if (f)
+          expect(f).not.toMatch(
+            /#\d|bodega|plancha|ventanilla|sistema comercial|firebird|vfp|erp|[A-Z]{3,}_[A-Z]+/i,
+          );
       }
     }
   });

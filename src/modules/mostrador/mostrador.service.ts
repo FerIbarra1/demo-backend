@@ -18,7 +18,7 @@ import {
   piezasEnLaBolsa,
 } from '../pedidos/core/ajuste-cantidad.util';
 import { PreciosService } from '../precios/precios.service';
-import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../precios/precio-lista.util';
+import { ColumnaLista } from '../precios/precio-lista.util';
 import { ItemAjusteDto } from './dto/accion-mostrador.dto';
 import { KioskoLlegadaService } from '../kiosko/kiosko-llegada.service';
 import { PresenciaService } from '../pedidos/core/presencia.service';

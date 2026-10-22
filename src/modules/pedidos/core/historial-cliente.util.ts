@@ -51,7 +51,11 @@ const ES_VAIVEN_INTERNO = (anterior: string | null, nuevo: string): boolean =>
 export function fraseDelHito(anterior: string | null, nuevo: string): string | null {
   if (ES_VAIVEN_INTERNO(anterior, nuevo)) return null;
   // El cliente (o la tienda por él) resolvió una propuesta: el pedido sigue su camino.
-  if (anterior === 'ESPERANDO_APROBACION' && nuevo !== 'CANCELADO' && nuevo !== 'ESPERANDO_APROBACION') {
+  if (
+    anterior === 'ESPERANDO_APROBACION' &&
+    nuevo !== 'CANCELADO' &&
+    nuevo !== 'ESPERANDO_APROBACION'
+  ) {
     return 'Se confirmaron los cambios de tu pedido';
   }
   switch (nuevo) {

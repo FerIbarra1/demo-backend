@@ -208,7 +208,9 @@ export class KioskoPairingService {
       solicitud?.tiendaIdHint &&
       solicitud.tiendaIdHint !== actor.tiendaId
     ) {
-      throw new ForbiddenException('Esa tablet pertenece a otra tienda. Pide al administrador que la mueva.');
+      throw new ForbiddenException(
+        'Esa tablet pertenece a otra tienda. Pide al administrador que la mueva.',
+      );
     }
     if (
       solicitud?.tiendaIdHint &&

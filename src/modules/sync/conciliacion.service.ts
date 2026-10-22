@@ -1,5 +1,5 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { EstadoPedido, EstadoTareaErp, Prisma, TipoTareaErp } from '@prisma/client';
+import { EstadoPedido, EstadoTareaErp, Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { cerrarTareasConfirmadasPorEl } from '../pedidos/core/tareas-erp.util';
 import { PedidoPagoHandler } from './handlers/pedido-pago.handler';

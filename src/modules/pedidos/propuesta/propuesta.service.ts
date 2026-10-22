@@ -18,7 +18,7 @@ import { aplicarCambiosFisicos } from '../core/aplicar-cambios-surtido.util';
 import { datosDeFaltaDeBodega } from '../core/cancelacion-linea.util';
 import type { ResultadoAjuste } from '../core/calculadora-ajuste.util';
 import { PreciosService } from '../../precios/precios.service';
-import { precioDeLista, ColumnaLista, COLUMNA_MAYOREO } from '../../precios/precio-lista.util';
+import { ColumnaLista } from '../../precios/precio-lista.util';
 import { UserContext } from '../../../types/pedido.types';
 import {
   EstadoPedido,

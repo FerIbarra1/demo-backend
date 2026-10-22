@@ -7,13 +7,19 @@ import { Type } from 'class-transformer';
  * El ADMIN elige la tienda; para el GERENTE la tienda es la suya y, si manda otra, es 403.
  */
 export class CrearKioskoDto {
-  @ApiPropertyOptional({ description: 'Tienda del kiosko. Obligatoria para el ADMIN; el gerente usa la suya.' })
+  @ApiPropertyOptional({
+    description: 'Tienda del kiosko. Obligatoria para el ADMIN; el gerente usa la suya.',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   tiendaId?: number;
 
-  @ApiPropertyOptional({ example: 'Entrada', description: 'Dónde estará la tablet (opcional).', maxLength: 40 })
+  @ApiPropertyOptional({
+    example: 'Entrada',
+    description: 'Dónde estará la tablet (opcional).',
+    maxLength: 40,
+  })
   @IsOptional()
   @IsString()
   @MaxLength(40)

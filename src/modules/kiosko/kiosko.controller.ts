@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Patch, Body, Param, ParseIntPipe, Query, Headers } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  ParseIntPipe,
+  Query,
+  Headers,
+} from '@nestjs/common';
 import { KioskoTokenInvalidoException } from './exceptions/kiosko-token-invalido.exception';
 import { KioskoInactivoException } from './exceptions/kiosko-inactivo.exception';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiHeader } from '@nestjs/swagger';

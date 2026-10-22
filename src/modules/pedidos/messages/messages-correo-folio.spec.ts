@@ -43,7 +43,9 @@ describe('MessagesService · correo de la primera respuesta del asesor', () => {
       mensajeBodegueroEnviado: { create: jest.fn().mockResolvedValue({}) },
     };
     const config = { get: jest.fn().mockReturnValue('https://tienda.test') };
-    const configuracion = { obtenerLogoUrl: jest.fn().mockResolvedValue('https://logo.test/l.png') };
+    const configuracion = {
+      obtenerLogoUrl: jest.fn().mockResolvedValue('https://logo.test/l.png'),
+    };
     const svc = new MessagesService(
       prisma as any,
       {} as any,

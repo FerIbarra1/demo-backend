@@ -357,8 +357,14 @@ export async function hayCuentaParaTienda(
   tiendaId: number,
 ): Promise<boolean> {
   const cuenta =
-    (await db.cuentaBancaria.findFirst({ where: { tiendaId, activa: true }, select: { id: true } })) ??
-    (await db.cuentaBancaria.findFirst({ where: { tiendaId: null, activa: true }, select: { id: true } }));
+    (await db.cuentaBancaria.findFirst({
+      where: { tiendaId, activa: true },
+      select: { id: true },
+    })) ??
+    (await db.cuentaBancaria.findFirst({
+      where: { tiendaId: null, activa: true },
+      select: { id: true },
+    }));
   return !!cuenta;
 }
 

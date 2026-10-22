@@ -240,8 +240,13 @@ describe('Fila de caja — transferencias', () => {
       modo: ModoEntrega.DOMICILIO,
       transferencia: { estado: E.VERIFICADO, verificadaHaceMin: 5 },
     });
-    const enProceso = await crearPedido({ modo: ModoEntrega.DOMICILIO, transferencia: { estado: E.PENDIENTE } });
-    const normal = await crearPedido({ transferencia: { estado: E.VERIFICADO, verificadaHaceMin: 5 } });
+    const enProceso = await crearPedido({
+      modo: ModoEntrega.DOMICILIO,
+      transferencia: { estado: E.PENDIENTE },
+    });
+    const normal = await crearPedido({
+      transferencia: { estado: E.VERIFICADO, verificadaHaceMin: 5 },
+    });
 
     const porRegistrar = await caja.obtenerColaVentanilla(tiendaId, 1, 20, 'TODOS', 'verificado');
     const ids = porRegistrar.data.map((p) => p.id);
@@ -256,7 +261,9 @@ describe('Fila de caja — transferencias', () => {
     // La fila normal de ventanilla y la TV siguen sin ver el domicilio: no hay a quién llamar.
     const cola = await caja.obtenerColaVentanilla(tiendaId);
     expect(cola.data.map((p) => p.id)).not.toContain(domicilio.id);
-    expect((await monitor.obtenerMonitorCajero(tiendaId)).colaSinAsignar.map((p) => p.id)).not.toContain(domicilio.id);
+    expect(
+      (await monitor.obtenerMonitorCajero(tiendaId)).colaSinAsignar.map((p) => p.id),
+    ).not.toContain(domicilio.id);
   });
 
   it('un pedido a DOMICILIO nunca aparece en la TV, pague como pague', async () => {

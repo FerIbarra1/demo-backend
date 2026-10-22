@@ -9,9 +9,11 @@ function db(opts: { asignadoAt?: Date | null; solicitud?: boolean; previos?: num
     count,
     db: {
       pedidoFolioSolicitud: {
-        findUnique: jest.fn().mockResolvedValue(
-          opts.solicitud === false ? null : { asignadoAt: opts.asignadoAt ?? null },
-        ),
+        findUnique: jest
+          .fn()
+          .mockResolvedValue(
+            opts.solicitud === false ? null : { asignadoAt: opts.asignadoAt ?? null },
+          ),
       },
       notificacion: { count },
     } as never,

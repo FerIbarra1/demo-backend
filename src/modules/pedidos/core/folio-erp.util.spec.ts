@@ -120,20 +120,32 @@ describe('turnoParaElCliente ("Tu turno en pantalla": solo cuando el pedido sale
   const E = EstadoPedido;
   const conFolio = { folioErp: '0000152573', modoEntrega: ModoEntrega.RECOGER_TIENDA };
 
-  it.each([E.REVISADO, E.EN_ATENCION, E.PENDIENTE_PAGO])('en %s: los últimos 4 dígitos', (estado) => {
-    expect(turnoParaElCliente({ ...conFolio, estado })).toBe('2573');
-  });
-
-  it.each([E.SOLICITADO, E.EN_REVISION, E.EN_ASESORIA, E.ESPERANDO_APROBACION, E.PAGADO, E.ENTREGADO, E.CANCELADO])(
-    'en %s no sale en ninguna TV: sin turno',
+  it.each([E.REVISADO, E.EN_ATENCION, E.PENDIENTE_PAGO])(
+    'en %s: los últimos 4 dígitos',
     (estado) => {
-      expect(turnoParaElCliente({ ...conFolio, estado })).toBeNull();
+      expect(turnoParaElCliente({ ...conFolio, estado })).toBe('2573');
     },
   );
 
+  it.each([
+    E.SOLICITADO,
+    E.EN_REVISION,
+    E.EN_ASESORIA,
+    E.ESPERANDO_APROBACION,
+    E.PAGADO,
+    E.ENTREGADO,
+    E.CANCELADO,
+  ])('en %s no sale en ninguna TV: sin turno', (estado) => {
+    expect(turnoParaElCliente({ ...conFolio, estado })).toBeNull();
+  });
+
   it('a domicilio no pasa por ventanilla: sin turno aunque tenga folio', () => {
     expect(
-      turnoParaElCliente({ folioErp: '0000152573', estado: E.PENDIENTE_PAGO, modoEntrega: ModoEntrega.DOMICILIO }),
+      turnoParaElCliente({
+        folioErp: '0000152573',
+        estado: E.PENDIENTE_PAGO,
+        modoEntrega: ModoEntrega.DOMICILIO,
+      }),
     ).toBeNull();
   });
 

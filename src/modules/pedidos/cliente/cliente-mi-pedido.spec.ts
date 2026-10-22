@@ -90,12 +90,24 @@ describe('ClienteService.obtenerMiPedido · lo que lee el cliente', () => {
   });
 
   it('sin folio, a domicilio, o ya entregado: sin turno', async () => {
-    expect(((await crearServicio({ ...base, folioErp: null }).obtenerMiPedido(17310, 7)) as any).turno).toBeNull();
     expect(
-      ((await crearServicio({ ...base, modoEntrega: ModoEntrega.DOMICILIO }).obtenerMiPedido(17310, 7)) as any).turno,
+      ((await crearServicio({ ...base, folioErp: null }).obtenerMiPedido(17310, 7)) as any).turno,
     ).toBeNull();
     expect(
-      ((await crearServicio({ ...base, estado: EstadoPedido.ENTREGADO }).obtenerMiPedido(17310, 7)) as any).turno,
+      (
+        (await crearServicio({ ...base, modoEntrega: ModoEntrega.DOMICILIO }).obtenerMiPedido(
+          17310,
+          7,
+        )) as any
+      ).turno,
+    ).toBeNull();
+    expect(
+      (
+        (await crearServicio({ ...base, estado: EstadoPedido.ENTREGADO }).obtenerMiPedido(
+          17310,
+          7,
+        )) as any
+      ).turno,
     ).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { RolUsuario } from '@prisma/client';
+import { createHash } from 'crypto';
 import { KioskoPairingService } from './kiosko-pairing.service';
 import type { ActorKiosko } from './kiosko.service';
 
@@ -90,7 +91,7 @@ describe('KioskoPairingService.aprobar — la tienda de la tablet', () => {
  */
 describe('KioskoPairingService.reclamar', () => {
   const SECRETO = 'secreto-de-la-tablet-de-32-bytes-base64url';
-  const sha = (v: string) => require('crypto').createHash('sha256').update(v).digest('hex');
+  const sha = (v: string) => createHash('sha256').update(v).digest('hex');
 
   function crearReclamo(kiosko: Record<string, unknown>, pairing: Record<string, unknown> = {}) {
     const update = jest.fn().mockResolvedValue({});
