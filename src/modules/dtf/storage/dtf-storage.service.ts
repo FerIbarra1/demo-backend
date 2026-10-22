@@ -19,7 +19,7 @@ import type { Readable } from 'stream';
  * Mismo criterio que `ComprobanteStorageService`: la BD guarda la KEY (nunca una URL), el archivo solo
  * sale por un endpoint autorizado y nada es legible por URL pública.
  *
- *   · Con credenciales de S3: bucket `AWS_S3_DTF_BUCKET` (privado) o el prefijo `dtf/` del bucket de
+ *   · Con credenciales de S3: bucket `AWS_S3_PRIVATE_BUCKET` (privado) o el prefijo `dtf/` del bucket de
  *     imágenes. Al subir se COMPRUEBA que el prefijo no sea legible sin credenciales (falla cerrado).
  *   · Sin credenciales (dev): disco `storage-privado/dtf/`, fuera de `uploads/` (lo único que se sirve).
  *
@@ -34,7 +34,7 @@ export class DtfStorageService {
   private readonly region: string;
   private readonly directorio = resolve(process.cwd(), 'storage-privado');
   private privacidad: { ok: boolean; hasta: number } | null = null;
-  /** Disco local privado: sin credenciales, `DTF_STORAGE=local`, o (solo fuera de producción) si el bucket no pasa la prueba de privacidad. */
+  /** Disco local privado: sin credenciales, o (solo fuera de producción) si el bucket no pasa la prueba de privacidad. */
   private local = false;
 
   constructor(config: ConfigService) {
@@ -46,8 +46,6 @@ export class DtfStorageService {
         ? new S3Client({
             region: this.region,
             credentials: { accessKeyId: s3.accessKeyId, secretAccessKey: s3.secretAccessKey },
-            ...(s3.endpoint ? { endpoint: s3.endpoint } : {}),
-            ...(s3.forcePathStyle ? { forcePathStyle: true } : {}),
             maxAttempts: 3,
             requestHandler: new NodeHttpHandler({
               connectionTimeout: 5_000,
@@ -56,7 +54,7 @@ export class DtfStorageService {
             }),
           })
         : null;
-    this.local = !this.s3 || process.env.DTF_STORAGE === 'local';
+    this.local = !this.s3;
   }
 
   private rutaLocal(key: string): string {

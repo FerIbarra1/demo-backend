@@ -31,7 +31,7 @@ const MENSAJE_NO_DISPONIBLE =
  * cualquiera que adivine una URL, serían datos bancarios publicados.
  *
  * Dónde se guarda:
- *   1. `AWS_S3_COMPROBANTES_BUCKET` si está definido (lo ideal: un bucket sin lectura pública), o
+ *   1. `AWS_S3_PRIVATE_BUCKET` si está definido (lo ideal: un bucket sin lectura pública), o
  *   2. el MISMO bucket y credenciales de las imágenes de producto, bajo el prefijo `comprobantes/`
  *      (no hace falta crear nada para empezar), o
  *   3. sin credenciales de S3 (dev): disco local en `storage-privado/`, FUERA de `uploads/` (lo
@@ -52,8 +52,6 @@ export class ComprobanteStorageService implements OnModuleInit {
   private readonly s3: S3Client | null;
   private readonly bucket: string;
   private readonly region: string;
-  private readonly endpoint: string;
-  private readonly publicUrlBase: string;
   private readonly bucketEsCompartido: boolean;
   private readonly directorioLocal: string;
   /** Resultado de la prueba de privacidad. Un éxito dura; un fallo se reintenta pronto. */
@@ -66,16 +64,12 @@ export class ComprobanteStorageService implements OnModuleInit {
     this.bucket = propio || s3.bucket || '';
     this.bucketEsCompartido = !propio;
     this.region = s3.region || 'us-east-1';
-    this.endpoint = s3.endpoint || '';
-    this.publicUrlBase = (s3.publicUrlBase || '').replace(/\/+$/, '');
     this.directorioLocal = resolve(process.cwd(), 'storage-privado');
     const hayCredenciales = !!(s3.accessKeyId && s3.secretAccessKey);
     this.s3 = hayCredenciales
       ? new S3Client({
           region: this.region,
           credentials: { accessKeyId: s3.accessKeyId, secretAccessKey: s3.secretAccessKey },
-          ...(this.endpoint ? { endpoint: this.endpoint } : {}),
-          ...(s3.forcePathStyle ? { forcePathStyle: true } : {}),
           maxAttempts: 3,
           requestHandler: new NodeHttpHandler({
             connectionTimeout: 5_000,
@@ -116,13 +110,7 @@ export class ComprobanteStorageService implements OnModuleInit {
 
   /** URLs por las que un objeto del prefijo sería legible por cualquiera, si estuviera expuesto. */
   private urlsPublicasDe(key: string): string[] {
-    const directa = this.endpoint
-      ? `${this.endpoint.replace(/\/+$/, '')}/${this.bucket}/${key}`
-      : `https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`;
-    const urls = [directa];
-    // El CDN / dominio propio de las imágenes también puede estar sirviendo todo el bucket.
-    if (this.bucketEsCompartido && this.publicUrlBase) urls.push(`${this.publicUrlBase}/${key}`);
-    return urls;
+    return [`https://${this.bucket}.s3.${this.region}.amazonaws.com/${key}`];
   }
 
   /**
@@ -177,7 +165,7 @@ export class ComprobanteStorageService implements OnModuleInit {
           fallar(
             `el prefijo comprobantes/ es de LECTURA PÚBLICA (${url} respondió 200 sin credenciales). ` +
               'Guardar ahí publicaría los datos bancarios de los clientes. Quita la lectura pública ' +
-              'de comprobantes/* en la política del bucket (o usa AWS_S3_COMPROBANTES_BUCKET con un ' +
+              'de comprobantes/* en la política del bucket (o usa AWS_S3_PRIVATE_BUCKET con un ' +
               'bucket privado).',
             2,
           );

@@ -9,38 +9,23 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AppModule } from './app.module';
 import { StorageService } from './modules/imagenes/storage.service';
+import { mensajeDeEntornoInvalido, validarEntorno } from './config/validar-entorno';
 
 async function bootstrap() {
+  // Antes de levantar nada: si el entorno está mal, se dice TODO lo que falta de una vez y se aborta. En producción
+  // exige el conjunto mínimo completo (secretos reales, https, correo, S3); en desarrollo solo los dos secretos.
+  const esProduccion = process.env.NODE_ENV === 'production';
+  const problemas = validarEntorno(process.env, esProduccion);
+  if (problemas.length) throw new Error(mensajeDeEntornoInvalido(problemas));
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   const configService = app.get(ConfigService);
 
-  const jwtSecret = configService.get<string>('app.jwtSecret');
-  if (!jwtSecret) {
-    throw new Error('JWT_SECRET es obligatorio y debe ser un valor seguro en producción');
-  }
-  // Fase 3: enforce de fortaleza del secreto en producción. Un JWT_SECRET
-  // corto (ej. "secret-key") permite a un atacante forjar tokens de cualquier
-  // rol (ADMIN). En dev se permite débil para no bloquear el arranque local;
-  // en producción fallamos el startup ante un secreto inseguro.
-  if (process.env.NODE_ENV === 'production' && jwtSecret.length < 32) {
-    throw new Error(
-      'JWT_SECRET debe tener al menos 32 caracteres en producción. Genera uno con: openssl rand -base64 48',
-    );
-  }
-
-  // PR7 (kiosko-profesional): kioskoQrSecret es OBLIGATORIO. Sin él, los
-  // QRs de "avisar llegada" no se pueden firmar y el flujo queda roto.
-  // Sin fallback por la misma razón que jwtSecret: un secreto débil
-  // permite falsificar QRs y reclamar pedidos ajenos.
-  const kioskoQrSecret = configService.get<string>('app.kioskoQrSecret');
-  if (!kioskoQrSecret) {
-    throw new Error('KIOSKO_QR_SECRET es obligatorio. Genera uno con: openssl rand -base64 48');
-  }
-  if (kioskoQrSecret.length < 32) {
-    throw new Error(
-      'KIOSKO_QR_SECRET debe tener al menos 32 caracteres. Genera uno con: openssl rand -base64 48',
-    );
-  }
+  // Apagado ordenado: sin esto, un SIGTERM (docker stop, PM2 reload, un redespliegue) mata el proceso sin ejecutar los
+  // `onModuleDestroy` —los barridos programados, la conexión a la BD, los sockets—. Con esto sí corren antes de salir.
+  // Ojo: NO es un drenado. Nest 11 (`close()`) ejecuta los `onModuleDestroy` (incluido el `$disconnect` de Prisma) ANTES de cerrar
+  // el servidor HTTP, así que una petición a medias en el instante exacto del apagado puede fallar.
+  app.enableShutdownHooks();
 
   // Detrás de nginx (VPS), la IP real del cliente viene en `X-Forwarded-For`. Ver `trustProxyHops` en app.config.
   const trustProxyHops = configService.get<number>('app.trustProxyHops') ?? 0;
@@ -76,8 +61,8 @@ async function bootstrap() {
   // Parsear cookies (necesario para leer el refresh token httpOnly).
   app.use(cookieParser());
 
-  // CORS. En producción se usan los orígenes de config (app.corsOrigins,
-  // derivados de FRONTEND_URL o CORS_ORIGINS). En dev se permite cualquier origen.
+  // CORS. En producción se usan los orígenes de config (app.corsOrigins = FRONTEND_URL, sin barra final).
+  // En dev se permite cualquier origen.
   const corsOrigins = configService.get<string[]>('app.corsOrigins') ?? [];
   app.enableCors({
     origin: process.env.NODE_ENV === 'production' ? corsOrigins : true,

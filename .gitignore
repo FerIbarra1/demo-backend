@@ -93,3 +93,10 @@ test-results/
 /.next/
 # Comprobantes de transferencia en dev (sin S3): datos bancarios de clientes, nunca al repo.
 /storage-privado
+
+# Capturas y volcados del navegador de pruebas (no son parte del proyecto)
+.playwright-mcp/
+
+# Scripts de verificación puntual: llevan credenciales de prueba hardcodeadas
+*.tmp.js
+*.tmp.mjs

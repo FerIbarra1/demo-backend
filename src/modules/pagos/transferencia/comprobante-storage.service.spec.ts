@@ -36,7 +36,6 @@ const S3 = {
   secretAccessKey: 'SK',
   bucket: 'imagenes-bucket',
   region: 'us-west-2',
-  publicUrlBase: 'https://img.tienda.test/',
 };
 const PNG = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -52,14 +51,13 @@ describe('ComprobanteStorageService — con S3 (bucket compartido)', () => {
     expect(puts).toHaveLength(2); // la prueba + el comprobante
     expect(puts.every((p) => p.bucket === 'imagenes-bucket')).toBe(true);
     expect(enviados.filter((e) => e.tipo === 'DeleteObjectCommand')).toHaveLength(1);
-    // Probó la URL directa de S3 Y la del CDN de las imágenes.
+    // Probó la URL directa de S3 del prefijo (no hay CDN: la base pública se deriva de bucket + región).
     const urls = http.mock.calls.map((c) => c[0]);
     expect(
       urls.some((u) =>
         u.startsWith('https://imagenes-bucket.s3.us-west-2.amazonaws.com/comprobantes/'),
       ),
     ).toBe(true);
-    expect(urls.some((u) => u.startsWith('https://img.tienda.test/comprobantes/'))).toBe(true);
   });
 
   it('prefijo de LECTURA PÚBLICA (200 anónimo): se niega a guardar y no sube el comprobante', async () => {
@@ -69,14 +67,6 @@ describe('ComprobanteStorageService — con S3 (bucket compartido)', () => {
     // Solo se subió el archivo de prueba (y se borró): el comprobante real NUNCA salió.
     expect(enviados.filter((e) => e.tipo === 'PutObjectCommand')).toHaveLength(1);
     expect(enviados.filter((e) => e.tipo === 'DeleteObjectCommand')).toHaveLength(1);
-  });
-
-  it('el CDN de las imágenes expone el prefijo aunque la URL directa de S3 no: también se niega', async () => {
-    const { svc, http } = crear({ s3: S3 });
-    http.mockImplementation(async (url: string) =>
-      url.startsWith('https://img.tienda.test') ? 200 : 403,
-    );
-    await expect(svc.guardar(PNG, 'image/png', 7)).rejects.toThrow(ServiceUnavailableException);
   });
 
   it('sin respuesta del anónimo no se puede afirmar que sea privado: falla cerrado', async () => {
@@ -103,14 +93,14 @@ describe('ComprobanteStorageService — con S3 (bucket compartido)', () => {
   it('dos subidas simultáneas comparten la misma prueba', async () => {
     const { svc, http } = crear({ s3: S3 });
     await Promise.all([svc.guardar(PNG, 'image/png', 1), svc.guardar(PNG, 'image/png', 2)]);
-    expect(http.mock.calls.length).toBe(2); // 2 URLs, una sola ronda de prueba
+    expect(http.mock.calls.length).toBe(1); // 1 URL, una sola ronda de prueba para las dos subidas
   });
 
-  it('con bucket dedicado usa ESE bucket y no mira el CDN de las imágenes', async () => {
+  it('con bucket dedicado usa ESE bucket (y prueba la privacidad de ESE bucket, no la del público)', async () => {
     const { svc, enviados, http } = crear({ s3: S3, bucket: 'solo-comprobantes' });
     await svc.guardar(PNG, 'image/png', 3);
     expect(enviados.every((e) => e.bucket === 'solo-comprobantes')).toBe(true);
-    expect(http.mock.calls.every((c) => !c[0].includes('img.tienda.test'))).toBe(true);
+    expect(http.mock.calls.every((c) => c[0].includes('solo-comprobantes'))).toBe(true);
   });
 });
 

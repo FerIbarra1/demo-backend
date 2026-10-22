@@ -2,7 +2,6 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
-import { randomUUID } from 'crypto';
 import { resolve, dirname } from 'path';
 import { mkdir, writeFile, unlink } from 'fs/promises';
 
@@ -44,17 +43,11 @@ export class StorageService {
   private readonly s3: S3Client | null;
   private readonly bucket: string;
   private readonly region: string;
-  private readonly publicUrlBase: string;
-  private readonly endpoint: string;
-  private readonly forcePathStyle: boolean;
 
   constructor(private readonly config: ConfigService) {
     const s3Config = this.config.get('app.s3') || {};
     this.bucket = s3Config.bucket || '';
     this.region = s3Config.region || 'us-east-1';
-    this.publicUrlBase = s3Config.publicUrlBase || '';
-    this.endpoint = s3Config.endpoint || '';
-    this.forcePathStyle = s3Config.forcePathStyle === true;
     const accessKeyId = s3Config.accessKeyId || '';
     const secretAccessKey = s3Config.secretAccessKey || '';
 
@@ -71,9 +64,6 @@ export class StorageService {
         ? new S3Client({
             region: this.region,
             credentials: { accessKeyId, secretAccessKey },
-            // Endpoint custom para proveedores S3-compatibles (R2, MinIO, Spaces).
-            ...(this.endpoint ? { endpoint: this.endpoint } : {}),
-            ...(this.forcePathStyle ? { forcePathStyle: true } : {}),
             maxAttempts: S3_MAX_ATTEMPTS,
             requestHandler: new NodeHttpHandler({
               connectionTimeout: S3_CONNECTION_TIMEOUT_MS,
@@ -237,20 +227,19 @@ export class StorageService {
     }
   }
 
+  /** Base de las URLs públicas: se DERIVA de bucket + región (antes había `AWS_S3_PUBLIC_URL` para sobrescribirla). */
+  private baseUrlPublica(): string {
+    return `https://${this.bucket}.s3.${this.region}.amazonaws.com`;
+  }
+
   /** Resuelve una key a su URL pública. */
   urlPublica(key: string): string {
-    const limpia = this.normalizarKey(key);
-    if (this.publicUrlBase) {
-      return `${this.publicUrlBase.replace(/\/$/, '')}/${limpia}`;
-    }
-    return `https://${this.bucket}.s3.${this.region}.amazonaws.com/${limpia}`;
+    return `${this.baseUrlPublica()}/${this.normalizarKey(key)}`;
   }
 
   /** Extrae la key de una URL absoluta. Si ya es una key, la devuelve igual. */
   keyDeUrl(urlOKey: string): string {
-    const base = this.publicUrlBase
-      ? this.publicUrlBase.replace(/\/$/, '')
-      : `https://${this.bucket}.s3.${this.region}.amazonaws.com`;
+    const base = this.baseUrlPublica();
 
     // URL absoluta de nuestro bucket/CDN: quitar la base.
     if (urlOKey.startsWith(base)) {
@@ -327,8 +316,8 @@ export class StorageService {
    * la resuelve contra el origen del FRONTEND (3001), no del backend (3000).
    * Sirve para `<img>` del catálogo y del panel admin porque el fallback local
    * es una comodidad de desarrollo; NO sirve para `og:image` ni para correos,
-   * que exigen URL absoluta — ahí la solución es configurar S3 (o
-   * `AWS_S3_PUBLIC_URL` apuntando al backend).
+   * que exigen URL absoluta — ahí la solución es configurar S3
+   * (la URL pública se deriva de `AWS_S3_BUCKET` + `AWS_REGION`).
    */
   private urlLocalDeKey(key: string): string {
     return `/files/${key}`;

@@ -13,7 +13,6 @@ describe('StorageService — resolución de keys y URLs', () => {
       get: () => ({
         bucket: 'mi-bucket',
         region: 'us-east-1',
-        publicUrlBase: '',
         endpoint: '',
         forcePathStyle: false,
         accessKeyId: '',
@@ -38,13 +37,6 @@ describe('StorageService — resolución de keys y URLs', () => {
         'https://mi-bucket.s3.us-east-1.amazonaws.com/productos/1/a.webp',
       );
     });
-
-    it('usa la base pública cuando está configurada (CDN)', () => {
-      const svc = crear({ ...CON_S3, publicUrlBase: 'https://img.ejemplo.com/' });
-      expect(svc.urlPublica('productos/1/a.webp')).toBe(
-        'https://img.ejemplo.com/productos/1/a.webp',
-      );
-    });
   });
 
   describe('keyDeUrl', () => {
@@ -53,12 +45,6 @@ describe('StorageService — resolución de keys y URLs', () => {
         crear(CON_S3).keyDeUrl('https://mi-bucket.s3.us-east-1.amazonaws.com/productos/1/a.webp'),
       ).toBe('productos/1/a.webp');
     });
-
-    it('extrae la key de una URL de CDN', () => {
-      const svc = crear({ ...CON_S3, publicUrlBase: 'https://img.ejemplo.com' });
-      expect(svc.keyDeUrl('https://img.ejemplo.com/productos/1/a.webp')).toBe('productos/1/a.webp');
-    });
-
     it('devuelve la key tal cual si ya es una key', () => {
       expect(crear(CON_S3).keyDeUrl('productos/1/a.webp')).toBe('productos/1/a.webp');
     });
