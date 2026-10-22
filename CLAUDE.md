@@ -11,7 +11,7 @@ El frontend vive en `../demo-frontend` y tiene su propio `CLAUDE.md`.
 ```bash
 npm run start:dev        # Desarrollo con watch
 npm run build            # prisma generate + nest build
-npm run test             # Jest (151 suites, 2736 tests)
+npm run test             # Jest (163 suites, 2890 tests; los 23 `*-postgres` necesitan una BD: ver «Tests»)
 npm run lint             # ESLint con --fix
 
 npm run prisma:migrate   # Migraciones
@@ -57,6 +57,67 @@ pedidos/
 ├── bodega/  cajero/  cliente/  ventas/  admin/  propuesta/  reposicion/
 └── messages/          # Chat del pedido (con adjuntos de propuesta)
 ```
+
+## Entorno y configuración (21-oct-2026)
+
+**Una variable de entorno existe solo si cambia ENTRE entornos** (secretos, URLs, credenciales). Una regla del negocio o un acuerdo con otra pieza es una **constante** de
+`src/config/app.config.ts`: ponerla en el `.env` solo da modo de desincronizarla en silencio (la vida del access token vive también en el frontend; la del refresh, en la cookie y en la
+ventana de la cookie `auth-session`). De ~45 variables posibles quedan las de `.env.example`:
+
+- **Obligatorias en producción:** `DATABASE_URL`, `JWT_SECRET`, `KIOSKO_QR_SECRET`, `AGENT_API_KEY`, `FRONTEND_URL` (https, SOLO el origen: sin ruta; una barra final se tolera y `app.config` la quita), `SMTP_HOST/PORT/USER/PASS/FROM`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_S3_BUCKET`. **`validarEntorno`** (`config/validar-entorno.ts`, pura) las revisa al arrancar y **aborta listando TODO lo que falte** o sea un valor de ejemplo
+  (`secret-key`, `cambiar…`): un `JWT_SECRET` débil permite forjar tokens de ADMIN. `JWT_SECRET` y `KIOSKO_QR_SECRET` (≥32 caracteres y distintos entre sí) se exigen también en desarrollo.
+- **Opcionales:** `PORT` (3000), `SMTP_REPLY_TO`, `AWS_S3_PRIVATE_BUCKET`, `PAGOS_ZONA_HORARIA`, `TRUST_PROXY_HOPS` (vacía o inválida → el defecto; en producción `validarEntorno` rechaza lo que no sea un entero), y `DIRECT_DATABASE_URL` **solo con pooler** (Neon; con Postgres propio se borra
+  junto con `directUrl` de `schema.prisma`).
+- **Constantes** (ya NO son variables): vida del access (`1h`) y del refresh (`7d`), `apiPrefix` (`/api`), vida del QR del kiosko (`5m`), recordatorio/vencimiento/presencia de pedidos sin recoger,
+  `pagos.alertaSinRegistrarHoras`, topes de archivo (comprobantes 8 MB, DTF 300 MB), borrador y QR móvil del DTF, `passwordResetExpiresMin`. `SMTP_SECURE` se deriva del puerto (465 → TLS implícito) y el origen CORS
+  (HTTP y WebSocket) es `FRONTEND_URL`.
+- **S3 unificado** (`app.config.ts` → `s3()`; nadie lee `process.env.AWS_*` por su cuenta): bucket PÚBLICO (fotos y logo; la URL se DERIVA de bucket + región) y UN bucket PRIVADO opcional
+  (`AWS_S3_PRIVATE_BUCKET`) para comprobantes bancarios y archivos DTF, con prefijos `comprobantes/` y `dtf/`. Sin él se usan esos prefijos del público, previa **prueba de que no son legibles sin
+  credenciales** (si lo son, se niega a guardar). Sin credenciales (solo desarrollo) cae a disco local (`uploads/`, `storage-privado/`).
+- **Redis se eliminó** (código, `ioredis`, `@socket.io/redis-adapter`, servicio del compose): hay UNA instancia. Consecuencia que conviene recordar: todo lo que vive «en memoria» es POR PROCESO —el bloqueo de login por
+  cuenta, `LimiteIntentosLlegada` del kiosko, el almacén del límite de peticiones—; con varias instancias cada una cuenta aparte (el tope efectivo se multiplica, no desaparece) y habría que reintroducir un almacén compartido.
+- **DTF público:** `POST dtf/movil/:token/archivo` es público (el token ES la autorización) y Multer escribe a disco ANTES del handler: `DtfMovilGuard` valida la firma HMAC antes de Multer, así un token inventado no escribe ni un byte (antes
+  dejaba temporales de hasta 300 MB). El tope de archivo es UNA constante, `DTF_MAX_BYTES` (`app.config.ts`), para Multer y para el servicio. `subirArchivo` borra el archivo huérfano si la transacción falla y responde 409 (no 500) si dos subidas chocan por la versión.
+- **Operación:** `app.enableShutdownHooks()` (SIGTERM de Docker/PM2 ya ejecuta `onModuleDestroy`; **no es un drenado**: Nest 11 cierra el servidor HTTP DESPUÉS de los `onModuleDestroy`, así que una petición a medias en ese instante puede fallar), `GET /api/health` (vivo; no toca la BD) y `GET /api/health/ready` (la BD contesta: el que debe
+  mirar el balanceador y el despliegue), ambos `@Public()` y `@SkipThrottle()`. Swagger solo fuera de producción.
+- **WebSocket:** CORS cerrado al origen del frontend en producción (en desarrollo cualquiera); el JWT se valida al conectar **y el socket se corta cuando vence** (el cliente reconecta con token fresco: antes
+  un token vencido, un usuario desactivado o con otro rol seguían suscritos hasta desconectar); `joinPedido` exige un entero positivo.
+
+## Sesión, contraseña y límite de peticiones (21-oct-2026)
+
+Diseño del lado del front: `demo-frontend/docs/AUTH-REDIRECTS.md`. Lo que fija el servidor:
+
+- **Tokens.** Access 1 h (cuerpo de la respuesta); refresh 7 d **solo en la cookie httpOnly** (jamás en el JSON: un XSS podría llamar a `/auth/refresh` y leerlo). `POST /auth/refresh` devuelve también el `user`, así
+  que la sesión se reconstruye con solo la cookie. **El refresh es atómico**: `updateMany … where revokedAt is null` dentro de una transacción (`count === 1` gana); dos refresh simultáneos con el mismo token ya no
+  bifurcan la familia. Un token **recién rotado** se tolera 10 s (`GRACIA_REFRESH_MS`: dos pestañas, un reintento) y solo uno rotado, **nunca** uno revocado por logout; pasada la ventana, reutilizar un rotado revoca
+  la familia (señal de robo). El refresh también exige `deletedAt === null`. **`POST auth/logout` cierra el dispositivo** (la familia del refresh de la cookie), no todos; sin cookie válida revoca todos (valor seguro).
+  **La gracia no reabre una familia cerrada a propósito:** en una familia viva todo token está sin revocar o rotado (revocado + `replacedBy`); uno revocado SIN `replacedBy` es un cierre deliberado (logout, `revocarFamilia`,
+  cambio de contraseña) y presentar el token VIEJO dentro de los 10 s ya no emite una sesión nueva en esa familia.
+  **Solo el token de ACCESO abre `Authorization: Bearer` y los sockets** (`auth/token-acceso.util.ts`, `esTokenDeAcceso`: rechaza el que lleva `jti` —refresh— o `kind` —QR del kiosko—; comparten secreto y `sub`, y un refresh de 7 días servía de
+  Bearer sin pasar por `refresh_tokens`). **Cambiar la contraseña** cierra las demás sesiones y conserva la de ESTE dispositivo (la familia de la cookie; sin cookie, todas); **restablecerla** (token del correo o admin) cierra todas.
+  Una contraseña actual equivocada es **400** (no 401: el usuario SÍ está autenticado y el cliente lo leía como «token vencido»). **El logout por dispositivo solo saca al bodeguero de la TV si no queda OTRA sesión viva**
+  (`BodegaPresenciaService.haySesionViva`: refresh sin revocar y emitido hace <75 min; «sin revocar» no basta, una pestaña cerrada sin cerrar sesión lo deja 7 días), y el latido usa el mismo criterio.
+  Lo fija `auth-refresh-postgres.spec.ts` (contra la BD: las garantías viven en el `where`), `auth.controller.spec.ts`, `jwt.strategy.spec.ts` y `realtime-gateway-acceso.spec.ts`.
+- **Login que no delata** (`AuthService.login`, fijado por `auth-login.spec.ts` y probado por HTTP):
+  1. El `bcrypt.compare` corre **siempre**; si el correo no existe se compara contra `HASH_SENUELO` (coste 10, sin contraseña que lo abra). Antes «no existe» respondía en ~1 ms y «existe» en ~50: el tiempo decía qué correos tienen cuenta.
+  2. «Cuenta desactivada» (`USUARIO_DESACTIVADO`, el front muestra «contacta a soporte») **solo se revela tras la contraseña CORRECTA**; con una mala la respuesta es la genérica. Cuenta como desactivada `!activo` **o** `deletedAt`.
+  3. **Bloqueo por cuenta** (`LoginBloqueoService`, compartido con `UsuariosService`: restablecer la clave de un empleado desde el panel —hoy la ÚNICA vía de recuperación— libera su bloqueo): 10 fallos en 10 min → `429` («Vuelve a intentarlo en N minutos», más `reintentarEnSegundos`), **sin consultar la BD ni gastar bcrypt y aunque llegue la contraseña buena**. **El intento se ANOTA antes de esperar a la BD y a bcrypt** (chequeo + anotación sin `await` en medio): con 30 peticiones simultáneas solo 10 llegan a gastar un bcrypt (antes pasaban todas el chequeo y daban 30 adivinanzas); un fallo de la BD no cuenta (`deshacerIntento`). Cuenta también los
+     correos que no existen (si no, el bloqueo sería un oráculo de qué correos tienen cuenta) y la clave es el correo en minúsculas y sin espacios. Es `LimiteDeIntentos` (`common/limite-intentos.ts`, pura, reloj inyectable):
+     en memoria, ventana deslizante, **acotada** (por clave solo guarda las últimas `maximo` marcas; en total `maxClaves`, al llenarse purga lo vencido y, bajo ataque, descarta lo más antiguo). Un acierto limpia la cuenta, y
+     `resetearPassword` con un token válido también. **Compromiso aceptado:** quien conozca un correo puede bloquearlo 10 minutos (se libera solo). Hoy el front NO tiene pantalla de «olvidé mi contraseña» aunque
+     `auth/forgot-password` y `auth/reset-password` existen.
+  4. El límite por IP de `/auth/login` es de **20/min** (antes 5: seis empleados abriendo turno tras la IP de la tienda se bloqueaban entre sí); el de `/auth/refresh`, 30/min. El freno contra adivinar contraseñas es el de la cuenta.
+- **Política de contraseñas** (`common/password-policy.ts`): **8 caracteres, una letra y un número**, en TODO sitio donde se crea o cambia una (registro, cambio, restablecer con token, alta de empleado, reset del admin).
+  **El login NO la aplica**: las cuentas con 6 o 7 caracteres siguen entrando y se les pide una nueva al cambiarla (`LoginDto` y `loginSchema` del front, intactos a propósito). Espejo en el front:
+  `lib/utils/password-policy.ts`. `password-policy.spec.ts` prueba los DTOs reales (no la constante: lo que importa es que ninguno se quede con su `MinLength(6)`). Las cuentas demo del seed (`123456`) no pasan por aquí.
+- **Límite de peticiones** (`UserThrottlerGuard`, `common/guards/`, reemplaza al `ThrottlerGuard` de fábrica en `AppModule`): **300/min por RUTA** (la clave de `@nestjs/throttler` incluye clase y handler) y **por usuario
+  con sesión** (`req.user.userId`; `JwtAuthGuard` corre antes y solo lo puebla con un token de firma válida), **por IP sin ella**. Una tienda entera sale por UNA IP y sus consolas hacen polling a las mismas rutas:
+  contadas por IP toparían con el 429 sin que nadie abusara. **Nunca se usa una cabecera que manda el cliente** (`X-Kiosko-Id`, `X-Tienda-Id`, `X-Forwarded-For` sin `trust proxy`): rotarla esquivaría el límite.
+  Los `@Throttle` propios de cada ruta (login 20, registro 5, DTF, kiosko, vista previa de ajuste 180…) usan el mismo rastreador. `user-throttler.guard.spec.ts` levanta un Nest real: dos usuarios tras la misma IP no
+  se descuentan, los anónimos sí comparten, una cabecera rotada no libera, y el cableado en `AppModule` no vuelve al guard de fábrica.
+- **Cookies:** `clearCookie` usa los mismos atributos que `cookie` (antes `secure: true` fijo: en desarrollo no borraba nada). En producción `sameSite: 'none'` + `secure`; con el front y la API bajo el mismo dominio
+  registrable (`app.` / `api.`) la cookie es de primera parte y `Lax` bastaría —decisión de despliegue pendiente—.
 
 ## Los 8 procesos del pedido
 
@@ -392,9 +453,9 @@ y **antes** de revelar el estado del kiosko para que no sea un oráculo de qué 
     El tope por kiosko lo propuse yo; el de por folio lo acordó el dueño.
 - **Salud y alertas** (`kiosko-salud.ts`, `KioskoAlertasWorker`) sin cambios: la alerta `kiosko.caido` va solo a `admin:all` (el gerente de una tienda no la recibe; ve sus
   kioskos en `/gerencia/salud`).
-- **`TRUST_PROXY_HOPS`** (`app.config.ts` + `main.ts`): detrás de nginx en la VPS debe ser **1**. Sin él Express toma como IP del cliente la del proxy: el `ThrottlerGuard`
-  (por IP, 100/min global) juntaría a TODOS los clientes del negocio en un solo cubo —las tablets toparían con 429 en hora pico— y la IP que guardan la auditoría y los
-  emparejamientos sería siempre la de nginx. En producción con 0 arranca con una advertencia. Más alto que los proxies reales permite falsificar `X-Forwarded-For`.
+- **`TRUST_PROXY_HOPS`** (`app.config.ts` + `main.ts`): por defecto **1 en producción** (detrás de nginx / el balanceador) y 0 fuera; la variable solo lo fuerza. Sin él Express toma como IP del
+  cliente la del proxy: las peticiones SIN sesión (login, TV de pared, kiosko) se juntarían en un solo cubo del límite de peticiones y la IP que guardan la auditoría y los emparejamientos
+  sería siempre la de nginx. Más alto que los proxies reales permite falsificar `X-Forwarded-For`. (Las peticiones CON sesión ya no cuentan por IP: ver «Sesión, contraseña y límite de peticiones».)
 - **Alta, nombres y quién la hace (decisiones del dueño, 19-oct):**
   - El **GERENTE** da de alta, apaga, desvincula y vincula las tablets de **SU tienda** (el ADMIN, las de todas). Endpoints: `GET/POST kiosko`, `PATCH kiosko/:id`,
     `POST kiosko/:id/desvincular` y `kiosko/pairing/{lookup,:id/aprobar,:id/cancelar}`. El alcance lo impone el SERVICIO (`KioskoService.tiendaDelActor`/`cargarParaActor`,
@@ -408,8 +469,8 @@ y **antes** de revelar el estado del kiosko para que no sea un oráculo de qué 
     tablet pide emparejarse sola), la rama de "reactivar por latido" (código muerto), `recienActivado` del latido, `ActivarKioskoDto`, `tokenEsDeTienda`.
     Migración `20261027120000_kiosko_ubicacion` (ubicación; deja los kioskos nunca instalados ACTIVOS y sin token).
   - La alerta `kiosko.caido` ahora llega TAMBIÉN al gerente de cada tienda (`emitToTienda`, una por tienda).
-- **Pendiente:** el límite de peticiones por IP (100/min) aprieta a una tienda entera detrás de una misma IP pública (varias tablets + PCs + TV): si en producción aparecen 429,
-  cambiar el rastreador del `ThrottlerGuard` a usuario/kiosko cuando hay sesión.
+- **Límite de peticiones (resuelto 21-oct-2026):** el tope ya no cuenta por IP cuando hay sesión (ver «Sesión, contraseña y límite de peticiones»). Las tablets de kiosko siguen contando por IP a
+  propósito: su identidad (`X-Kiosko-Id`) la manda el cliente y rotarla esquivaría el límite; el token se valida dentro del servicio, después del guard.
 
 ## Pagos por transferencia (oct 2026)
 
@@ -427,7 +488,7 @@ Plan completo y decisiones: `PLAN-PAGOS-TRANSFERENCIA.md`. Lo que hay que saber 
   `pagos/transferencia/hooks.ts` (no inyectan el módulo de pagos: sería un ciclo): cancelar el pedido
   (`resolverPagoAlCancelarse`, dentro de la transacción de `cambiarEstado`) y el cobro de VFP
   (`resolverPagoAlCobrarse`, después del commit y con errores contenidos).
-- **Comprobantes: almacenamiento PRIVADO** (`AWS_S3_COMPROBANTES_BUCKET`, o `storage-privado/` en dev),
+- **Comprobantes: almacenamiento PRIVADO** (`AWS_S3_PRIVATE_BUCKET` bajo `comprobantes/`, o `storage-privado/` en dev),
   nunca el bucket público de imágenes, y solo salen por un endpoint autorizado.
 - **El servidor decide qué botones caben; el frontend no mapea estado→acción.** Cada vista lleva sus
   banderas: `acciones.*` (detalle de Tesorería), `puedePedirDatos` (cliente), `puedeEnviarDatos` y
@@ -495,7 +556,7 @@ Plan completo y decisiones: `PLAN-PAGOS-TRANSFERENCIA.md`. Lo que hay que saber 
   - Los avisos/mensajes dicen "marcaron vencidas" / "ya no están activas", nunca "vencieron" (nada vence solo).
 - **Abono tardío**: un pago `VENCIDO` se puede verificar (`acciones.aprobarRequiereNota`) con una nota de qué pasó;
   no si el cliente ya pidió otras instrucciones (solo cabe un pago vivo): el abono se resuelve en ese.
-- **"Verificada y sin registrar en VFP" se ve, no se avisa**: `atrasado` (horas en `PAGOS_ALERTA_SIN_REGISTRAR_HORAS`,
+- **"Verificada y sin registrar en VFP" se ve, no se avisa**: `atrasado` (horas en `pagos.alertaSinRegistrarHoras` (constante, `app.config.ts`),
   default 4) se calcula al leer; la cola de Tesorería lo marca y ordena lo más viejo primero; caja ve "verificada
   hace N h". Sin proceso ni push.
 - **Conciliación** (`GET tesoreria/pagos/conciliacion` y `/csv`): pagos por el día del NEGOCIO en que se verificaron
@@ -798,7 +859,7 @@ viéndolo. **El navegador ya no arma ese snapshot ni calcula un precio.**
   catálogo **con la lista del CLIENTE que hizo el pedido** y falla al ENVIAR si la
   variante es ajena o no existe (antes fallaba al aprobar). `vistaPrevia` expone
   `POST /pedidos/:id/ajuste/vista-previa` (VENTAS, MOSTRADOR, ADMIN; límite propio
-  de 180/min porque el límite global de 100/min por IP se comparte con la tienda).
+  de 180/min por usuario; el global es de 300/min por ruta y usuario).
 - **`enviarPropuesta` recibe un `ResultadoAjuste`**, no un DTO: ningún controller
   puede pasarle líneas de un cliente. Rechaza una propuesta sin cambios. Solo
   VENTAS/ADMIN; la de bodega la arma el sistema al cerrar el surtido.
@@ -991,7 +1052,7 @@ ACTIVA: pedidos por etapa, la espera más larga, transferencias, DTF y un **sem�
 
 - **El semáforo mide la ESPERA, no el volumen** (`torre-control.util.ts`, pura y con spec): 30 pedidos en caja pueden ser un buen día; lo que importa es cuánto lleva esperando
   el primero. Etapas y umbrales (min, ámbar/rojo; `UMBRALES_MIN`): bodega sin tomar 15/30 · surtiendo 30/60 · ventas 30/60 · mostrador (cliente YA en tienda) 10/20 · fila de caja
-  10/20 · transferencia por verificar 60/180 · DTF recibido sin revisar 60/180 · transferencia verificada sin registrar = `PAGOS_ALERTA_SIN_REGISTRAR_HORAS` (4 h → ámbar) y el
+  10/20 · transferencia por verificar 60/180 · DTF recibido sin revisar 60/180 · transferencia verificada sin registrar = `pagos.alertaSinRegistrarHoras` (constante, `app.config.ts`) (4 h → ámbar) y el
   triple (rojo). **Los umbrales son decisión de operación y NO están medidos**: viven juntos para ajustarlos en una tabla (N4 "Atorados" los generalizará y hará editables).
   La frontera es inclusiva (llegar al umbral YA es el nivel). La tienda toma el peor nivel de sus etapas y lista los `motivos` del peor al menos malo (a igual nivel, el que más espera).
 - **Qué NO es espera del personal** (y por eso no cuenta): un REVISADO cuyo cliente no está (espera al cliente; solo cuenta con `presenteDesdeAt`, medido desde que LLEGÓ), una
@@ -1105,7 +1166,7 @@ cliente NO le llega correo, solo un aviso en SU pedido; el que refleja lo pendie
   - **El ACK de un pedido cancelado en vuelo** (`procesarPedidosAck`) ahora guarda el folio y abre la tarea: antes quedaba un folio vivo en el ERP y solo un warning.
   - **Cobro manual** (`marcarComoPagado` por una persona) con folio → `REGISTRAR_COBRO_EN_ERP`.
   - **Se cierran solas** cuando el ERP confirma (`PedidoPagoHandler`: `SWCANCEL=true` / `FINALIZADA=true`, incluida la rama idempotente de "ya estaba cobrado"), o a mano. Eso depende de que el agente reporte esos eventos (ver abajo).
-  - `GET tareas-erp` (de UNA tienda, `@TiendaConsola`; CAJERO, GERENTE y ADMIN), `POST tareas-erp/:id/hecha` ("ya lo hice") y `…/descartar` ("no aplica", solo gerente/admin, nota obligatoria). `atrasada` desde `PAGOS_ALERTA_SIN_REGISTRAR_HORAS` (4 h). `eliminarPedidoCancelado` se niega con tareas abiertas.
+  - `GET tareas-erp` (de UNA tienda, `@TiendaConsola`; CAJERO, GERENTE y ADMIN), `POST tareas-erp/:id/hecha` ("ya lo hice") y `…/descartar` ("no aplica", solo gerente/admin, nota obligatoria). `atrasada` desde `pagos.alertaSinRegistrarHoras` (constante, `app.config.ts`) (4 h). `eliminarPedidoCancelado` se niega con tareas abiertas.
 - **Aviso al cliente:** `GET cliente/pedidos/:id` trae `avisoDeTienda` (el último `mensajeCliente`): texto estándar + lo que escribió el gerente. Sin correo.
 - **Etapa 3 (oct 2026): el contrato nube ↔ agente ↔ Firebird PROBADO de punta a punta.** Contra una copia de la BD real (`DATOSINV.FDB`, Firebird 3.0.10, Docker `fb-datosinv`), el agente REAL, una nube de prueba aparte (BD propia, otro puerto) y el
   catálogo completo de Firebird (94 389 eventos). **Hasta hoy ninguna de las dos direcciones había funcionado** (los scripts y el agente nunca se habían corrido contra Firebird); cada defecto se vio solo contra el sistema real, porque los tests
@@ -1251,10 +1312,13 @@ el que no, nada). Pendiente: las TV de pared (F4).
 
 ## Tests
 
-151 suites, 2736 tests, todos verdes (más 71 del agente: `cd agent && npm test`). Cubren las invariantes del flujo completo
+163 suites, 2890 tests, todos verdes (más 74 del agente: `cd agent && npm test`). Cubren las invariantes del flujo completo
 (`flujo-completo.spec.ts`), la máquina de estados
 (`pedido-state.service.spec.ts`), el dinero (`invariantes-dinero.spec.ts`) y la
 idempotencia de llegada.
+
+**Los 23 specs `*-postgres` hablan con una BD REAL** (`import 'dotenv/config'` + `new PrismaClient()`): sin `DATABASE_URL` explícito en el comando leen la de tu `.env` y escriben en ella. Córrelos SIEMPRE con la URL de una BD desechable
+(`DATABASE_URL=… DIRECT_DATABASE_URL=… npx jest`; receta del contenedor `verif-pg-audit` en el plan de pulido) o sáltalos con `npx jest --testPathIgnorePatterns postgres` (132 suites, sin BD).
 
 **Antes de tocar la máquina de estados o el acceso, corre la suite.** Es la red
 que evita que un cambio de transición rompa el encolado al ERP.
