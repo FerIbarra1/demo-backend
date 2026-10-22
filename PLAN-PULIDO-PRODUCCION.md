@@ -13,7 +13,7 @@ de leer código. Red de seguridad: `refs/backups/pre-auditoria-2026-10-21` en am
 | F3 Backend: robustez | **HECHA** | Shutdown hooks, `/api/health[/ready]`, WS (CORS, corte al vencer el JWT, `joinPedido`), login con señuelo + bloqueo por cuenta, política de 8 caracteres (backend y espejo en el front), `UserThrottlerGuard` (300/min por usuario o IP), `CancelarPedidoDto` único (Swagger sin duplicados), lint en 0 |
 | F4 Front: rendimiento y memoria | **HECHA** | `AudioContext`, selectores de Zustand, `exhaustive-deps`, `RealtimeProvider`, lint en 0 (antes 83 avisos) |
 | F5 Verificación final | **HECHA** | Ver «Resultado de F5» abajo |
-| F6 Despliegue | **Pendiente** | Necesita las respuestas de §5 |
+| F6 Despliegue | **Artefactos listos, sin desplegar** | Destino real: **Render (gratis) + Neon + Vercel**, sin ERP. `Dockerfile` multi-stage, `render.yaml`, `DESPLIEGUE.md` (límites de Render/Neon gratis, pasos, checklist). Alternativa VPS (compose + nginx + TLS) sin probar. Pendiente del dueño: dominio, credenciales rotadas |
 
 Hallazgos nuevos de la pasada de F3/F5 (no estaban en la auditoría original):
 - **No existe pantalla de «olvidé mi contraseña»** en el front, aunque el backend tiene `auth/forgot-password` y `auth/reset-password` (y el correo `RESET_PASSWORD`). Un cliente que olvida su clave solo puede pedirle al admin que la cambie. Decisión pendiente.
@@ -192,7 +192,7 @@ Cerrar `AudioContext` y el `setTimeout` en `mostrador/page.tsx`; selectores de Z
 
 Suites completas (151 + agente + scripts del front), arnés E1–E3 de nuevo, `next build`, build del backend, prueba de arranque con `NODE_ENV=production` y envs mínimas, matriz de roles, y `/code-review` sobre el diff completo.
 
-### F6 — Despliegue (necesita tus respuestas, §5)
+### F6 — Despliegue (artefactos listos; ver `DESPLIEGUE.md`)
 
 Commits ordenados (previa confirmación tuya), `Dockerfile` multi-stage, compose de producción (api + nginx + certbot), `prisma migrate deploy` en el release, healthchecks, respaldo de BD, cookie `SameSite=Lax` **same-site** (`app.` y `api.` bajo el mismo dominio), checklist de la presentación y datos de demostración con contraseñas fuertes.
 
@@ -276,3 +276,10 @@ Necesito de ti (bloquean F6, no F1–F5):
 3. **Base de datos**: ¿Neon (pooler + directa) o Postgres propio en el VPS?
 4. ¿El **agente Firebird** estará conectado en la presentación o se demuestra sin ERP?
 5. Cuentas demo: ¿contraseñas fuertes por cuenta, o el seed solo en un entorno privado?
+
+
+## 6. Despliegue (22-oct-2026)
+
+Respuestas del dueño: commits por fase (hechos, ramas `pre-auditoria` y `auditoria/produccion`, sin push) · **Neon con pooler** · **sin ERP** en la presentación · cuentas demo con `123456` por ahora · destino **Render (gratis) + Vercel**.
+Hallazgo del despliegue: **`nest build` no copiaba `preflight-worker.js`** (un `.js` suelto): en una imagen solo con `dist/` TODO análisis DTF fallaba con «No se encontró preflight-worker.js» (en desarrollo funcionaba por el respaldo a `src/`). Arreglado con `assets` en `nest-cli.json` y comprobado dentro de la imagen.
+Sin probar: Render, Neon, Vercel, S3/SMTP reales, cuántos saltos de proxy hay en Render (`TRUST_PROXY_HOPS`), el despertar tras dormir, Safari/móvil.

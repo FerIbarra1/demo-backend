@@ -1,0 +1,32 @@
+# Blueprint de Render para la api (New → Blueprint, apuntando a este repo). SIN PROBAR contra Render: revísalo en el panel
+# al crearlo. Construye el Dockerfile (la última etapa, `api`, es la imagen final) y escucha en el PORT que Render asigna.
+# Las migraciones NO corren aquí: ver DESPLIEGUE.md §3 (se aplican desde tu máquina contra Neon).
+services:
+  - type: web
+    name: ptm-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon            # elige la región MÁS CERCANA a tu proyecto de Neon (menos latencia en cada consulta)
+    healthCheckPath: /api/health
+    autoDeploy: false         # despliegas tú, cuando quieras (no en cada push)
+    envVars:
+      - { key: NODE_ENV, value: production }
+      - { key: DTF_PREFLIGHT_MEMORIA_MB, value: "256" }   # 512 MB de RAM: que muera el proceso hijo, no el contenedor
+      # Secretos y URLs: se piden en el panel (sync: false), nunca viajan en el repo.
+      - { key: DATABASE_URL, sync: false }                # Neon CON pooler + &sslmode=require&pgbouncer=true&connect_timeout=15
+      - { key: DIRECT_DATABASE_URL, sync: false }         # Neon SIN pooler
+      - { key: JWT_SECRET, sync: false }
+      - { key: KIOSKO_QR_SECRET, sync: false }
+      - { key: AGENT_API_KEY, sync: false }
+      - { key: FRONTEND_URL, sync: false }                # https://app.tudominio.com (sin ruta)
+      - { key: SMTP_HOST, sync: false }
+      - { key: SMTP_PORT, sync: false }
+      - { key: SMTP_USER, sync: false }
+      - { key: SMTP_PASS, sync: false }
+      - { key: SMTP_FROM, sync: false }
+      - { key: AWS_ACCESS_KEY_ID, sync: false }
+      - { key: AWS_SECRET_ACCESS_KEY, sync: false }
+      - { key: AWS_REGION, sync: false }
+      - { key: AWS_S3_BUCKET, sync: false }
+      - { key: AWS_S3_PRIVATE_BUCKET, sync: false }       # opcional pero recomendado (comprobantes y DTF)

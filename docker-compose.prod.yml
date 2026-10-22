@@ -1,0 +1,55 @@
+# Producción en UN servidor (VPS): api + nginx (TLS) + migraciones como paso de release.
+# La base de datos NO está aquí: es Neon (administrada). Variables: el `.env` del servidor (ver .env.example) y, para
+# nginx, DOMINIO_API (p. ej. api.tudominio.com). Guía paso a paso: DESPLIEGUE.md.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build      # migra, levanta la api y nginx
+#   docker compose -f docker-compose.prod.yml logs -f api
+name: ptm
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+services:
+  # Release: `prisma migrate deploy` (idempotente). La api no arranca hasta que termine bien; si falla, el `up` aborta
+  # y el contenedor anterior de la api sigue sirviendo.
+  migrar:
+    build: { context: ., target: migrar }
+    env_file: .env
+    restart: "no"
+    logging: *logging
+
+  api:
+    build: { context: ., target: api }
+    image: ptm-api:${VERSION:-latest}
+    env_file: .env
+    environment:
+      NODE_ENV: production
+    init: true                 # reenvía SIGTERM a node: enableShutdownHooks cierra la BD y los barridos
+    restart: unless-stopped
+    stop_grace_period: 30s
+    expose: ["3000"]           # solo visible para nginx, nunca publicado al exterior
+    depends_on:
+      migrar: { condition: service_completed_successfully }
+    logging: *logging
+    # El HEALTHCHECK (liveness, /api/health) viene de la imagen.
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      api: { condition: service_healthy }
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMINIO_API: ${DOMINIO_API:?define DOMINIO_API (p. ej. api.tudominio.com)}
+      # Solo se sustituye esta variable: las de nginx ($host, $scheme…) no se tocan.
+      NGINX_ENVSUBST_FILTER: DOMINIO_API
+    volumes:
+      - ./deploy/nginx/ptm-api.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - certs:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    logging: *logging
+
+volumes:
+  certs:
+  certbot-www:

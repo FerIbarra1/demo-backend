@@ -1,0 +1,21 @@
+# Lo que NO entra al contexto de build de la imagen del backend.
+node_modules
+dist
+.git
+.gitignore
+.claude
+.playwright-mcp
+coverage
+# Secretos y datos locales: JAMÁS en una imagen.
+.env
+.env.*
+!.env.example
+uploads
+storage-privado
+*.pem
+# No son del backend.
+agent
+firebird
+*.png
+*.md
+!README.md

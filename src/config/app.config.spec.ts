@@ -4,7 +4,12 @@ import appConfig from './app.config';
  * Lo que `app.config` deriva del entorno y el arranque da por hecho. Se llama a la fábrica con `process.env` acotado
  * (y se restaura): son reglas que un valor mal escrito en el servidor rompe en silencio.
  */
-const CLAVES = ['TRUST_PROXY_HOPS', 'FRONTEND_URL', 'NODE_ENV'] as const;
+const CLAVES = [
+  'TRUST_PROXY_HOPS',
+  'FRONTEND_URL',
+  'NODE_ENV',
+  'DTF_PREFLIGHT_MEMORIA_MB',
+] as const;
 const guardado: Record<string, string | undefined> = {};
 
 const restaurar = () => {
@@ -64,5 +69,16 @@ describe('app.config: origen del frontend (CORS y enlaces de los correos)', () =
 
   it('sin variable cae al front local de desarrollo', () => {
     expect(cargar({ FRONTEND_URL: undefined }).corsOrigins).toEqual(['http://localhost:3001']);
+  });
+});
+
+describe('app.config: memoria del preflight DTF (DTF_PREFLIGHT_MEMORIA_MB)', () => {
+  it.each([
+    ['sin variable → 2048 MB', undefined, 2048],
+    ['256 (un contenedor de 512 MB)', '256', 256],
+    ['vacía o basura → el defecto, nunca NaN ni 0', 'mucha', 2048],
+    ['cero o negativa → el defecto', '0', 2048],
+  ])('%s', (_n, valor, esperado) => {
+    expect(cargar({ DTF_PREFLIGHT_MEMORIA_MB: valor }).dtf.preflightMemoriaMb).toBe(esperado);
   });
 });

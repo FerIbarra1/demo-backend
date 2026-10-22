@@ -9,7 +9,7 @@ import { registerAs } from '@nestjs/config';
  * Variables que se leen (obligatorias en producción marcadas con *):
  *   DATABASE_URL* (+DIRECT_DATABASE_URL solo con pooler tipo Neon) · JWT_SECRET* · KIOSKO_QR_SECRET* · AGENT_API_KEY* ·
  *   FRONTEND_URL* · SMTP_HOST/PORT/USER/PASS/FROM* · AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY/REGION/S3_BUCKET*
- * Opcionales: PORT · SMTP_REPLY_TO · AWS_S3_PRIVATE_BUCKET · PAGOS_ZONA_HORARIA · TRUST_PROXY_HOPS
+ * Opcionales: PORT · SMTP_REPLY_TO · AWS_S3_PRIVATE_BUCKET · PAGOS_ZONA_HORARIA · TRUST_PROXY_HOPS · DTF_PREFLIGHT_MEMORIA_MB
  */
 
 /** Tope por archivo DTF. Un PDF de 57 × 250 cm a 300 DPI pesa decenas o cientos de MB. Lo usan Multer y el servicio. */
@@ -124,7 +124,13 @@ export default registerAs('app', () => {
       maxBytes: DTF_MAX_BYTES,
       // Tiempo y memoria del proceso hijo que mide el archivo (si se pasa, queda "no concluyente").
       preflightTimeoutMs: 90_000,
-      preflightMemoriaMb: 2048,
+      // Tope de heap de V8 del proceso hijo. Depende de la RAM del servidor, no del negocio, así que SÍ es una variable
+      // (opcional): en un contenedor de 512 MB (Render gratis) 2048 deja que un archivo grande agote la memoria del
+      // contenedor entero y lo reinicie; con ~256 muere solo el hijo y el archivo queda «no concluyente».
+      preflightMemoriaMb:
+        Number(process.env.DTF_PREFLIGHT_MEMORIA_MB) > 0
+          ? Number(process.env.DTF_PREFLIGHT_MEMORIA_MB)
+          : 2048,
       // Cuánto vive un borrador (carrito) antes de expirar.
       borradorHoras: 24,
       // Vigencia del QR de "sube desde tu celular".
