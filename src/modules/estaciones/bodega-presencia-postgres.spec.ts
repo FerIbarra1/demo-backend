@@ -79,13 +79,14 @@ const heartbeatDe = async (id: number) =>
   (await prisma.usuario.findUnique({ where: { id } }))!.ultimoHeartbeat;
 const equipoEnTv = async () => (await monitor().obtenerMonitor(tiendaId)).equipo.map((b) => b.id);
 
-async function conSesionAbierta(id: number) {
+async function conSesionAbierta(id: number, opts: { emitidaHaceMin?: number } = {}) {
   await prisma.refreshToken.create({
     data: {
       usuarioId: id,
-      tokenHash: `${suffix}${id}`.padEnd(64, 'a'),
-      familyId: `fam-${suffix}-${id}`,
+      tokenHash: `${suffix}${id}${opts.emitidaHaceMin ?? 0}`.padEnd(64, 'a'),
+      familyId: `fam-${suffix}-${id}-${opts.emitidaHaceMin ?? 0}`,
       expiresAt: new Date(Date.now() + 3_600_000),
+      ...(opts.emitidaHaceMin != null ? { createdAt: hace(opts.emitidaHaceMin) } : {}),
     },
   });
 }
@@ -256,6 +257,26 @@ describe('Presencia de bodega — el latido', () => {
     expect(realtime.emitToTienda).toHaveBeenCalledWith(tiendaId, 'bodeguero.entro', {
       usuarioId: rosa,
     });
+  });
+
+  it('una sesión VIEJA sin revocar (pestaña cerrada sin cerrar sesión, 3 h atrás) NO cuenta como sesión viva', async () => {
+    // Con el criterio «sin revocar», un latido rezagado revivía a quien ya no estaba en la tienda hasta por 7 días.
+    await conSesionAbierta(rosa, { emitidaHaceMin: 180 });
+    expect(await svc().haySesionViva(rosa)).toBe(false);
+    await prisma.usuario.update({ where: { id: rosa }, data: { ultimoHeartbeat: hace(40) } });
+    await svc().latido(rosa);
+    expect(await equipoEnTv()).toEqual([]);
+    expect(realtime.emitToTienda).not.toHaveBeenCalled();
+  });
+
+  it('una sesión reciente (la app abierta rota el refresh cada hora) SÍ es viva; una revocada, no', async () => {
+    await conSesionAbierta(rosa, { emitidaHaceMin: 30 });
+    expect(await svc().haySesionViva(rosa)).toBe(true);
+    await prisma.refreshToken.updateMany({
+      where: { usuarioId: rosa },
+      data: { revokedAt: new Date() },
+    });
+    expect(await svc().haySesionViva(rosa)).toBe(false);
   });
 
   it('un latido rezagado DESPUÉS de cerrar sesión no la vuelve a poner en la TV', async () => {

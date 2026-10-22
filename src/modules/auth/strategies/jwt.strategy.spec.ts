@@ -63,3 +63,38 @@ describe('JwtStrategy.validate', () => {
     ).rejects.toThrow(UnauthorizedException);
   });
 });
+
+/**
+ * El refresh token (7 días, lleva `jti`) y el del QR del kiosko (5 min, lleva `kind`) se firman con el MISMO secreto y
+ * llevan `sub`. Sin esto la estrategia los aceptaba como `Authorization: Bearer`, y ese uso no pasa por la tabla
+ * `refresh_tokens`: ni la rotación, ni el logout, ni `revocarFamilia` lo frenaban.
+ */
+describe('JwtStrategy.validate: solo acepta tokens de ACCESO', () => {
+  const sinBd = () => {
+    const findUnique = jest.fn().mockResolvedValue(base);
+    const config = { get: jest.fn().mockReturnValue('secreto-de-prueba') };
+    const estrategia = new JwtStrategy(config as never, { usuario: { findUnique } } as never);
+    return { estrategia, findUnique };
+  };
+
+  it('un refresh token (con `jti`) NO sirve como Bearer, y se rechaza sin consultar la BD', async () => {
+    const { estrategia, findUnique } = sinBd();
+    await expect(
+      estrategia.validate({} as never, { ...payload, jti: 'a-uuid' } as never),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it('el token del QR del kiosko (con `kind`) tampoco', async () => {
+    const { estrategia, findUnique } = sinBd();
+    await expect(
+      estrategia.validate({} as never, { sub: 7, kind: 'kiosk', tiendaId: 3 } as never),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it('el token de acceso (sin `jti` ni `kind`) sí pasa', async () => {
+    const { estrategia } = sinBd();
+    await expect(estrategia.validate({} as never, payload)).resolves.toMatchObject({ userId: 7 });
+  });
+});

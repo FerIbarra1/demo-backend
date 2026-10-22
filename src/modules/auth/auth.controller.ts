@@ -26,6 +26,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { RolUsuario } from '@prisma/client';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { AuthResponse } from '../../types/user.types';
 
 @ApiTags('Autenticación')
 @Controller('auth')
@@ -36,36 +37,46 @@ export class AuthController {
   private readonly REFRESH_COOKIE = 'refresh_token';
 
   /**
-   * Setea el refresh token en una cookie httpOnly+Secure. El frontend nunca
-   * lo ve ni lo persiste en localStorage (cierra el vector XSS). El access
-   * token sigue viajando en el body/header (lo necesita axios).
+   * Atributos de la cookie del refresh token. UNA sola definición para escribirla y para borrarla: si difieren
+   * (`path`, `sameSite`, `secure`), el navegador no reconoce la cookie a borrar y la sesión queda "pegada".
+   *
+   * `SameSite=None` solo cuando el frontend y la API viven en SITIOS distintos (p. ej. `*.vercel.app` → API propia):
+   * es la única forma de que viaje en un XHR cross-site, pero Safari y Chrome la bloquean como cookie de terceros.
+   * Lo correcto en producción es servir front y API bajo el MISMO dominio registrable (`app.` y `api.`), donde `Lax`
+   * funciona y es más seguro. Mientras tanto se respeta lo que había: `None` en producción, `Lax` en desarrollo.
    */
-  private setRefreshCookie(res: Response, refreshToken: string): void {
-    // En producción el frontend (Vercel) y el backend viven en dominios
-    // distintos → la request de /auth/refresh es CROSS-SITE. SameSite=Lax no
-    // viaja en XHR cross-site, así que el refresh fallaría y el usuario se
-    // desloguearía ~1h tras el login. SameSite=None + Secure es lo correcto
-    // para cookies cross-site. En dev (localhost, same-site) se mantiene Lax.
+  private opcionesCookie() {
     const isProd = process.env.NODE_ENV === 'production';
-    res.cookie(this.REFRESH_COOKIE, refreshToken, {
+    return {
       httpOnly: true,
       secure: isProd,
-      sameSite: isProd ? 'none' : 'lax',
+      sameSite: (isProd ? 'none' : 'lax') as 'none' | 'lax',
       path: '/',
+    };
+  }
+
+  /**
+   * Setea el refresh token en una cookie httpOnly+Secure. El frontend nunca lo ve ni lo persiste en localStorage
+   * (cierra el vector XSS). El access token sigue viajando en el body/header (lo necesita axios).
+   */
+  private setRefreshCookie(res: Response, refreshToken: string): void {
+    res.cookie(this.REFRESH_COOKIE, refreshToken, {
+      ...this.opcionesCookie(),
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7d, igual que el refresh JWT
     });
   }
 
   private clearRefreshCookie(res: Response): void {
-    // Debe coincidir con los atributos del set (path/sameSite/secure), o el
-    // logout no borra la cookie en producción y la sesión queda "pegada".
-    const isProd = process.env.NODE_ENV === 'production';
-    res.clearCookie(this.REFRESH_COOKIE, {
-      path: '/',
-      httpOnly: true,
-      secure: true,
-      sameSite: isProd ? 'none' : 'lax',
-    });
+    res.clearCookie(this.REFRESH_COOKIE, this.opcionesCookie());
+  }
+
+  /**
+   * Lo que sale en el CUERPO: nunca el refresh token. Antes `login`, `register`, `refresh` y `kiosk-login` lo
+   * devolvían también en el JSON, y eso anulaba el sentido de la cookie httpOnly: cualquier script (XSS) podía llamar
+   * a `POST /auth/refresh` y LEER el token de la respuesta. El navegador lo recibe solo en la cookie.
+   */
+  private publica(r: AuthResponse): AuthResponseDto {
+    return { accessToken: r.accessToken, expiresIn: r.expiresIn, user: r.user };
   }
 
   @Public()
@@ -79,11 +90,13 @@ export class AuthController {
   ): Promise<AuthResponseDto> {
     const result = await this.authService.register(dto);
     this.setRefreshCookie(res, result.refreshToken);
-    return result;
+    return this.publica(result);
   }
 
+  // 20/min por IP: una tienda comparte IP pública y varios empleados abren turno a la vez (con 5, el sexto quedaba
+  // fuera). El freno contra adivinar contraseñas es POR CUENTA (`AuthService.login`), no por IP.
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Iniciar sesión' })
@@ -93,11 +106,13 @@ export class AuthController {
   ): Promise<AuthResponseDto> {
     const result = await this.authService.login(dto);
     this.setRefreshCookie(res, result.refreshToken);
-    return result;
+    return this.publica(result);
   }
 
+  // 30/min por IP: cada dispositivo refresca al volver a la pestaña o tras una hora de reposo, y toda una tienda
+  // vuelve de la comida a la vez. El token es aleatorio y de un solo uso, así que el tope solo cuida la carga.
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refrescar token de acceso' })
@@ -112,7 +127,7 @@ export class AuthController {
     const refreshToken = req?.cookies?.[this.REFRESH_COOKIE] ?? dto.refreshToken;
     const result = await this.authService.refreshToken({ refreshToken }, ip);
     this.setRefreshCookie(res, result.refreshToken);
-    return result;
+    return this.publica(result);
   }
 
   @Public()
@@ -128,7 +143,7 @@ export class AuthController {
   ): Promise<AuthResponseDto> {
     const result = await this.authService.loginByKioskToken(dto);
     this.setRefreshCookie(res, result.refreshToken);
-    return result;
+    return this.publica(result);
   }
 
   @Get('kiosk-token')
@@ -196,10 +211,13 @@ export class AuthController {
     @CurrentUser('userId') userId: number,
     @CurrentUser('token') token: string,
     @CurrentUser('rol') rol: RolUsuario,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ) {
+    // Cierra la sesión de ESTE dispositivo (la familia del refresh token de la cookie), no la de todos.
+    const refreshToken = (req.cookies as Record<string, string> | undefined)?.[this.REFRESH_COOKIE];
     this.clearRefreshCookie(res);
-    return this.authService.logout(userId, token, rol);
+    return this.authService.logout(userId, token, rol, refreshToken);
   }
 
   @Get('me')
@@ -282,8 +300,14 @@ export class AuthController {
   )
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Cambiar contraseña del usuario' })
-  async changePassword(@CurrentUser('userId') userId: number, @Body() dto: ChangePasswordDto) {
-    return this.authService.changePassword(userId, dto);
+  async changePassword(
+    @CurrentUser('userId') userId: number,
+    @Body() dto: ChangePasswordDto,
+    @Req() req: Request,
+  ) {
+    // Cierra las demás sesiones y conserva la de este dispositivo (la familia de la cookie).
+    const refreshToken = (req.cookies as Record<string, string> | undefined)?.[this.REFRESH_COOKIE];
+    return this.authService.changePassword(userId, dto, refreshToken);
   }
 
   // F7 (jul 2026): heartbeat del operador. Ping cada 5 min desde la tablet

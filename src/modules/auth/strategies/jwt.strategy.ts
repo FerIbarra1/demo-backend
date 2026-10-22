@@ -4,6 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { nombreDeActor } from '../../../common/nombre-actor';
+import { esTokenDeAcceso } from '../token-acceso.util';
 
 interface JwtPayload {
   sub: number;
@@ -27,6 +28,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(req: Request, payload: JwtPayload) {
+    // El refresh token y el del QR del kiosko comparten secreto y `sub`, pero NO son tokens de acceso.
+    if (!esTokenDeAcceso(payload)) throw new UnauthorizedException('Token inválido o expirado');
+
     const usuario = await this.prisma.usuario.findUnique({
       where: { id: payload.sub },
       include: { tienda: true },

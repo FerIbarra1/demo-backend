@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 import appConfig from './config/app.config';
 import { PrismaModule } from './prisma/prisma.module';
 import { PreciosModule } from './modules/precios/precios.module';
@@ -24,6 +25,7 @@ import { PagosModule } from './modules/pagos/pagos.module';
 import { DtfModule } from './modules/dtf/dtf.module';
 import { AdminTorreModule } from './modules/admin-torre/admin-torre.module';
 import { DestrabarModule } from './modules/destrabar/destrabar.module';
+import { HealthModule } from './modules/health/health.module';
 import { ActividadWorkersModule } from './common/actividad-workers';
 import { SeriesModule } from './common/folio/series.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -68,19 +70,22 @@ import { Reflector } from '@nestjs/core';
     // N1 (oct 2026): torre de control del ADMIN (una tarjeta por tienda).
     AdminTorreModule,
     DestrabarModule,
+    // Salud del servicio (`/api/health`, `/api/health/ready`) para nginx, Docker y el monitor de disponibilidad.
+    HealthModule,
     // F11 (ago 2026): gestión de ventanillas físicas del módulo de cajeros.
     // Se importa desde PedidosModule para que CajeroService pueda usar
     // VentanillasService — no se registra aquí para evitar duplicados.
     // F9 (ago 2026): endpoints para el agente de sincronización con Firebird.
     // Va después de PedidosModule porque PedidoPagoHandler reusa AdminService.
     SyncModule,
-    // Rate limiting global: 100 req / 60s por IP para endpoints generales.
-    // Los endpoints sensibles como /auth/login usan límites más estrictos
-    // vía decorador @Throttle() (no aplicado aún en este PR, ver TODO).
+    // Rate limiting global: 300 req / 60s por RUTA y por usuario con sesión (por IP si no la hay; ver
+    // `UserThrottlerGuard`). Antes eran 100 por IP: una tienda entera sale por una IP y sus consolas, tablets y TV
+    // hacen polling a las mismas rutas. Los endpoints sensibles (login, registro, kiosko, DTF…) fijan uno más
+    // estricto con @Throttle().
     ThrottlerModule.forRoot([
       {
         ttl: 60_000,
-        limit: 100,
+        limit: 300,
       },
     ]),
   ],
@@ -96,7 +101,7 @@ import { Reflector } from '@nestjs/core';
     },
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: UserThrottlerGuard,
     },
     {
       provide: APP_INTERCEPTOR,

@@ -4,6 +4,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
+import { LoginBloqueoService } from './login-bloqueo.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { MailModule } from '../mail/mail.module';
 import { BodegaPresenciaModule } from '../estaciones/bodega-presencia.module';
@@ -28,10 +29,10 @@ import { BodegaPresenciaModule } from '../estaciones/bodega-presencia.module';
     MailModule,
     BodegaPresenciaModule,
   ],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, LoginBloqueoService],
   controllers: [AuthController],
   // Exportamos JwtModule para que otros módulos (ej. CatalogoModule)
   // puedan inyectar JwtService sin duplicar la configuración del secret.
-  exports: [AuthService, JwtModule],
+  exports: [AuthService, JwtModule, LoginBloqueoService],
 })
 export class AuthModule {}

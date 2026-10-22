@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import { LoginBloqueoService } from '../auth/login-bloqueo.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RolUsuario } from '@prisma/client';
 import {
@@ -28,7 +29,10 @@ import {
  */
 @Injectable()
 export class UsuariosService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly bloqueo: LoginBloqueoService,
+  ) {}
 
   async listar(query: ListarUsuariosQueryDto) {
     const { rol, tiendaId, busqueda, soloEmpleados, pagina = 1, limite = 20 } = query;
@@ -204,6 +208,9 @@ export class UsuariosService {
       where: { usuarioId: id, revokedAt: null },
       data: { revokedAt: new Date() },
     });
+    // Hoy esta es la ÚNICA vía para que un empleado recupere su clave (no hay pantalla de «olvidé mi contraseña»): si se
+    // bloqueó por intentos fallidos, la clave nueva debe servir ya, no 10 minutos después.
+    this.bloqueo.limpiar(usuario.email);
     return { mensaje: 'Contraseña actualizada' };
   }
 

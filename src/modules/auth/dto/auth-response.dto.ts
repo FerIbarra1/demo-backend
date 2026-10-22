@@ -24,13 +24,8 @@ export class AuthResponseDto {
   @ApiProperty()
   accessToken: string;
 
-  @ApiProperty()
-  refreshToken: string;
-
-  @ApiProperty({ description: 'Id del refresh token persistido en BD (para revocación explícita)' })
-  refreshTokenId: number;
-
-  @ApiProperty()
+  // El refresh token NO va en el cuerpo: solo en la cookie httpOnly `refresh_token`.
+  @ApiProperty({ description: 'Segundos de validez del access token' })
   expiresIn: number;
 
   @ApiProperty({ type: UserResponseDto })

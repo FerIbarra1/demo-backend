@@ -3,20 +3,17 @@ import {
   WebSocketServer,
   OnGatewayConnection,
   OnGatewayDisconnect,
-  OnGatewayInit,
   SubscribeMessage,
   MessageBody,
   ConnectedSocket,
 } from '@nestjs/websockets';
-import { Logger, OnModuleDestroy, Injectable } from '@nestjs/common';
+import { Logger, Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
-import { createAdapter } from '@socket.io/redis-adapter';
-import { Redis } from 'ioredis';
 import { RolUsuario } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { leerTiendaElegida } from '../../common/tienda-consola';
+import { esTokenDeAcceso } from '../auth/token-acceso.util';
 
 /**
  * Gateway de Socket.IO. Namespace por defecto (raíz).
@@ -43,6 +40,8 @@ interface SocketData {
   nombre: string;
   /** Solo ADMIN: la tienda de cuyo room está mirando AHORA (`tienda.mirar`). Una a la vez. */
   tiendaMirada?: number;
+  /** Corta el socket cuando vence el JWT con el que entró (ver `handleConnection`). */
+  vencimiento?: ReturnType<typeof setTimeout>;
 }
 
 interface JwtPayload {
@@ -50,60 +49,38 @@ interface JwtPayload {
   email: string;
   rol: RolUsuario;
   tiendaId?: number;
+  /** Segundos desde epoch en que vence el access token. */
+  exp?: number;
+}
+
+/**
+ * Origen CORS del socket. En desarrollo cualquiera; en producción SOLO el del frontend (antes `origin: true` también
+ * en producción: cualquier sitio podía abrir un socket con las credenciales del navegador). Se evalúa en cada
+ * handshake (el decorador es estático y no puede leer `ConfigService`). Sin `Origin` (clientes que no son navegador)
+ * se acepta: CORS es una defensa de navegadores y el handshake exige un JWT válido de todos modos.
+ */
+function origenPermitido(origen: string | undefined): boolean {
+  if (process.env.NODE_ENV !== 'production' || !origen) return true;
+  const permitido = (process.env.FRONTEND_URL || '').replace(/\/+$/, '');
+  return !!permitido && origen.replace(/\/+$/, '') === permitido;
 }
 
 @Injectable()
 @WebSocketGateway({
-  cors: { origin: true, credentials: true },
+  cors: { origin: (origen, cb) => cb(null, origenPermitido(origen)), credentials: true },
   // En NestJS el namespace por defecto es '/'. Lo dejamos así.
   transports: ['websocket', 'polling'],
 })
-export class RealtimeGateway
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
-{
+export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server!: Server;
 
   private readonly logger = new Logger(RealtimeGateway.name);
-  private pubClient?: Redis;
-  private subClient?: Redis;
 
   constructor(
     private readonly jwtService: JwtService,
-    private readonly config: ConfigService,
     private readonly prisma: PrismaService,
   ) {}
-
-  /**
-   * Inicializa el adapter de Redis para que múltiples instancias del backend
-   * compartan rooms. Si REDIS_URL no está definida o falla la conexión, se
-   * degrada a adapter en memoria (single-instance) y se loguea un warning.
-   */
-  async afterInit(server: Server) {
-    const redisUrl = this.config.get<string>('REDIS_URL');
-    if (redisUrl) {
-      try {
-        this.pubClient = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: null });
-        this.subClient = this.pubClient.duplicate();
-        await Promise.all([this.pubClient.connect(), this.subClient.connect()]);
-        server.adapter(createAdapter(this.pubClient, this.subClient));
-        this.logger.log('Realtime: Redis adapter conectado');
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        this.logger.warn(
-          `Realtime: no se pudo conectar a Redis (${msg}). Se usa adapter en memoria (single-instance).`,
-        );
-        // Cerrar cualquier cliente Redis que haya quedado conectado a medias
-        // (p.ej. pubClient conectado pero subClient/adapter falló) para no
-        // dejar conexiones huérfanas.
-        await Promise.allSettled([this.pubClient?.quit(), this.subClient?.quit()]);
-        this.pubClient = undefined;
-        this.subClient = undefined;
-      }
-    } else {
-      this.logger.warn('Realtime: REDIS_URL no configurado. Adapter en memoria.');
-    }
-  }
 
   async handleConnection(client: Socket) {
     try {
@@ -119,6 +96,12 @@ export class RealtimeGateway
         return;
       }
       const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
+      // Mismo criterio que `JwtStrategy`: un refresh token o el del QR del kiosko no abren un socket.
+      if (!esTokenDeAcceso(payload)) {
+        this.logger.debug(`WS ${client.id}: el token no es de acceso, desconectando`);
+        client.disconnect(true);
+        return;
+      }
       const data: SocketData = {
         userId: payload.sub,
         rol: payload.rol,
@@ -130,6 +113,14 @@ export class RealtimeGateway
       const tiendaId = (payload as JwtPayload & { tiendaId?: number }).tiendaId;
       if (tiendaId) data.tiendaId = tiendaId;
       client.data = data;
+      // El JWT se valida UNA vez, al conectar: sin esto un socket seguía suscrito a los eventos de su tienda horas
+      // después de vencer el token, de desactivar al usuario o de cambiarle el rol. Se corta al vencer; el cliente
+      // reconecta solo y su handshake (`auth` como callback) manda el token ya renovado.
+      if (typeof payload.exp === 'number') {
+        const ms = Math.max(payload.exp * 1000 - Date.now(), 0);
+        data.vencimiento = setTimeout(() => client.disconnect(true), ms);
+        data.vencimiento.unref?.();
+      }
 
       // Rooms automáticos
       await client.join(`user-${data.userId}`);
@@ -164,7 +155,8 @@ export class RealtimeGateway
   @SubscribeMessage('joinPedido')
   async handleJoinPedido(@MessageBody() pedidoId: number, @ConnectedSocket() client: Socket) {
     const data = client.data as SocketData | undefined;
-    if (!data || !pedidoId) return;
+    // El id llega del cliente: debe ser un entero positivo (un string o un objeto rompía el `findUnique` de Prisma).
+    if (!data || !Number.isInteger(pedidoId) || pedidoId <= 0) return;
 
     if (await this.puedeVerPedido(client, pedidoId)) {
       await client.join(`pedido-${pedidoId}`);
@@ -256,12 +248,9 @@ export class RealtimeGateway
 
   handleDisconnect(client: Socket) {
     const data = client.data as SocketData | undefined;
+    if (data?.vencimiento) clearTimeout(data.vencimiento);
     this.logger.debug(
       `WS ${client.id} desconectado: user=${data?.userId ?? '-'} rol=${data?.rol ?? '-'}`,
     );
-  }
-
-  async onModuleDestroy() {
-    await Promise.allSettled([this.pubClient?.quit(), this.subClient?.quit()]);
   }
 }

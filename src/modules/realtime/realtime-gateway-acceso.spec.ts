@@ -14,7 +14,6 @@ import { RealtimeGateway } from './realtime.gateway';
 describe('RealtimeGateway.puedeVerPedido', () => {
   const gateway = new RealtimeGateway(
     {} as never,
-    {} as never,
     {
       pedido: {
         findUnique: jest.fn(),
@@ -96,5 +95,78 @@ describe('RealtimeGateway.puedeVerPedido', () => {
   it('un pedido inexistente no se puede ver', async () => {
     prismaMock.pedido.findUnique.mockResolvedValue(null);
     await expect(puedeVer(RolUsuario.ADMIN, 1, 7)).resolves.toBe(false);
+  });
+});
+
+describe('RealtimeGateway: socket seguro', () => {
+  const { RealtimeGateway: Gateway } = jest.requireActual(
+    './realtime.gateway',
+  ) as typeof import('./realtime.gateway');
+
+  it('el socket muere cuando vence el JWT con el que entró (y se limpia al desconectar)', async () => {
+    jest.useFakeTimers();
+    try {
+      const jwt = {
+        verifyAsync: jest.fn().mockResolvedValue({
+          sub: 7,
+          rol: RolUsuario.CLIENTE,
+          exp: Math.floor(Date.now() / 1000) + 60,
+        }),
+      };
+      const gw = new Gateway(jwt as never, {} as never);
+      const client = {
+        id: 's1',
+        data: {} as Record<string, unknown>,
+        handshake: { auth: { token: 't' }, headers: {} },
+        join: jest.fn().mockResolvedValue(undefined),
+        disconnect: jest.fn(),
+      };
+      await gw.handleConnection(client as never);
+      expect(client.disconnect).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(59_000);
+      expect(client.disconnect).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(2_000);
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+
+      // Al desconectar por su cuenta, el temporizador no queda vivo.
+      const otro = { ...client, disconnect: jest.fn(), data: {} as Record<string, unknown> };
+      await gw.handleConnection(otro as never);
+      gw.handleDisconnect(otro as never);
+      jest.advanceTimersByTime(120_000);
+      expect(otro.disconnect).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['un refresh token (con jti)', { sub: 7, rol: RolUsuario.CLIENTE, jti: 'a-uuid' }],
+    ['el token del QR del kiosko (con kind)', { sub: 7, rol: RolUsuario.CLIENTE, kind: 'kiosk' }],
+  ])('%s NO abre un socket: se desconecta y no entra a ningún room', async (_n, payload) => {
+    const gw = new Gateway(
+      { verifyAsync: jest.fn().mockResolvedValue(payload) } as never,
+      {} as never,
+    );
+    const client = {
+      id: 's2',
+      data: {} as Record<string, unknown>,
+      handshake: { auth: { token: 't' }, headers: {} },
+      join: jest.fn().mockResolvedValue(undefined),
+      disconnect: jest.fn(),
+    };
+    await gw.handleConnection(client as never);
+    expect(client.disconnect).toHaveBeenCalledWith(true);
+    expect(client.join).not.toHaveBeenCalled();
+  });
+
+  it('joinPedido ignora un id que no es un entero positivo (antes rompía el findUnique)', async () => {
+    const prisma = { pedido: { findUnique: jest.fn() } };
+    const gw = new Gateway({} as never, prisma as never);
+    const client = { data: { userId: 1, rol: RolUsuario.ADMIN }, join: jest.fn() };
+    for (const malo of ['5', {}, -1, 0, 1.5, null, undefined, NaN]) {
+      await gw.handleJoinPedido(malo as never, client as never);
+    }
+    expect(prisma.pedido.findUnique).not.toHaveBeenCalled();
+    expect(client.join).not.toHaveBeenCalled();
   });
 });

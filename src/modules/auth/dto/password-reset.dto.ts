@@ -1,4 +1,5 @@
-import { IsEmail, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsString, MinLength, Matches } from 'class-validator';
+import { PASSWORD_MENSAJE, PASSWORD_MIN, PASSWORD_PATRON } from '../../../common/password-policy';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class ForgotPasswordDto {
@@ -15,8 +16,9 @@ export class ResetPasswordDto {
   @IsString()
   token: string;
 
-  @ApiProperty({ example: 'nuevaPassword123', minLength: 6 })
+  @ApiProperty({ example: 'nuevaPassword123', minLength: 8 })
   @IsString()
-  @MinLength(6)
+  @MinLength(PASSWORD_MIN, { message: PASSWORD_MENSAJE })
+  @Matches(PASSWORD_PATRON, { message: PASSWORD_MENSAJE })
   newPassword: string;
 }

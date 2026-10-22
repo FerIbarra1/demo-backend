@@ -10,6 +10,7 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { PASSWORD_MENSAJE, PASSWORD_MIN, PASSWORD_PATRON } from '../../../common/password-policy';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { RolUsuario } from '@prisma/client';
 
@@ -72,9 +73,13 @@ export class CrearUsuarioDto {
   @IsInt()
   tiendaId?: number;
 
-  @ApiProperty({ description: 'Contraseña inicial definida por el admin.', minLength: 6 })
+  @ApiProperty({
+    description: 'Contraseña inicial definida por el admin.',
+    minLength: PASSWORD_MIN,
+  })
   @IsString()
-  @MinLength(6)
+  @MinLength(PASSWORD_MIN, { message: PASSWORD_MENSAJE })
+  @Matches(PASSWORD_PATRON, { message: PASSWORD_MENSAJE })
   password: string;
 }
 
@@ -111,9 +116,10 @@ export class ActualizarUsuarioDto {
 }
 
 export class AdminResetPasswordDto {
-  @ApiProperty({ minLength: 6 })
+  @ApiProperty({ minLength: PASSWORD_MIN })
   @IsString()
-  @MinLength(6)
+  @MinLength(PASSWORD_MIN, { message: PASSWORD_MENSAJE })
+  @Matches(PASSWORD_PATRON, { message: PASSWORD_MENSAJE })
   newPassword: string;
 }
 

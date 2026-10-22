@@ -8,8 +8,9 @@ import { RealtimeOutboxWorker } from './realtime-outbox.worker';
 /**
  * Módulo de tiempo real.
  *
- * - Socket.IO + @socket.io/redis-adapter (reutiliza ioredis + REDIS_URL).
- * - Auth vía JWT en el handshake (rechaza conexión si token inválido).
+ * - Socket.IO con el adaptador en memoria: hay UNA instancia del backend (se quitó Redis en oct 2026). Si algún día
+ *   hay varias, los rooms ya no se comparten entre procesos y habrá que reintroducir un adaptador.
+ * - Auth vía JWT en el handshake (rechaza conexión si token inválido) y el socket se corta al vencer ese JWT.
  * - Una conexión por cliente; rooms automáticos:
  *     user-{userId}     — canal privado del usuario
  *     tienda-{id}       — para BODEGA/CAJERO/MONITOR/ADMIN de esa tienda

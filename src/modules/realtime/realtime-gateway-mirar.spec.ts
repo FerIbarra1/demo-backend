@@ -23,7 +23,7 @@ describe('RealtimeGateway: tienda.mirar / tienda.dejar-de-mirar', () => {
         ),
       },
     };
-    const gateway = new RealtimeGateway({} as never, {} as never, prisma as never);
+    const gateway = new RealtimeGateway({} as never, prisma as never);
     const client = (rol: RolUsuario = RolUsuario.ADMIN) => ({
       data: { userId: 1, rol, nombre: 'A' } as Record<string, unknown>,
       join: jest.fn(async () => undefined),

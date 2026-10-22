@@ -5,6 +5,8 @@ import {
   Logger,
   BadRequestException,
   ForbiddenException,
+  HttpException,
+  HttpStatus,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -17,13 +19,30 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { KioskLoginDto } from './dto/kiosk-login.dto';
 import { UpdateUserDto, ChangePasswordDto } from './dto/update-user.dto';
 import { ForgotPasswordDto, ResetPasswordDto } from './dto/password-reset.dto';
-import { RolUsuario, TipoNotificacion, Usuario } from '@prisma/client';
+import { Prisma, RolUsuario, TipoNotificacion, Usuario } from '@prisma/client';
 import { AuthResponse, JwtPayload, KioskTokenPayload } from '../../types/user.types';
 import { MailService } from '../mail/mail.service';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
 import { mailTemplates, mailSubjects } from '../mail/mail.templates';
 import { CuentaDesactivadaException } from './exceptions/cuenta-desactivada.exception';
 import { BodegaPresenciaService } from '../estaciones/bodega-presencia.service';
+import { LoginBloqueoService } from './login-bloqueo.service';
+
+/**
+ * Ventana en la que un refresh token YA ROTADO se tolera una vez más. Dos pestañas (o un reintento de red, o un
+ * doble `useEffect`) pueden presentar el mismo token con milisegundos de diferencia: la primera lo rota y la segunda
+ * llega con un token "ya usado". Sin gracia, eso se leía como ROBO y se revocaba la familia entera (la persona
+ * perdía la sesión sin haber hecho nada). Pasada la ventana, reutilizar un token rotado sí es señal de robo.
+ * Solo aplica a tokens rotados, NUNCA a los revocados por logout o por familia (ver `refreshToken`).
+ */
+const GRACIA_REFRESH_MS = 10_000;
+
+/**
+ * Hash bcrypt (coste 10, el de las cuentas reales) de un texto aleatorio que se descartó al generarlo: no hay
+ * contraseña que lo abra. Sirve para que el login de un correo que NO existe pague el mismo `bcrypt.compare` que el de
+ * uno que sí: sin él, "no existe" respondía en ~1 ms y "existe" en ~60 ms, y el tiempo decía qué correos tienen cuenta.
+ */
+const HASH_SENUELO = '$2b$10$SwsIM.q/0eoPVBFWWrhY6.iIcdX6OU3jLXcXVLP3zWxWZgZ0VwqWO';
 
 @Injectable()
 export class AuthService {
@@ -36,6 +55,7 @@ export class AuthService {
     private mail: MailService,
     private readonly configuracion: ConfiguracionService,
     private readonly bodegaPresencia: BodegaPresenciaService,
+    private readonly bloqueo: LoginBloqueoService,
   ) {}
 
   async register(dto: RegisterDto): Promise<AuthResponse> {
@@ -44,7 +64,9 @@ export class AuthService {
     });
 
     if (existingUser) {
-      throw new ConflictException('Ya existe una cuenta con ese correo. Inicia sesión o recupera tu contraseña.');
+      throw new ConflictException(
+        'Ya existe una cuenta con ese correo. Inicia sesión o recupera tu contraseña.',
+      );
     }
 
     const hashedPassword = await bcrypt.hash(dto.password, 10);
@@ -97,20 +119,44 @@ export class AuthService {
   }
 
   async login(dto: LoginDto): Promise<AuthResponse> {
-    const usuario = await this.prisma.usuario.findUnique({
-      where: { email: dto.email },
-    });
-
-    if (!usuario) throw new UnauthorizedException('Credenciales inválidas');
-    if (!usuario.activo) {
-      // Mensaje neutro por seguridad: no confirma si el email existe ni el
-      // estado exacto de la cuenta. El frontend detecta `codigo` para mostrar
-      // una alerta clara de "contacta a soporte".
-      throw new CuentaDesactivadaException();
+    // Antes de tocar la BD ni gastar un bcrypt: una cuenta bloqueada no distingue contraseñas buenas de malas.
+    if (this.bloqueo.bloqueado(dto.email)) {
+      const espera = this.bloqueo.segundosParaLiberar(dto.email);
+      const minutos = Math.max(1, Math.ceil(espera / 60));
+      throw new HttpException(
+        {
+          statusCode: HttpStatus.TOO_MANY_REQUESTS,
+          message: `Demasiados intentos fallidos. Vuelve a intentarlo en ${minutos} ${minutos === 1 ? 'minuto' : 'minutos'}.`,
+          error: 'Too Many Requests',
+          reintentarEnSegundos: espera,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
     }
+    // El intento se ANOTA ya, antes de esperar a la BD y a bcrypt, y se da por fallido hasta que se demuestre lo
+    // contrario. Sin esto, 50 peticiones simultáneas pasaban TODAS el chequeo de arriba (nadie había anotado todavía)
+    // y daban 50 adivinanzas antes de que el bloqueo entrara. El chequeo y la anotación van seguidos, sin `await`.
+    this.bloqueo.registrarIntento(dto.email);
 
-    const isPasswordValid = await bcrypt.compare(dto.password, usuario.password);
-    if (!isPasswordValid) throw new UnauthorizedException('Credenciales inválidas');
+    let usuario: Usuario | null;
+    let isPasswordValid: boolean;
+    try {
+      usuario = await this.prisma.usuario.findUnique({ where: { email: dto.email } });
+      // El `compare` corre SIEMPRE, exista o no el correo (ver `HASH_SENUELO`).
+      isPasswordValid = await bcrypt.compare(dto.password, usuario?.password ?? HASH_SENUELO);
+    } catch (err) {
+      this.bloqueo.deshacerIntento(dto.email); // un fallo de la BD no es una contraseña equivocada
+      throw err;
+    }
+    if (!usuario || !isPasswordValid) throw new UnauthorizedException('Credenciales inválidas');
+    this.bloqueo.limpiar(dto.email);
+
+    // El estado de la cuenta solo se revela a quien YA demostró que la contraseña es suya. Antes se comprobaba
+    // primero y cualquiera podía preguntar "¿existe y está desactivada?" sin conocer nada de la cuenta, pese al
+    // comentario que decía lo contrario. El frontend detecta `codigo` para mostrar "contacta a soporte".
+    // `deletedAt` además de `activo`: `eliminar()` marca los dos, pero la baja no debe depender de que alguien
+    // recuerde apagar el otro (mismo criterio que `JwtStrategy`).
+    if (!usuario.activo || usuario.deletedAt !== null) throw new CuentaDesactivadaException();
 
     await this.prisma.usuario.update({
       where: { id: usuario.id },
@@ -172,29 +218,65 @@ export class AuthService {
 
     // Token no existe en BD (revocado, expirado o forjado).
     if (!registro) throw new UnauthorizedException('Token de refresco inválido');
-    if (registro.revokedAt) {
-      // Reutilización de un token ya rotado → posible robo. Revocamos toda
-      // la familia para invalidar cualquier token derivado.
-      await this.revocarFamilia(registro.familyId);
-      throw new UnauthorizedException('Token de refresco inválido');
-    }
     if (registro.expiresAt.getTime() < Date.now()) {
       throw new UnauthorizedException('Token de refresco inválido');
     }
 
+    // `deletedAt` además de `activo`, igual que `JwtStrategy`: la baja lógica no debe depender de que alguien
+    // recuerde apagar los dos flags (antes un usuario dado de baja podía seguir renovando su sesión).
     const usuario = await this.prisma.usuario.findUnique({ where: { id: payload.sub } });
-    if (!usuario || !usuario.activo) throw new UnauthorizedException('Token inválido');
+    if (!usuario || !usuario.activo || usuario.deletedAt !== null) {
+      throw new UnauthorizedException('Token inválido');
+    }
 
-    // Rotación: emitir un par nuevo y revocar el token usado.
-    const nuevo = await this.generateTokens(usuario, {
-      familyId: registro.familyId,
-      ipOrigen,
+    // Rotación ATÓMICA. Antes: se leía `revokedAt`, se emitía el par nuevo y SOLO DESPUÉS se marcaba el token usado:
+    // dos refresh simultáneos con el mismo token pasaban ambos la comprobación y emitían dos descendientes (la
+    // familia se bifurcaba, y cualquier reutilización posterior ya no era detectable). Ahora el reclamo
+    // (`updateMany … where revokedAt is null`) y la emisión del sucesor ocurren en UNA transacción: la petición que
+    // llega segunda espera el candado de la fila y, al entrar, ya ve el token rotado Y su sucesor registrado.
+    const rotado = await this.prisma.$transaction(async (tx) => {
+      const reclamo = await tx.refreshToken.updateMany({
+        where: { id: registro.id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      if (reclamo.count === 0) return null;
+      const nuevo = await this.generateTokens(usuario, {
+        familyId: registro.familyId,
+        ipOrigen,
+        tx,
+      });
+      await tx.refreshToken.update({
+        where: { id: registro.id },
+        data: { replacedBy: nuevo.refreshTokenId },
+      });
+      return nuevo;
     });
-    await this.prisma.refreshToken.update({
-      where: { id: registro.id },
-      data: { revokedAt: new Date(), replacedBy: nuevo.refreshTokenId },
-    });
-    return nuevo;
+    if (rotado) return rotado;
+
+    // Perdió la carrera, o el token ya estaba revocado. Se relee para saber QUÉ pasó.
+    const actual = await this.prisma.refreshToken.findUnique({ where: { id: registro.id } });
+    const hace = actual?.revokedAt ? Date.now() - actual.revokedAt.getTime() : Infinity;
+    if (actual && actual.replacedBy !== null && hace <= GRACIA_REFRESH_MS) {
+      // Fue ROTADO hace instantes (la otra pestaña / el reintento): carrera legítima. Se emite otro sucesor de la
+      // MISMA familia sin tocarla. Un token revocado por logout o por familia tiene `replacedBy` nulo y NO entra
+      // aquí: sin esa distinción, un refresh en vuelo al cerrar sesión "resucitaría" la sesión recién cerrada.
+      //
+      // Pero el token presentado puede ser el VIEJO (T0, rotado a T1) y el logout haber cerrado a T1 DESPUÉS: T0 sigue
+      // con `replacedBy` y dentro de los 10 s, y entraba por aquí a abrir una sesión nueva en una familia cerrada. En
+      // una familia viva todo token está sin revocar o rotado (revocado + `replacedBy`); uno revocado SIN `replacedBy`
+      // es un cierre deliberado (logout, `revocarFamilia`, cambio de contraseña): la familia no se reabre.
+      const cerradaAPropósito = await this.prisma.refreshToken.count({
+        where: { familyId: registro.familyId, revokedAt: { not: null }, replacedBy: null },
+      });
+      if (cerradaAPropósito === 0) {
+        return this.generateTokens(usuario, { familyId: registro.familyId, ipOrigen });
+      }
+    }
+
+    // Reutilización de un token ya rotado fuera de la ventana (o revocado a propósito) → posible robo. Se revoca
+    // toda la familia para invalidar cualquier token derivado.
+    await this.revocarFamilia(registro.familyId);
+    throw new UnauthorizedException('Token de refresco inválido');
   }
 
   /**
@@ -207,7 +289,7 @@ export class AuthService {
     usuarioId: number,
     tiendaId: number,
   ): Promise<{ kioskToken: string; expiresAt: string }> {
-    const expiresIn = this.configService.get<string>('KIOSK_TOKEN_EXPIRES_IN') || '5m';
+    const expiresIn = this.configService.get<string>('app.kioskTokenExpiresIn') || '5m';
     const payload: KioskTokenPayload = { sub: usuarioId, kind: 'kiosk', tiendaId };
     const kioskToken = this.jwtService.sign(payload, {
       expiresIn: expiresIn as any,
@@ -283,20 +365,36 @@ export class AuthService {
     await this.bodegaPresencia.entro(usuario.id, usuario.tiendaId);
   }
 
-  async logout(userId: number, _token: string, rol?: RolUsuario): Promise<{ message: string }> {
-    // Revocar todos los refresh tokens activos del usuario (cierre de sesión
-    // en todos los dispositivos). El access token expira solo en 1h.
+  /**
+   * Cierra la sesión DE ESTE DISPOSITIVO: revoca la familia del refresh token que el navegador presenta (la cookie
+   * httpOnly). Antes revocaba los refresh tokens de TODOS los dispositivos del usuario: cerrar sesión en la tablet
+   * cerraba también el portátil y el teléfono. Sin cookie (o con una que no es suya) se cae al valor SEGURO: revocar
+   * todos. El access token expira solo (1 h).
+   */
+  async logout(
+    userId: number,
+    _token: string,
+    rol?: RolUsuario,
+    refreshToken?: string,
+  ): Promise<{ message: string }> {
+    const familyId = refreshToken ? await this.familiaDe(refreshToken, userId) : null;
     await this.prisma.refreshToken.updateMany({
-      where: { usuarioId: userId, revokedAt: null },
+      where: familyId
+        ? { usuarioId: userId, familyId, revokedAt: null }
+        : { usuarioId: userId, revokedAt: null },
       data: { revokedAt: new Date() },
     });
     // Oct 2026: un bodeguero que sale deja la TV y regresa a la cola lo que traía. Va DESPUÉS de
     // revocar los tokens (así un latido rezagado no lo revive) y nunca impide cerrar sesión: si
     // falla, el latido sigue guardado y el barrido de inactividad lo saca igual.
     // F3.5: el ADMIN que cubrió un puesto en bodega también devuelve a la cola lo que traía.
+    //
+    // Solo si no queda OTRA sesión viva: el cierre es por dispositivo, y un bodeguero que surte en la tablet B y
+    // cierra el teléfono A no se fue; sacarlo devolvía a la cola, sin asignar, lo que sigue surtiendo en B.
     if (rol === RolUsuario.BODEGA || rol === RolUsuario.ADMIN) {
       await this.bodegaPresencia
-        .salio(userId)
+        .haySesionViva(userId)
+        .then((otra) => (otra ? undefined : this.bodegaPresencia.salio(userId)))
         .catch((err: Error) =>
           this.logger.error(`Salida de bodega falló (usuario ${userId}): ${err.message}`),
         );
@@ -328,21 +426,42 @@ export class AuthService {
     return result as Omit<Usuario, 'password'>;
   }
 
-  async changePassword(userId: number, dto: ChangePasswordDto): Promise<{ message: string }> {
+  /**
+   * Cambia la contraseña y CIERRA las demás sesiones: quien tenía una sesión robada la conservaba (cada rotación renueva
+   * 7 días) después de que la víctima cambiara su clave justo para sacarlo. Se conserva la de ESTE dispositivo (la
+   * familia de la cookie): si no, quien cambia su clave en Configuración se encontraría sin sesión a la hora siguiente.
+   * Sin cookie válida se cierran todas (valor seguro). El access token de los otros dispositivos vence solo (1 h).
+   */
+  async changePassword(
+    userId: number,
+    dto: ChangePasswordDto,
+    refreshToken?: string,
+  ): Promise<{ message: string }> {
     const usuario = await this.prisma.usuario.findUnique({ where: { id: userId } });
     if (!usuario) throw new UnauthorizedException('Usuario no encontrado');
     const ok = await bcrypt.compare(dto.oldPassword, usuario.password);
-    if (!ok) throw new UnauthorizedException('La contraseña actual es incorrecta');
+    // 400 y no 401: el usuario SÍ está autenticado; es un dato inválido. Con 401 el cliente lo leía como «token vencido»,
+    // rotaba el refresh token y reintentaba antes de mostrar el mensaje (y con un fallo de red mostraba otro).
+    if (!ok) throw new BadRequestException('La contraseña actual es incorrecta');
     await this.prisma.usuario.update({
       where: { id: userId },
       data: { password: await bcrypt.hash(dto.newPassword, 10) },
+    });
+    const esteDispositivo = refreshToken ? await this.familiaDe(refreshToken, userId) : null;
+    await this.prisma.refreshToken.updateMany({
+      where: {
+        usuarioId: userId,
+        revokedAt: null,
+        ...(esteDispositivo ? { NOT: { familyId: esteDispositivo } } : {}),
+      },
+      data: { revokedAt: new Date() },
     });
     return { message: 'Contraseña actualizada exitosamente' };
   }
 
   private async generateTokens(
     usuario: Usuario,
-    opts?: { familyId?: string; ipOrigen?: string },
+    opts?: { familyId?: string; ipOrigen?: string; tx?: Prisma.TransactionClient },
   ): Promise<AuthResponse> {
     const expiresIn = this.configService.get<string>('app.jwtExpiresIn') || '1h';
     const refreshExpiresIn = this.configService.get<string>('app.jwtRefreshExpiresIn') || '7d';
@@ -361,7 +480,7 @@ export class AuthService {
       { expiresIn: refreshExpiresIn as any },
     );
     const familyId = opts?.familyId ?? randomUUID();
-    const creado = await this.prisma.refreshToken.create({
+    const creado = await (opts?.tx ?? this.prisma).refreshToken.create({
       data: {
         usuarioId: usuario.id,
         tokenHash: this.hashToken(refreshToken),
@@ -396,6 +515,15 @@ export class AuthService {
         telefono: usuario.telefono ?? undefined,
       },
     };
+  }
+
+  /** La familia de un refresh token SI es de este usuario; `null` en cualquier otro caso (no se revoca a ciegas). */
+  private async familiaDe(refreshToken: string, userId: number): Promise<string | null> {
+    const registro = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash: this.hashToken(refreshToken) },
+      select: { familyId: true, usuarioId: true },
+    });
+    return registro && registro.usuarioId === userId ? registro.familyId : null;
   }
 
   /** SHA256 del token en claro. Se guarda el hash, no el token. */
@@ -548,7 +676,7 @@ export class AuthService {
     const hashedNew = await bcrypt.hash(dto.newPassword, 10);
 
     // Marcar token como usado + cambiar password en una transacción.
-    await this.prisma.$transaction([
+    const [, actualizado] = await this.prisma.$transaction([
       this.prisma.passwordResetToken.update({
         where: { id: registro.id },
         data: { usedAt: new Date() },
@@ -557,7 +685,15 @@ export class AuthService {
         where: { id: registro.usuarioId },
         data: { password: hashedNew },
       }),
+      // Se restablece justo cuando se perdió el control de la cuenta: toda sesión abierta (la de un ladrón incluida)
+      // se cierra. El usuario inicia sesión con la clave nueva.
+      this.prisma.refreshToken.updateMany({
+        where: { usuarioId: registro.usuarioId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
     ]);
+    // Quien restablece su contraseña con el token del correo es el dueño: se libera el bloqueo por intentos fallidos.
+    if (actualizado?.email) this.bloqueo.limpiar(actualizado.email);
 
     this.logger.log(`Contraseña restablecida para usuario ${registro.usuarioId}`);
 

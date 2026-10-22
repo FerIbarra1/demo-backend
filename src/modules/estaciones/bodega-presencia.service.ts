@@ -6,6 +6,9 @@ import { pausarReloj } from '../pedidos/core/atencion.util';
 import { INACTIVIDAD_ESTACION_MS } from '../pedidos/core/estacion.util';
 import { ESTADOS_OCUPAN_SLOT_BODEGA } from '../pedidos/core/pedido-limits';
 
+/** Una sesión es «viva» si su refresh token se emitió hace menos de esto: el access token dura 1 h y se renueva rotándolo; 15 min de margen. */
+const SESION_VIVA_MS = 75 * 60 * 1000;
+
 /**
  * Oct 2026: la presencia de un bodeguero en la TV de bodega.
  *
@@ -44,12 +47,30 @@ export class BodegaPresenciaService {
   }
 
   /**
+   * ¿Tiene el usuario una sesión VIVA en algún dispositivo? Un refresh token sin revocar y EMITIDO hace poco: el access
+   * token dura 1 h y la app rota el refresh al renovarlo, así que un dispositivo con la app abierta tiene un token
+   * reciente; uno cuya pestaña se cerró sin cerrar sesión lo tiene de hace horas (aunque siga «sin revocar» 7 días).
+   */
+  async haySesionViva(usuarioId: number, ahora: Date = new Date()): Promise<boolean> {
+    const sesiones = await this.prisma.refreshToken.count({
+      where: {
+        usuarioId,
+        revokedAt: null,
+        expiresAt: { gt: ahora },
+        createdAt: { gt: new Date(ahora.getTime() - SESION_VIVA_MS) },
+      },
+    });
+    return sesiones > 0;
+  }
+
+  /**
    * Latido de un bodeguero. Si ya estaba en línea solo renueva la marca; si NO (el barrido lo sacó
    * por una pausa de red larga) lo vuelve a poner en línea y avisa a la TV.
    *
-   * Revivir exige una sesión abierta: un latido rezagado que llega DESPUÉS de cerrar sesión no
-   * puede volver a poner en la TV a quien ya se fue. Cerrar sesión revoca sus refresh tokens, y
-   * ahí se ve.
+   * Revivir exige una sesión VIVA (`haySesionViva`): un latido rezagado que llega DESPUÉS de cerrar sesión no
+   * puede volver a poner en la TV a quien ya se fue. Cerrar sesión revoca la familia de ese dispositivo, y ahí se ve.
+   * «Viva» no es «sin revocar»: una pestaña que se cerró sin cerrar sesión deja su familia sin revocar hasta 7 días,
+   * y con ese criterio un latido rezagado revivía a quien ya no estaba.
    */
   async latido(usuarioId: number, ahora: Date = new Date()) {
     const u = await this.prisma.usuario.findUnique({
@@ -59,12 +80,7 @@ export class BodegaPresenciaService {
     if (!u) return;
 
     const estabaEnLinea = enLinea(u.ultimoHeartbeat, ahora);
-    if (!estabaEnLinea) {
-      const sesiones = await this.prisma.refreshToken.count({
-        where: { usuarioId, revokedAt: null, expiresAt: { gt: ahora } },
-      });
-      if (sesiones === 0) return;
-    }
+    if (!estabaEnLinea && !(await this.haySesionViva(usuarioId, ahora))) return;
 
     await this.prisma.usuario.update({
       where: { id: usuarioId },

@@ -9,7 +9,8 @@ import { CrearUsuarioDto, ROLES_EMPLEADO } from './usuarios.dto';
 const base = {
   email: 'gerente@tienda.com',
   nombre: 'Gerente',
-  password: '123456',
+  // Cumple la política de contraseñas (8 caracteres, letra y número); '123456' ya no vale para un alta.
+  password: 'Clave-gerente1',
   rol: 'GERENTE',
 };
 const errores = async (body: object) => validate(plainToInstance(CrearUsuarioDto, body));
@@ -30,5 +31,10 @@ describe('Alta de un GERENTE', () => {
 
   it('Tesorería sigue siendo la única que no la lleva', async () => {
     expect(await errores({ ...base, rol: 'TESORERIA' })).toHaveLength(0);
+  });
+
+  it('la contraseña de las cuentas demo ("123456") ya no sirve para un alta', async () => {
+    const e = await errores({ ...base, tiendaId: 2, password: '123456' });
+    expect(e.map((x) => x.property)).toEqual(['password']);
   });
 });

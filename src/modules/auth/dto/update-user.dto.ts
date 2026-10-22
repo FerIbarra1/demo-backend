@@ -1,4 +1,5 @@
 import { IsString, IsOptional, MinLength, Matches } from 'class-validator';
+import { PASSWORD_MENSAJE, PASSWORD_MIN, PASSWORD_PATRON } from '../../../common/password-policy';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateUserDto {
@@ -28,8 +29,9 @@ export class ChangePasswordDto {
   @IsString()
   oldPassword: string;
 
-  @ApiPropertyOptional({ example: 'passwordNew123', minLength: 6 })
+  @ApiPropertyOptional({ example: 'passwordNew123', minLength: 8 })
   @IsString()
-  @MinLength(6)
+  @MinLength(PASSWORD_MIN, { message: PASSWORD_MENSAJE })
+  @Matches(PASSWORD_PATRON, { message: PASSWORD_MENSAJE })
   newPassword: string;
 }
