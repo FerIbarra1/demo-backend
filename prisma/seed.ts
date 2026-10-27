@@ -284,13 +284,26 @@ async function main() {
       'El seed es destructivo y no puede ejecutarse con NODE_ENV=production.',
     );
   }
-  // Segunda guardia: si DATABASE_URL no apunta a localhost, es una BD remota.
+  // Segunda guardia: si DATABASE_URL no apunta a localhost, es una BD remota. Solo se permite con una salida
+  // EXPLÍCITA: `SEED_BD_REMOTA_HOST` debe ser exactamente el host de `DATABASE_URL` (p. ej. el Neon de la demo). Un
+  // booleano (`=1`) bastaría para dispararse por accidente contra otra BD si queda en el entorno; nombrar el host, no.
+  // Antes no había salida y `DESPLIEGUE.md` mandaba correr el seed contra Neon: el seed se negaba siempre.
   const dbUrl = process.env.DATABASE_URL || '';
   if (!/localhost|127\.0\.0\.1/.test(dbUrl)) {
-    throw new Error(
-      'El seed sólo puede ejecutarse contra una base de datos local. ' +
-        'DATABASE_URL no apunta a localhost.',
-    );
+    let host = '';
+    try {
+      host = new URL(dbUrl).hostname;
+    } catch {
+      // URL ilegible: host vacío, no coincide con nada.
+    }
+    if (!host || process.env.SEED_BD_REMOTA_HOST !== host) {
+      throw new Error(
+        'El seed sólo puede ejecutarse contra una base de datos local. ' +
+          'DATABASE_URL no apunta a localhost. Para sembrar una BD remota de DEMO (borra pedidos, kioskos y ' +
+          'ventanillas), pon SEED_BD_REMOTA_HOST con el host exacto de DATABASE_URL.',
+      );
+    }
+    console.warn(`⚠️  Sembrando una BD REMOTA (${host}) por SEED_BD_REMOTA_HOST.\n`);
   }
 
   console.log('🌱 Iniciando seed de datos...\n');

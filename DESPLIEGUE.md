@@ -51,8 +51,10 @@ Sin `NEXT_PUBLIC_API_URL` el build **falla** a propósito.
 
 1. **Migrar Neon desde tu máquina** (con la conexión directa), en la rama que vas a desplegar:
    `DATABASE_URL="<directa>" DIRECT_DATABASE_URL="<directa>" pnpm exec prisma migrate deploy`
-2. **Datos demo** (una vez, solo en la BD de la demo; el seed borra y recrea datos):
-   `DATABASE_URL="<directa>" DIRECT_DATABASE_URL="<directa>" pnpm prisma:seed`
+2. **Datos demo** (una vez, solo en la BD de la demo; el seed borra pedidos, kioskos y ventanillas, y actualiza catálogo y
+   usuarios por su clave natural). El seed se niega por defecto contra una BD que no sea localhost; para una BD remota hay que
+   nombrar su host (el de `<directa>`, sin puerto ni ruta):
+   `SEED_BD_REMOTA_HOST="<host-directo>" DATABASE_URL="<directa>" DIRECT_DATABASE_URL="<directa>" pnpm prisma:seed`
 3. **Render:** New → Blueprint (usa `render.yaml`) o Web Service manual: runtime *Docker*, `Dockerfile`, health check
    `/api/health`, plan Free; completa las variables. Deploy.
 4. **Dominios:** en Render, `api.tudominio.com` (CNAME); en Vercel, `app.tudominio.com`. Después ajusta `FRONTEND_URL`.
